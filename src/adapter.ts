@@ -1,8 +1,8 @@
 import { LlmAdapter, type ContentBlock, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type PreparedAdapterCall, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { createHash } from 'node:crypto'
-import { classifyFailure, fromManagedId, managedId, mergeSelection, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRef } from './domain.js'
+import { createHash, randomUUID } from 'node:crypto'
+import { classifyFailure, fromManagedId, managedId, mergeSelection, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRecord, type ModelRef } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
 
@@ -59,21 +59,24 @@ export class ManagedAdapter extends LlmAdapter {
       const delegated = this.service.isDelegatedSession(session)
       const override = delegated ? undefined : this.service.activeSelection(session)
       const selection = delegated ? {} : mergeSelection(snapshot.config.mode === 'manual' ? snapshot.config.manual : snapshot.config.auto, override)
-      return this.streamWithSnapshot(options, snapshot.config, candidates, selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
+      return this.streamWithSnapshot(options, snapshot.config, snapshot.models, candidates, selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
     } }
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const config = this.service.snapshot().config
+    const snapshot = this.service.snapshot()
+    const config = snapshot.config
     const session = options.sessionId as string || 'one-shot'
     const delegated = this.service.isDelegatedSession(session)
     const override = delegated ? undefined : this.service.activeSelection(session)
     const selection = delegated ? {} : mergeSelection(config.mode === 'manual' ? config.manual : config.auto, override)
-    yield* this.streamWithSnapshot(options, config, requestedModel(options.model, config), selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
+    yield* this.streamWithSnapshot(options, config, snapshot.models, requestedModel(options.model, config), selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
   }
 
-  private async *streamWithSnapshot(options: GenerateOptions, config: ManagerConfig, candidates: ModelRef[], selection: ReturnType<ModelManagerService['activeSelection']>, lockedParams: boolean): AsyncIterable<StreamChunk> {
+  private async *streamWithSnapshot(options: GenerateOptions, config: ManagerConfig, models: ModelRecord[], candidates: ModelRef[], selection: ReturnType<ModelManagerService['activeSelection']>, lockedParams: boolean): AsyncIterable<StreamChunk> {
     const session = options.sessionId as string || 'one-shot'
+    const managedRequestId = randomUUID()
+    const turn = this.service.activeTurn(session)
     const collect = (blocks: ContentBlock[]): ImageAttachmentRef[] => blocks.flatMap(block => block.type === 'image' ? [block.attachment] : block.type === 'tool-result' ? collect(block.content) : [])
     const allImages = options.messages.flatMap(m => collect(m.content))
     const lastUser = [...options.messages].reverse().find(message => message.role === 'user')
@@ -92,7 +95,7 @@ export class ManagedAdapter extends LlmAdapter {
       if (contextOnly && !longContextCandidates.some(ref => modelKey(ref) === modelKey(candidate))) continue
       if ((this.cooldown.get(modelKey(candidate)) ?? 0) > Date.now()) continue
       if (previousProvider === candidate.providerId) continue
-      const model = this.service.model(candidate)
+      const model = models.find(item => modelKey(item) === modelKey(candidate))
       if (!model) continue
       tried.add(modelKey(candidate))
       const nativeImage = config.models[modelKey(candidate)]?.capability?.image ?? model.nativeImage
@@ -113,7 +116,7 @@ export class ManagedAdapter extends LlmAdapter {
         toWire.set(name, wire)
         fromWire.set(wire, name)
       }
-      if (toWire.size) await this.service.log({ session, action: 'tool-name-mapping', provider: candidate.providerId, model: candidate.modelId, names: [...toWire.keys()] })
+      if (toWire.size) await this.service.log({ session, turn, managedRequestId, action: 'tool-name-mapping', provider: candidate.providerId, model: candidate.modelId, names: [...toWire.keys()] })
       const remapMessages = (messages: GenerateOptions['messages']) => messages.map(message => ({ ...message, content: message.content.map(block => block.type === 'tool-call' && toWire.has(block.name) ? { ...block, name: toWire.get(block.name)! } : block) }))
       const request = { ...options, provider: candidate.providerId, model: candidate.modelId, messages: prepared,
         tools: options.tools?.map(tool => toWire.has(tool.name as string) ? { ...tool, name: toWire.get(tool.name as string)! as never, description: `宿主工具 ${tool.name}。${tool.description}` } : tool),
@@ -147,7 +150,7 @@ export class ManagedAdapter extends LlmAdapter {
         }
         const failedReason = failure?.reason
         const failureInfo = failedReason && 'failure' in failedReason ? failedReason.failure : undefined
-        await this.service.log({ session, logicalProvider: MANAGED_PROVIDER, logicalModel: options.model, provider: candidate.providerId,
+        await this.service.log({ session, turn, managedRequestId, logicalProvider: MANAGED_PROVIDER, logicalModel: options.model, provider: candidate.providerId,
           model: candidate.modelId, attempt, route, effort: request.reasoningEffort, durationMs: Date.now() - started, status: failedReason?.kind ?? 'success',
           failureCode: failureInfo?.code, httpStatus: failureInfo?.status, requestId: failureInfo?.requestId, usage })
         if (!failure) return

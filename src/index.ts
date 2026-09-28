@@ -51,33 +51,38 @@ function error(res: ServerResponse, failure: unknown): void {
   json(res, /CONFLICT/.test(message) ? 409 : 400, { error: message })
 }
 
-async function verify(llm: LlmRuntime, attachments: AttachmentStore, service: ModelManagerService, ref: ModelRef, kind: Verification['kind'], signal: AbortSignal): Promise<Verification> {
+export async function verify(llm: LlmRuntime, attachments: AttachmentStore, service: ModelManagerService, ref: ModelRef, kind: Verification['kind'], signal: AbortSignal): Promise<Verification> {
   const model = service.model(ref)
   if (!model) throw new Error('模型未加载')
-  const info = await llm.resolveModelInfo(ref.providerId, ref.modelId, signal)
   const messages: GenerateOptions['messages'] = [{ id: randomUUID() as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: kind === 'image' ? '图片是什么颜色？只回答颜色。' : kind === 'tools' ? '调用提供的工具。' : '只回答 OK。' }] }]
-  if (kind === 'image') {
-    const png = probePng()
-    const attachment = await attachments.saveImage({ data: png, mediaType: 'image/png' })
-    messages[0].content.push({ type: 'image', attachment })
-  }
   const config = service.snapshot().config
   const effort = kind === 'reasoning' ? genericProviderAdapter.reasoningEffort(model, config.models[modelKey(ref)], config.manual) : undefined
   const tools = kind === 'tools' ? [{ name: 'model_manager_probe', description: '测试工具，请调用', parameters: { type: 'object', properties: {} } }] : undefined
   let output = ''
   let usedTool = false
+  let requestCount = 0
+  let thrown: unknown
   let finish: Extract<StreamChunk, { type: 'finish' }> | undefined
-  for await (const chunk of llm.stream({ provider: ref.providerId, model: ref.modelId, messages, tools, reasoningEffort: effort as never, signal })) {
-    if (chunk.type === 'text-delta') output += chunk.text
-    if (chunk.type === 'tool-call-delta' || chunk.type === 'block-end' && chunk.block.type === 'tool-call') usedTool = true
-    if (chunk.type === 'finish') finish = chunk
-  }
+  try {
+    await llm.resolveModelInfo(ref.providerId, ref.modelId, signal)
+    if (kind === 'image') {
+      const attachment = await attachments.saveImage({ data: probePng(), mediaType: 'image/png' })
+      messages[0].content.push({ type: 'image', attachment })
+    }
+    requestCount = 1
+    for await (const chunk of llm.stream({ provider: ref.providerId, model: ref.modelId, messages, tools, reasoningEffort: effort as never, signal })) {
+      if (chunk.type === 'text-delta') output += chunk.text
+      if (chunk.type === 'tool-call-delta' || chunk.type === 'block-end' && chunk.block.type === 'tool-call') usedTool = true
+      if (chunk.type === 'finish') finish = chunk
+    }
+  } catch (error) { thrown = error }
+  if (!finish && !thrown) thrown = new Error('模型流未返回结束状态')
   const failed = finish?.reason.kind === 'error' || finish?.reason.kind === 'aborted'
   const result: Verification = {
-    model: { providerId: ref.providerId, modelId: ref.modelId }, kind, status: signal.aborted ? 'cancelled' : failed ? 'rejected' : 'accepted',
-    checkedAt: new Date().toISOString(), signature: service.signature(ref, kind), requestCount: 1,
+    model: { providerId: ref.providerId, modelId: ref.modelId }, kind, status: signal.aborted ? 'cancelled' : thrown ? 'network-error' : failed ? 'rejected' : 'accepted',
+    checkedAt: new Date().toISOString(), signature: service.signature(ref, kind), requestCount,
     behavior: kind === 'tools' ? usedTool ? 'observed' : 'not-observed' : kind === 'reasoning' ? 'unknown' : kind === 'image' ? /红|red/i.test(output) ? 'observed' : 'not-observed' : output ? 'observed' : 'not-observed',
-    detail: failed ? finish?.reason.kind : kind === 'image' && !/红|red/i.test(output) ? `图像核对未通过：${output.slice(0, 120) || '无文字输出'}` : undefined,
+    detail: thrown ? String(thrown).slice(0, 160) : failed ? finish?.reason.kind : kind === 'image' && !/红|red/i.test(output) ? `图像核对未通过：${output.slice(0, 120) || '无文字输出'}` : undefined,
   }
   await service.saveVerification(result)
   return result

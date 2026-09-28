@@ -43,6 +43,22 @@ describe('宿主桥接与版本控制', () => {
       expect(second.getVisionCache('session-b:image-a:question-a')).toBeUndefined()
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
+  it('数据文件损坏时从上一份完整备份恢复', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dmm-recovery-'))
+    try {
+      const bridge = { catalog: async () => [], applyNative: async () => {} }
+      const first = new ModelManagerService(bridge, dir)
+      await first.init()
+      await first.putVisionCache('first', '原始答案')
+      await first.putVisionCache('second', '新答案')
+      await writeFile(join(dir, 'vision-cache.json'), '{broken', 'utf8')
+      const restored = new ModelManagerService(bridge, dir)
+      await restored.init()
+      expect(restored.getVisionCache('first')).toBe('原始答案')
+      expect(restored.getVisionCache('second')).toBeUndefined()
+      expect(JSON.parse(await readFile(join(dir, 'vision-cache.json'), 'utf8'))).toHaveProperty('first')
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
   it('模型配置变化后原验证证据标为过期', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dmm-evidence-'))
     try {

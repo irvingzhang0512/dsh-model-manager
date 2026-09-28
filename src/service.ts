@@ -82,6 +82,19 @@ export function resolveDataDir(profile?: string): string {
   return join(home, 'profiles', profile, 'data', 'dsh-model-manager')
 }
 
+async function readJsonWithBackup<T>(path: string): Promise<T | undefined> {
+  try { return JSON.parse(await readFile(path, 'utf8')) as T }
+  catch {
+    try {
+      const backup = `${path}.bak`
+      const value = JSON.parse(await readFile(backup, 'utf8')) as T
+      await copyFile(backup, `${path}.tmp`)
+      await rename(`${path}.tmp`, path)
+      return value
+    } catch { return undefined }
+  }
+}
+
 export class ModelManagerService {
   private config: ManagerConfig = structuredClone(DEFAULT_CONFIG)
   private revision = 0
@@ -101,18 +114,12 @@ export class ModelManagerService {
     if (stored) { validateConfig(stored); this.config = structuredClone(stored) }
     this.revision = this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.revision ?? 0
     this.models = await this.bridge.catalog()
-    try {
-      const records = JSON.parse(await readFile(join(this.dataDir, 'verification.json'), 'utf8')) as Verification[]
-      for (const record of records) this.verification.set(this.verificationKey(record.model, record.kind), record)
-    } catch { /* 首次启动或损坏时保留原文件，以空证据继续 */ }
-    try {
-      const saved = JSON.parse(await readFile(join(this.dataDir, 'overrides.json'), 'utf8')) as Record<string, { session?: Selection; nextTurn?: Selection }>
-      for (const [session, value] of Object.entries(saved)) this.overrides.set(session, value)
-    } catch { /* 首次启动 */ }
-    try {
-      const saved = JSON.parse(await readFile(join(this.dataDir, 'vision-cache.json'), 'utf8')) as Record<string, { answer: string; at: number }>
-      for (const [key, value] of Object.entries(saved)) if (value.at > Date.now() - 7 * 86400000) this.visionCache.set(key, value)
-    } catch { /* 首次启动或损坏时不复用缓存 */ }
+    const records = await readJsonWithBackup<Verification[]>(join(this.dataDir, 'verification.json'))
+    if (Array.isArray(records)) for (const record of records) this.verification.set(this.verificationKey(record.model, record.kind), record)
+    const savedOverrides = await readJsonWithBackup<Record<string, { session?: Selection; nextTurn?: Selection }>>(join(this.dataDir, 'overrides.json'))
+    if (savedOverrides) for (const [session, value] of Object.entries(savedOverrides)) this.overrides.set(session, value)
+    const savedCache = await readJsonWithBackup<Record<string, { answer: string; at: number }>>(join(this.dataDir, 'vision-cache.json'))
+    if (savedCache) for (const [key, value] of Object.entries(savedCache)) if (value.at > Date.now() - 7 * 86400000) this.visionCache.set(key, value)
   }
 
   snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] } {
@@ -184,6 +191,7 @@ export class ModelManagerService {
   }
 
   activeSelection(session: string): Selection | undefined { return this.overrides.get(session)?.active?.selection && structuredClone(this.overrides.get(session)!.active!.selection) }
+  activeTurn(session: string): number | undefined { return this.overrides.get(session)?.active?.turn }
   markDelegatedSession(session: string): void { this.delegatedSessions.add(session) }
   isDelegatedSession(session: string): boolean { return this.delegatedSessions.has(session) }
 

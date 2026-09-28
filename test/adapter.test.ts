@@ -11,13 +11,15 @@ function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: s
     stream: (request: any) => { calls.push({ ...request }); return chunks?.(request.provider, request) ?? (async function* () { yield { type: 'finish', reason: { kind: 'stop' } } })() },
   }
   const service = {
-    snapshot: () => ({ config: structuredClone(config), models: records, revision: 1 }),
+    snapshot: () => ({ config: structuredClone(config), models: structuredClone(records), revision: 1 }),
     model: (ref: any) => records.find(item => item.providerId === ref.providerId && item.modelId === ref.modelId),
     activeSelection: () => undefined,
+    activeTurn: () => 4,
     isDelegatedSession: () => false,
     log: vi.fn(async () => {}),
   }
-  return { adapter: new ManagedAdapter(llm as never, service as never, new VisionRegistry()), calls, service }
+  const vision = new VisionRegistry()
+  return { adapter: new ManagedAdapter(llm as never, service as never, vision), calls, service, vision }
 }
 
 describe('受管理请求', () => {
@@ -31,6 +33,19 @@ describe('受管理请求', () => {
     for await (const chunk of prepared.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk)
     expect(calls[0].provider).toBe('provider-a')
     expect(output.at(-1).reason.kind).toBe('stop')
+  })
+  it('准备后刷新模型目录不改变本次请求使用的模型能力', async () => {
+    const native = { ...model, nativeImage: 'yes' as const }
+    const records = [native]
+    const config = structuredClone(DEFAULT_CONFIG)
+    const { adapter, calls, service } = harness(config, undefined, records)
+    const prepared = await adapter.prepareCall('dsh-model-manager', managedId(native))
+    records.splice(0, 1, { ...native, nativeImage: 'no' })
+    service.model = () => undefined
+    const image = { type: 'image', attachment: { attachmentId: 'snapshot-image', mediaType: 'image/png', bytes: 1 } }
+    for await (const _ of prepared.stream({ provider: 'dsh-model-manager', model: managedId(native), sessionId: 'snapshot' as never, messages: [{ id: 'm', role: 'user', source: { kind: 'user' }, content: [image] }] as never })) { /* drain */ }
+    expect(calls[0].messages[0].content[0].type).toBe('image')
+    expect(service.log).toHaveBeenCalledWith(expect.objectContaining({ session: 'snapshot', turn: 4, managedRequestId: expect.any(String) }))
   })
   it('图片通过 sidecar 时保留原始附件引用并交给文字模型文字提示', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
@@ -57,6 +72,17 @@ describe('受管理请求', () => {
     config.vision.policy = 'sidecar-first'
     for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(native), sessionId: 'sidecar' as never, messages: [message] as never })) { /* drain */ }
     expect(calls[1].messages[0].content[0].type).toBe('text')
+  })
+  it('工具结果中的图片也注册为可追问附件并转换为视觉引用', async () => {
+    const config = structuredClone(DEFAULT_CONFIG)
+    config.vision = { enabled: true, policy: 'sidecar-only', target: { providerId: 'vision', modelId: 'v' } }
+    const { adapter, calls, vision } = harness(config)
+    const attachment = { attachmentId: 'tool-image', mediaType: 'image/png', bytes: 1, width: 1, height: 1 }
+    const message = { id: 'tool', role: 'tool', source: { kind: 'tool', toolCallId: 'call' }, content: [{ type: 'tool-result', toolCallId: 'call', content: [{ type: 'image', attachment }] }] }
+    for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), sessionId: 'tool-session' as never, messages: [message] as never })) { /* drain */ }
+    expect(vision.get('tool-session', 'tool-image')).toEqual(attachment)
+    expect(JSON.stringify(calls[0].messages)).toContain('[图片附件 tool-image]')
+    expect(JSON.stringify(calls[0].messages)).not.toContain('"type":"image"')
   })
   it('已有输出后失败不换模型重播', async () => {
     const config = structuredClone(DEFAULT_CONFIG)

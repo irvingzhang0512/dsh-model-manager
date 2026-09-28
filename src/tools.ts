@@ -1,5 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { GenerateOptions, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
@@ -82,18 +82,28 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
       const imageHash = createHash('sha256').update(image.data).digest('hex')
       const key = createHash('sha256').update(JSON.stringify([session, imageHash, args.question, args.region ?? '', modelKey(target), deps.service.snapshot().revision, deps.service.signature(target)])).digest('hex')
       const cached = deps.service.getVisionCache(key)
-      if (cached) return cached
+      if (cached) {
+        await deps.service.log({ action: 'vision', session, provider: target.providerId, model: target.modelId, status: 'cache-hit' })
+        return cached
+      }
       const prompt = `${args.question}${args.region ? `\n请特别关注区域：${args.region}` : ''}`
       const messages: GenerateOptions['messages'] = [{ id: `model-manager:${Date.now()}` as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: prompt }, { type: 'image', attachment: ref }] }]
-      let result = ''
-      for await (const chunk of deps.llm.stream({ provider: target.providerId, model: target.modelId, messages, signal: exec.signal, sessionId: session as never })) {
-        if (chunk.type === 'text-delta') result += chunk.text
-        if (chunk.type === 'finish' && chunk.reason.kind !== 'stop') throw new Error(`视觉调用失败：${chunk.reason.kind}`)
+      const managedRequestId = randomUUID()
+      const started = Date.now()
+      try {
+        let result = ''
+        for await (const chunk of deps.llm.stream({ provider: target.providerId, model: target.modelId, messages, signal: exec.signal, sessionId: session as never })) {
+          if (chunk.type === 'text-delta') result += chunk.text
+          if (chunk.type === 'finish' && chunk.reason.kind !== 'stop') throw new Error(`视觉调用失败：${chunk.reason.kind}`)
+        }
+        if (!result) throw new Error('视觉模型未返回可用文字')
+        await deps.service.putVisionCache(key, result)
+        await deps.service.log({ action: 'vision', session, managedRequestId, provider: target.providerId, model: target.modelId, status: 'success', durationMs: Date.now() - started })
+        return result
+      } catch (error) {
+        await deps.service.log({ action: 'vision', session, managedRequestId, provider: target.providerId, model: target.modelId, status: exec.signal.aborted ? 'aborted' : 'error', durationMs: Date.now() - started })
+        throw error
       }
-      if (!result) throw new Error('视觉模型未返回可用文字')
-      await deps.service.putVisionCache(key, result)
-      await deps.service.log({ action: 'vision', session, provider: target.providerId, model: target.modelId, status: 'success' })
-      return result
     },
   })))
 
