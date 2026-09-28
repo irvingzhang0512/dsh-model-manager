@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { appendFile, copyFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { appendFile, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
@@ -76,6 +76,7 @@ export class ModelManagerService {
   private revision = 0
   private models: ModelRecord[] = []
   private writeQueue: Promise<void> = Promise.resolve()
+  private logMaintainedAt = 0
   private verification = new Map<string, Verification>()
   private visionCache = new Map<string, { answer: string; at: number }>()
   private overrides = new Map<string, { session?: Selection; nextTurn?: Selection; active?: { turn: number; selection: Selection } }>()
@@ -103,7 +104,7 @@ export class ModelManagerService {
 
   snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] } {
     return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models),
-      verifications: [...this.verification.values()].map(value => ({ ...structuredClone(value), stale: value.signature !== this.signature(value.model) })) }
+      verifications: [...this.verification.values()].map(value => ({ ...structuredClone(value), stale: value.signature !== this.signature(value.model, value.kind) })) }
   }
 
   async refresh(): Promise<ModelRecord[]> {
@@ -178,16 +179,17 @@ export class ModelManagerService {
     if (value.nextTurn) void this.setOverride(session, 'nextTurn').catch(() => {})
   }
 
-  signature(ref: ModelRef): string {
+  signature(ref: ModelRef, kind?: Verification['kind']): string {
     const model = this.model(ref)
     const settings = this.config.models[modelKey(ref)]
-    return createHash('sha256').update(JSON.stringify({ model, settings })).digest('hex')
+    const reasoningSelection = kind === 'reasoning' ? this.config.manual : undefined
+    return createHash('sha256').update(JSON.stringify({ model, settings, reasoningSelection, providerAdapterVersion: 1 })).digest('hex')
   }
 
   verificationKey(ref: ModelRef, kind: Verification['kind']): string { return `${modelKey(ref)}:${kind}` }
   getVerification(ref: ModelRef, kind: Verification['kind']): (Verification & { stale: boolean }) | undefined {
     const evidence = this.verification.get(this.verificationKey(ref, kind))
-    return evidence && { ...evidence, stale: evidence.signature !== this.signature(ref) }
+    return evidence && { ...evidence, stale: evidence.signature !== this.signature(ref, kind) }
   }
 
   getVisionCache(key: string): string | undefined { return this.visionCache.get(key)?.answer }
@@ -223,11 +225,29 @@ export class ModelManagerService {
     this.writeQueue = this.writeQueue.catch(() => {}).then(async () => {
       const path = join(this.dataDir, 'calls.jsonl')
       const age = Date.now() - 7 * 86400000
-      try {
-        const file = await stat(path)
-        if (file.size > 50 * 1024 * 1024 || file.mtimeMs < age) await rename(path, join(this.dataDir, 'calls.previous.jsonl'))
-      } catch { /* 尚无日志 */ }
-      await appendFile(path, JSON.stringify({ time: new Date().toISOString(), ...safe }) + '\n', 'utf8')
+      const line = JSON.stringify({ time: new Date().toISOString(), ...safe }) + '\n'
+      const maxBytes = 50 * 1024 * 1024
+      let size = 0
+      try { size = (await stat(path)).size } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      if (size + Buffer.byteLength(line) > maxBytes || Date.now() - this.logMaintainedAt > 86400000) {
+        let existing = ''
+        try { existing = await readFile(path, 'utf8') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        const rows = [...existing.split('\n').filter(Boolean), line.trimEnd()].filter(row => {
+          try { return Date.parse((JSON.parse(row) as { time: string }).time) >= age } catch { return false }
+        })
+        const kept: string[] = []
+        let used = 0
+        for (const row of rows.reverse()) {
+          const bytes = Buffer.byteLength(row) + 1
+          if (used + bytes > maxBytes) break
+          kept.push(row)
+          used += bytes
+        }
+        await writeFile(`${path}.tmp`, kept.reverse().map(row => `${row}\n`).join(''), 'utf8')
+        await rename(`${path}.tmp`, path)
+        await rm(join(this.dataDir, 'calls.previous.jsonl'), { force: true })
+        this.logMaintainedAt = Date.now()
+      } else await appendFile(path, line, 'utf8')
     })
     await this.writeQueue
   }

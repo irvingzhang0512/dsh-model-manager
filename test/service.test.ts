@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_CONFIG } from '../src/domain.ts'
@@ -47,6 +47,35 @@ describe('宿主桥接与版本控制', () => {
       updated.models['["p","m"]'] = { capability: { image: 'yes' } }
       await service.update(updated, 0)
       expect(service.snapshot().verifications[0].stale).toBe(true)
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+  it('推理设置变更使推理验证过期但不污染文字证据', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dmm-reasoning-'))
+    try {
+      const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'no' as const, nativeTools: 'unknown' as const, reasoningEfforts: [{ id: 'off', name: 'Off' }], source: 'host' as const, loaded: true }
+      const service = new ModelManagerService({ catalog: async () => [model], applyNative: async () => {} }, dir)
+      await service.init()
+      await service.saveVerification({ model, kind: 'reasoning', status: 'accepted', checkedAt: '2026-01-01', signature: service.signature(model, 'reasoning'), requestCount: 1 })
+      await service.saveVerification({ model, kind: 'text', status: 'accepted', checkedAt: '2026-01-01', signature: service.signature(model, 'text'), requestCount: 1 })
+      const config = structuredClone(DEFAULT_CONFIG)
+      config.manual.thinking = 'off'
+      await service.update(config, 0)
+      expect(service.getVerification(model, 'reasoning')?.stale).toBe(true)
+      expect(service.getVerification(model, 'text')?.stale).toBe(false)
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+  it('日志清理七天前的记录并过滤敏感字段', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dmm-log-'))
+    try {
+      const old = JSON.stringify({ time: '2020-01-01T00:00:00Z', status: 'old' })
+      await writeFile(join(dir, 'calls.jsonl'), `${old}\n`, 'utf8')
+      const service = new ModelManagerService({ catalog: async () => [], applyNative: async () => {} }, dir)
+      await service.init()
+      await service.log({ status: 'new', secretKey: 'PRIVATE' })
+      const contents = await readFile(join(dir, 'calls.jsonl'), 'utf8')
+      expect(contents).toContain('"status":"new"')
+      expect(contents).not.toContain('old')
+      expect(contents).not.toContain('PRIVATE')
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
 })

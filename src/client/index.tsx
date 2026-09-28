@@ -124,10 +124,10 @@ function ManagerSection() {
   const aliases = Object.keys(draft.aliases)
   const filtered = snapshot.models.filter(model => `${model.providerId} ${model.modelId} ${model.name}`.toLowerCase().includes(modelFilter.toLowerCase()))
   return <div className="dmm-root">
-    <h2>模型管理</h2><div className="dmm-muted">管理模型声明、别名、角色和视觉辅助。原有附件上传与发送流程保持不变。</div>
+    <h2>模型管理</h2><div className="dmm-muted">管理模型声明、别名、角色和视觉辅助。原有附件上传与发送流程保持不变。目录只代表宿主已加载的模型；外部导入若尚未被宿主加载，需要先刷新宿主。</div>
     <div className="dmm-tabs">{tabs.map(item => <button key={item} aria-selected={tab === item} onClick={() => { setTab(item); if (item === '日志') void request('/logs').then(result => setLogs(result.events)).catch(error => setMessage(String(error))) }}>{item}</button>)}</div>
     {tab === '模型' && <>
-      <div className="dmm-row"><input placeholder="筛选 Provider 或模型" value={modelFilter} onChange={event => setModelFilter(event.target.value)} /><button onClick={() => void load().catch(error => setMessage(String(error)))}>刷新目录</button></div>
+      <div className="dmm-row"><input placeholder="筛选 Provider 或模型" value={modelFilter} onChange={event => setModelFilter(event.target.value)} /><button onClick={() => void request('/refresh', { method: 'POST' }).then((next: Snapshot) => { setSnapshot(next); setMessage(`目录已刷新：宿主加载 ${next.models.length} 个模型。`) }).catch(error => setMessage(String(error)))}>刷新目录</button></div>
       {filtered.map(model => <div className="dmm-card" key={`${model.providerId}:${model.modelId}`}>
         <strong>{model.name}</strong> <span className="dmm-muted">{model.providerId} / {model.modelId}</span>
         <div className="dmm-row">原生图片：{model.nativeImage}；工具：{model.nativeTools}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}</div>

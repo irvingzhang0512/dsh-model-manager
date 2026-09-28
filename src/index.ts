@@ -33,7 +33,8 @@ function trusted(req: IncomingMessage): boolean {
   if (req.headers['sec-fetch-site'] === 'cross-site') return false
   const host = req.headers.host
   const origin = req.headers.origin
-  return !origin || (!!host && new URL(origin).host === host)
+  if (!origin) return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
+  try { return !!host && new URL(origin).host === host } catch { return false }
 }
 
 async function body(req: IncomingMessage): Promise<unknown> {
@@ -74,7 +75,7 @@ async function verify(llm: LlmRuntime, attachments: AttachmentStore, service: Mo
   const failed = finish?.reason.kind === 'error' || finish?.reason.kind === 'aborted'
   const result: Verification = {
     model: { providerId: ref.providerId, modelId: ref.modelId }, kind, status: signal.aborted ? 'cancelled' : failed ? 'rejected' : 'accepted',
-    checkedAt: new Date().toISOString(), signature: service.signature(ref), requestCount: 1,
+    checkedAt: new Date().toISOString(), signature: service.signature(ref, kind), requestCount: 1,
     behavior: kind === 'tools' ? usedTool ? 'observed' : 'not-observed' : kind === 'reasoning' ? 'unknown' : kind === 'image' ? /红|red/i.test(output) ? 'observed' : 'not-observed' : output ? 'observed' : 'not-observed',
     detail: failed ? finish?.reason.kind : kind === 'image' && !/红|red/i.test(output) ? `图像核对未通过：${output.slice(0, 120) || '无文字输出'}` : undefined,
   }
@@ -155,6 +156,13 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
       json(res, 200, { verification })
     } catch (err) { if (!res.writableEnded) error(res, err) }
   } }), 'dsh-model-manager: verify route')
+
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/refresh', handler: async (req, res) => {
+    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
+    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
+    try { await service.refresh(); json(res, 200, { ...service.snapshot(), nativeRevision: ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision }) }
+    catch (err) { error(res, err) }
+  } }), 'dsh-model-manager: refresh route')
 
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/native', handler: async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }

@@ -7,13 +7,13 @@
 | 模型发现、Provider+模型双键、能力覆盖、别名 | `src/domain.ts`、`src/service.ts` | 单元测试；真实 web 宿主读取到模型目录 |
 | 原生图片、容量、输出能力写回 | `src/service.ts` 的 `HostModelBridge` | 设置桥接已接入；真实字段编辑及图片上传回归待完成 |
 | 推理档位映射 | `src/domain.ts`、`src/adapter.ts` | 非法档位拒绝和真实档位列表已测试；各 Provider 实际参数验收待完成 |
-| 指定模型文字、图片、工具、推理参数验证，批量串行与取消 | `src/index.ts`、`src/probe-image.ts`、`src/client/index.tsx` | 真实文字、图片、工具请求执行成功，图片红色答案核对通过；推理真实请求与批量 GUI 待完成 |
+| 指定模型文字、图片、工具、推理参数验证，批量串行与取消 | `src/index.ts`、`src/probe-image.ts`、`src/client/index.tsx` | 真实文字、图片、工具及 `off` 推理参数请求被接受，图片红色答案核对通过；推理内部强度不可由接口成功证明，批量 GUI 待完成 |
 | 受管理入口、Manual、每轮/会话覆盖、配置快照 | `src/adapter.ts`、`src/index.ts`、`src/service.ts` | 单元测试和真实宿主路由；浏览器会话曾遇宿主工具名拒绝，完整对话仍待验收 |
 | Auto 角色委派、并发限制、显式升级档位、角色提示 | `src/tools.ts`、`src/index.ts` | 工具和提示词已注册；真实子 Agent 分工与升级待验收 |
 | 四种视觉策略、附件引用、看图工具、关闭视觉后历史会话继续 | `src/adapter.ts`、`src/tools.ts` | 策略与历史会话单元测试；真实聊天的图片、追问、多图和工具图片待验收 |
 | 临时失败重试、Alias Fallback、429 冷却、认证隔离、部分输出保护 | `src/adapter.ts` | 回归测试覆盖临时失败、候选切换和部分输出；真实故障注入待完成 |
 | 设置页面和输入区覆盖控件 | `src/client/index.tsx` | 客户端 bundle 冒烟、真实 GUI 设置页与覆盖控件已显示 |
-| 设置版本冲突、配置文件原子替换、调用日志 | `src/service.ts` | 假宿主和单元测试；恢复/并发/滚动容量待专项验证 |
+| 设置版本冲突、配置文件原子替换、调用日志 | `src/service.ts` | 假宿主和单元测试；日志七天清理与敏感字段过滤已测试，恢复/并发/50 MB 边界待专项验证 |
 
 ## 尚未达到需求的部分
 
