@@ -4,10 +4,11 @@ import type { GenerateOptions, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { modelKey, resolveSelection, type Role } from './domain.js'
+import { managedId, modelKey, resolveSelection, type Role } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
 import type { VisionRegistry } from './adapter.js'
+import { MANAGED_PROVIDER } from './adapter.js'
 
 const roles: Role[] = ['search', 'coding', 'review', 'strong', 'vision']
 
@@ -45,7 +46,7 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
         const run = await deps.subagents.start(provider, {
           parent: exec.agent, signal: exec.signal, label: `${role}: ${args.task.slice(0, 40)}`,
           prompt: [{ type: 'text', text: `职责：${role}\n任务：${args.task}\n结果要求：${args.expected_result}` }],
-          agentOptions: { provider: model.providerId, model: model.modelId, ...(effort ? { reasoningEffort: effort as never } : {}) },
+          agentOptions: { provider: MANAGED_PROVIDER, model: managedId(model), ...(effort ? { reasoningEffort: effort as never } : {}) },
           toolFilter: { deny: ['model_manager_delegate'] },
         })
         try {

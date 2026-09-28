@@ -113,8 +113,12 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
   ctx.effect(() => ctx.on('llm/adapters-updated', () => { if (ready) void service.refresh().catch(() => {}) }), 'dsh-model-manager: directory')
   ctx.effect(() => ctx.on('agent/request', async (payload, next) => {
     const current = await next()
-    if (!ready || payload.agent.session.header.parentSession) return current
+    if (!ready) return current
     const session = payload.agent.session.id as string
+    if (payload.agent.session.header.parentSession) {
+      if (current.provider === MANAGED_PROVIDER) service.markDelegatedSession(session)
+      return current
+    }
     const selection = service.effectiveSelection(session, payload.turn)
     if (current.provider === MANAGED_PROVIDER) return current
     const config = service.snapshot().config

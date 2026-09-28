@@ -1,7 +1,21 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { ManagerConfig, ModelRecord, ModelRef, Role, Tier, Verification } from '../domain.js'
 
-export const inject = ['slots']
+export const inject = ['slots', 'modelDirectories']
+type ModelDirectory = { load(): Promise<{ current: { provider: string; model: string } | null }>; select(selection: { provider: string; model: string }): Promise<void> }
+type ModelDirectories = { directoryFor(sessionId: string): ModelDirectory }
+const managedProvider = 'dsh-model-manager'
+function managedModel(target: ModelRef | string): string {
+  if (typeof target === 'string') return `alias:${target.slice(1)}`
+  const bytes = new TextEncoder().encode(JSON.stringify([target.providerId, target.modelId]))
+  return btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+async function selectManaged(directory: ModelDirectory, target?: ModelRef | string, force = false): Promise<void> {
+  const current = (await directory.load()).current
+  if (!target && (!force || !current || current.provider === managedProvider)) return
+  const model = target ? managedModel(target) : managedModel({ providerId: current!.provider, modelId: current!.model })
+  if (current?.provider !== managedProvider || current.model !== model) await directory.select({ provider: managedProvider, model })
+}
 type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] }
 type Tab = '模型' | '别名与推理配置' | 'Manual/Auto' | '视觉' | '可靠性' | '验证' | '日志'
 const tabs: Tab[] = ['模型', '别名与推理配置', 'Manual/Auto', '视觉', '可靠性', '验证', '日志']
@@ -94,7 +108,7 @@ function ManagerSection() {
   const save = async () => {
     if (!snapshot || !draft) return
     setBusy(true)
-    try { const next = await request('', { method: 'PUT', body: JSON.stringify({ revision: snapshot.revision, config: draft }) }) as Snapshot; setSnapshot(next); setDraft(structuredClone(next.config)); setMessage('已保存，后续请求使用新配置。') }
+    try { const next = await request('', { method: 'PUT', body: JSON.stringify({ revision: snapshot.revision, config: draft }) }) as Snapshot; setSnapshot(next); setDraft(structuredClone(next.config)); window.dispatchEvent(new Event('dmm:config')); setMessage('已保存，后续请求使用新配置。') }
     catch (error) { setMessage(`${String(error)}。若配置冲突，请重新加载。`) }
     finally { setBusy(false) }
   }
@@ -154,7 +168,7 @@ function ManagerSection() {
   </div>
 }
 
-function ComposerStatus({ sessionId }: { sessionId?: string }) {
+function ComposerStatus({ sessionId, modelDirectories }: { sessionId?: string; modelDirectories: ModelDirectories }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [selection, setSelection] = useState<ModelRef | string>()
   const [thinking, setThinking] = useState<'inherit' | 'auto' | 'off'>('inherit')
@@ -162,21 +176,36 @@ function ComposerStatus({ sessionId }: { sessionId?: string }) {
   const [maxOutputTokens, setMaxOutputTokens] = useState('')
   const [scope, setScope] = useState<'session' | 'nextTurn'>('nextTurn')
   const [state, setState] = useState('')
-  useEffect(() => { void request('').then((next: Snapshot) => setSnapshot(next)).catch(() => {}) }, [])
+  useEffect(() => {
+    let active = true
+    const refresh = async () => {
+      const next = await request('') as Snapshot
+      if (!active) return
+      setSnapshot(next)
+      if (!sessionId) return
+      const configured = next.config[next.config.mode].target
+      if (configured || next.config.vision.enabled) await selectManaged(modelDirectories.directoryFor(sessionId), configured, next.config.vision.enabled)
+    }
+    void refresh().catch(error => { if (active) setState(String(error)) })
+    const onConfig = () => { void refresh().catch(error => { if (active) setState(String(error)) }) }
+    window.addEventListener('dmm:config', onConfig)
+    return () => { active = false; window.removeEventListener('dmm:config', onConfig) }
+  }, [sessionId, modelDirectories])
   if (!snapshot) return <span className="dmm-composer">模型管理…</span>
   const aliases = Object.keys(snapshot.config.aliases)
   const save = async (clear = false) => {
     if (!sessionId) { setState('无法获取会话 ID'); return }
     try {
       await request('/overrides', { method: 'PUT', body: JSON.stringify({ sessionId, scope, ...(clear ? {} : { selection: { target: selection, thinking, tier, ...(maxOutputTokens ? { maxOutputTokens: Number(maxOutputTokens) } : {}) } }) }) })
+      if (!clear) await selectManaged(modelDirectories.directoryFor(sessionId), selection ?? snapshot.config[snapshot.config.mode].target, true)
       setState(clear ? '已清除' : scope === 'nextTurn' ? '本轮覆盖已设置' : '会话覆盖已设置')
     } catch (error) { setState(String(error)) }
   }
   return <details className="dmm-composer"><summary>模型管理 · {snapshot.config.mode}{state ? ` · ${state}` : ''}</summary><div className="dmm-card"><div className="dmm-row"><SelectModel value={selection} models={snapshot.models} aliases={aliases} onChange={setSelection} /><ThinkingSelect value={thinking} offAvailable={supportsOff(selection, snapshot.config, snapshot.models)} onChange={value => { setThinking(value); if (value === 'off') setTier('auto') }} /><select aria-label="本轮推理档位" value={tier} onChange={event => setTier(event.target.value as Tier | 'inherit')}><option value="inherit">推理继承</option>{tiers.map(item => <option key={item} disabled={thinking === 'off' && item !== 'auto'}>{item}</option>)}</select><input aria-label="本轮输出上限" type="number" min="1" placeholder="输出上限" value={maxOutputTokens} onChange={event => setMaxOutputTokens(event.target.value)} /><select value={scope} onChange={event => setScope(event.target.value as 'session' | 'nextTurn')}><option value="nextTurn">本轮</option><option value="session">会话</option></select><button onClick={() => void save()}>应用</button><button onClick={() => void save(true)}>清除</button></div></div></details>
 }
 
-export function apply(ctx: { slots: { inject(name: string, register: () => () => void): void; register(options: { name: string; id: string; order: number; label?: () => string; inject?: (sessionId: string) => { sessionId: string } }, component: (props: any) => React.ReactElement): () => void } }): void {
+export function apply(ctx: { modelDirectories: ModelDirectories; slots: { inject(name: string, register: () => () => void): void; register(options: { name: string; id: string; order: number; label?: () => string; inject?: (sessionId: string) => { sessionId: string } }, component: (props: any) => React.ReactElement): () => void } }): void {
   injectStyle()
   ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'model-manager', order: 12, label: () => '模型管理' }, ManagerSection))
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'model-manager-status', order: 60, label: () => '模型管理模式', inject: (sessionId: string) => ({ sessionId }) }, ComposerStatus))
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'model-manager-status', order: 60, label: () => '模型管理模式', inject: (sessionId: string) => ({ sessionId }) }, (props: { sessionId?: string }) => <ComposerStatus {...props} modelDirectories={ctx.modelDirectories} />))
 }

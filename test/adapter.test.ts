@@ -14,6 +14,7 @@ function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: s
     snapshot: () => ({ config: structuredClone(config), models: [model, fallbackModel], revision: 1 }),
     model: (ref: any) => [model, fallbackModel].find(item => item.providerId === ref.providerId && item.modelId === ref.modelId),
     activeSelection: () => undefined,
+    isDelegatedSession: () => false,
     log: vi.fn(async () => {}),
   }
   return { adapter: new ManagedAdapter(llm as never, service as never, new VisionRegistry()), calls, service }
@@ -116,5 +117,31 @@ describe('受管理请求', () => {
     for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), messages: [] })) output.push(chunk)
     expect(calls.map(call => call.reasoningEffort)).toEqual(['low', undefined])
     expect(output.at(-1).reason.kind).toBe('stop')
+  })
+  it('受管理请求映射 Provider 不接受的工具名称并还原模型调用', async () => {
+    const { adapter, calls, service } = harness(structuredClone(DEFAULT_CONFIG), (_provider, request) => (async function* () {
+      yield { type: 'tool-call-delta', index: 0, id: 'call-1', name: request.tools[1].name, argumentsDelta: '{}' }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'call-1', name: request.tools[1].name, arguments: '{}' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })())
+    const tools = [{ name: 'valid_tool', description: 'ok', parameters: {} }, { name: 'invalid.tool', description: 'bad', parameters: {} }]
+    const output = []
+    for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), messages: [], tools } as never)) output.push(chunk)
+    expect(calls[0].tools[0].name).toBe('valid_tool')
+    expect(calls[0].tools[1].name).toMatch(/^dmm_[a-f0-9]+$/)
+    expect(output[0].name).toBe('invalid.tool')
+    expect(output[1].block.name).toBe('invalid.tool')
+    expect(service.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'tool-name-mapping', names: ['invalid.tool'] }))
+  })
+  it('托管子任务保留角色推理档位，不继承主 Agent 的 Manual 参数', async () => {
+    const config = structuredClone(DEFAULT_CONFIG)
+    config.manual.maxOutputTokens = 512
+    config.manual.tier = 'fast'
+    config.models['["provider-a","text"]'] = { tiers: { fast: 'low' } }
+    const { adapter, calls, service } = harness(config)
+    service.isDelegatedSession = () => true
+    for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), sessionId: 'child' as never, messages: [], reasoningEffort: 'high' as never })) { /* drain */ }
+    expect(calls[0].reasoningEffort).toBe('high')
+    expect(calls[0].maxTokens).toBeUndefined()
   })
 })

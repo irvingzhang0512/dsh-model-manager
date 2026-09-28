@@ -78,4 +78,25 @@ describe('宿主桥接与版本控制', () => {
       expect(contents).not.toContain('PRIVATE')
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
+  it('同名模型验证与并发会话覆盖互不串用', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dmm-isolation-'))
+    try {
+      const service = new ModelManagerService({ catalog: async () => [], applyNative: async () => {} }, dir)
+      await service.init()
+      const first = { providerId: 'first', modelId: 'same' }
+      const second = { providerId: 'second', modelId: 'same' }
+      await service.saveVerification({ model: first, kind: 'text', status: 'accepted', checkedAt: '2026-01-01', signature: service.signature(first), requestCount: 1 })
+      expect(service.getVerification(first, 'text')?.status).toBe('accepted')
+      expect(service.getVerification(second, 'text')).toBeUndefined()
+      await service.setOverride('session-a', 'nextTurn', { maxOutputTokens: 128 })
+      await service.setOverride('session-b', 'nextTurn', { maxOutputTokens: 512 })
+      expect(service.effectiveSelection('session-a', 1).maxOutputTokens).toBe(128)
+      expect(service.effectiveSelection('session-b', 1).maxOutputTokens).toBe(512)
+      expect(service.effectiveSelection('session-a', 1).maxOutputTokens).toBe(128)
+      service.endTurn('session-a', 1)
+      expect(service.effectiveSelection('session-a', 2).maxOutputTokens).toBeUndefined()
+      expect(service.effectiveSelection('session-b', 1).maxOutputTokens).toBe(512)
+      await service.flush()
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
 })

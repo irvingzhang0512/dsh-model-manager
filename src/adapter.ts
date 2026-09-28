@@ -1,6 +1,7 @@
 import { LlmAdapter, type ContentBlock, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type PreparedAdapterCall, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { createHash } from 'node:crypto'
 import { classifyFailure, fromManagedId, managedId, mergeSelection, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRef } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
@@ -55,8 +56,9 @@ export class ManagedAdapter extends LlmAdapter {
     const model: LlmResolvedModelInfo = { ...info, provider, id, name: id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
     return { model, stream: (options: GenerateOptions) => {
       const session = options.sessionId as string || 'one-shot'
-      const override = this.service.activeSelection(session)
-      const selection = mergeSelection(snapshot.config.mode === 'manual' ? snapshot.config.manual : snapshot.config.auto, override)
+      const delegated = this.service.isDelegatedSession(session)
+      const override = delegated ? undefined : this.service.activeSelection(session)
+      const selection = delegated ? {} : mergeSelection(snapshot.config.mode === 'manual' ? snapshot.config.manual : snapshot.config.auto, override)
       return this.streamWithSnapshot(options, snapshot.config, candidates, selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
     } }
   }
@@ -64,8 +66,9 @@ export class ManagedAdapter extends LlmAdapter {
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const config = this.service.snapshot().config
     const session = options.sessionId as string || 'one-shot'
-    const override = this.service.activeSelection(session)
-    const selection = mergeSelection(config.mode === 'manual' ? config.manual : config.auto, override)
+    const delegated = this.service.isDelegatedSession(session)
+    const override = delegated ? undefined : this.service.activeSelection(session)
+    const selection = delegated ? {} : mergeSelection(config.mode === 'manual' ? config.manual : config.auto, override)
     yield* this.streamWithSnapshot(options, config, requestedModel(options.model, config), selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
   }
 
@@ -95,11 +98,28 @@ export class ManagedAdapter extends LlmAdapter {
       const nativeImage = config.models[modelKey(candidate)]?.capability?.image ?? model.nativeImage
       const route = allImages.length && config.vision.enabled ? visionRoute(config.vision.policy, nativeImage, !!config.vision.target) : nativeImage === 'yes' ? 'native' : allImages.length ? historicalOnly ? 'history' : 'error' : 'native'
       if (route === 'error') throw new Error('当前模型不支持图片，且视觉辅助不可用')
-      const effort = genericProviderAdapter.reasoningEffort(model, config.models[modelKey(candidate)], selection ?? {})
+      const effort = this.service.isDelegatedSession(session) ? options.reasoningEffort : genericProviderAdapter.reasoningEffort(model, config.models[modelKey(candidate)], selection ?? {})
       const prepared = route === 'sidecar' || route === 'history' ? this.sidecarMessages(options.messages, route === 'history') : options.messages
+      const toWire = new Map<string, string>()
+      const fromWire = new Map<string, string>()
+      const names = [...(options.tools?.map(tool => tool.name as string) ?? []), ...options.messages.flatMap(message => message.content.filter(block => block.type === 'tool-call').map(block => block.name))]
+      const reserved = new Set(names)
+      for (const name of names) {
+        if (/^[a-zA-Z0-9_-]+$/.test(name)) continue
+        if (toWire.has(name)) continue
+        let wire = `dmm_${createHash('sha256').update(name).digest('hex').slice(0, 24)}`
+        while (reserved.has(wire)) wire += '_'
+        reserved.add(wire)
+        toWire.set(name, wire)
+        fromWire.set(wire, name)
+      }
+      if (toWire.size) await this.service.log({ session, action: 'tool-name-mapping', provider: candidate.providerId, model: candidate.modelId, names: [...toWire.keys()] })
+      const remapMessages = (messages: GenerateOptions['messages']) => messages.map(message => ({ ...message, content: message.content.map(block => block.type === 'tool-call' && toWire.has(block.name) ? { ...block, name: toWire.get(block.name)! } : block) }))
       const request = { ...options, provider: candidate.providerId, model: candidate.modelId, messages: prepared,
+        tools: options.tools?.map(tool => toWire.has(tool.name as string) ? { ...tool, name: toWire.get(tool.name as string)! as never, description: `宿主工具 ${tool.name}。${tool.description}` } : tool),
         reasoningEffort: effort as GenerateOptions['reasoningEffort'] ?? options.reasoningEffort,
         maxTokens: selection?.maxOutputTokens ?? options.maxTokens }
+      request.messages = remapMessages(request.messages)
       let retryThis = false
       let retried = false
       let downgraded = false
@@ -117,7 +137,9 @@ export class ManagedAdapter extends LlmAdapter {
             break
           }
           if (chunk.type === 'block-start' || chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta' || chunk.type === 'block-end') visible = true
-          yield chunk
+          if (chunk.type === 'tool-call-delta' && chunk.name && fromWire.has(chunk.name)) yield { ...chunk, name: fromWire.get(chunk.name)! }
+          else if (chunk.type === 'block-end' && chunk.block.type === 'tool-call' && fromWire.has(chunk.block.name)) yield { ...chunk, block: { ...chunk.block, name: fromWire.get(chunk.block.name)! } }
+          else yield chunk
         }
         const failedReason = failure?.reason
         const failureInfo = failedReason && 'failure' in failedReason ? failedReason.failure : undefined

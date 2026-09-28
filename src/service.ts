@@ -76,10 +76,12 @@ export class ModelManagerService {
   private revision = 0
   private models: ModelRecord[] = []
   private writeQueue: Promise<void> = Promise.resolve()
+  async flush(): Promise<void> { await this.writeQueue }
   private logMaintainedAt = 0
   private verification = new Map<string, Verification>()
   private visionCache = new Map<string, { answer: string; at: number }>()
   private overrides = new Map<string, { session?: Selection; nextTurn?: Selection; active?: { turn: number; selection: Selection } }>()
+  private delegatedSessions = new Set<string>()
   constructor(private readonly bridge: ModelBridge, private readonly dataDir: string, private readonly settings?: SettingsProvider) {}
 
   async init(): Promise<void> {
@@ -171,6 +173,8 @@ export class ModelManagerService {
   }
 
   activeSelection(session: string): Selection | undefined { return this.overrides.get(session)?.active?.selection && structuredClone(this.overrides.get(session)!.active!.selection) }
+  markDelegatedSession(session: string): void { this.delegatedSessions.add(session) }
+  isDelegatedSession(session: string): boolean { return this.delegatedSessions.has(session) }
 
   endTurn(session: string, turn: number): void {
     const value = this.overrides.get(session)
