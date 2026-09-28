@@ -15,7 +15,7 @@ const roles: Role[] = ['search', 'coding', 'review', 'strong', 'vision']
 export function registerManagerTools(deps: { tools: ToolRuntime; subagents: SubagentRuntime; llm: LlmRuntime; attachments: AttachmentStore; service: ModelManagerService; vision: VisionRegistry }): () => void {
   const disposers: (() => void)[] = []
   let running = 0
-  let coding = 0
+  const codingByWorkspace = new Map<string, number>()
 
   disposers.push(deps.tools.register(defineTool({
     name: 'model_manager_delegate',
@@ -35,11 +35,12 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
       if (!roleConfig?.enabled) throw new Error(`角色 ${role} 未启用`)
       const model = resolveSelection(config, roleConfig.target)[0]
       if (!model || !deps.service.model(model)) throw new Error(`角色 ${role} 未绑定有效模型`)
-      if (running >= 3 || (role === 'coding' && coding >= 1)) throw new Error('并行子任务已达上限')
+      const workspace = exec.agent.session.header.cwd?.toLowerCase() ?? `session:${exec.agent.session.id}`
+      if (running >= 3 || (role === 'coding' && (codingByWorkspace.get(workspace) ?? 0) >= 1)) throw new Error('并行子任务已达上限')
       const provider = deps.subagents.list().find(name => deps.subagents.getProvider(name)?.capabilities.agentOptions && deps.subagents.getProvider(name)?.capabilities.toolFilter)
       if (!provider) throw new Error('当前宿主未提供支持模型选项和工具限制的子 Agent Provider')
       running++
-      if (role === 'coding') coding++
+      if (role === 'coding') codingByWorkspace.set(workspace, (codingByWorkspace.get(workspace) ?? 0) + 1)
       try {
         const record = deps.service.model(model)!
         const effort = genericProviderAdapter.reasoningEffort(record, config.models[modelKey(model)], { ...roleConfig, tier: args.upgrade_tier as typeof roleConfig.tier ?? roleConfig.tier })
@@ -55,7 +56,14 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
           const output = result.output.filter(b => b.type === 'text').map(b => b.text).join('\n')
           return result.stopReason === 'completed' ? output || '子任务已完成，但没有文字结果。' : `子任务${result.stopReason}：${result.diagnostic ?? output}`
         } finally { await run.dispose() }
-      } finally { running--; if (role === 'coding') coding-- }
+      } finally {
+        running--
+        if (role === 'coding') {
+          const remaining = (codingByWorkspace.get(workspace) ?? 1) - 1
+          if (remaining) codingByWorkspace.set(workspace, remaining)
+          else codingByWorkspace.delete(workspace)
+        }
+      }
     },
   })))
 

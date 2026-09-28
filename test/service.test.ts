@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_CONFIG } from '../src/domain.ts'
@@ -100,6 +100,18 @@ describe('宿主桥接与版本控制', () => {
       expect(contents).toContain('"status":"new"')
       expect(contents).not.toContain('old')
       expect(contents).not.toContain('PRIVATE')
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+  it('日志达到 50 MB 后保留新记录并限制文件大小', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dmm-log-cap-'))
+    try {
+      const path = join(dir, 'calls.jsonl')
+      await writeFile(path, `${JSON.stringify({ time: new Date().toISOString(), status: 'old', filler: 'x'.repeat(50 * 1024 * 1024 - 100) })}\n`, 'utf8')
+      const service = new ModelManagerService({ catalog: async () => [], applyNative: async () => {} }, dir)
+      await service.init()
+      await service.log({ status: 'new' })
+      expect((await stat(path)).size).toBeLessThanOrEqual(50 * 1024 * 1024)
+      expect((await service.logs(1))[0]?.status).toBe('new')
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
   it('同名模型验证与并发会话覆盖互不串用', async () => {
