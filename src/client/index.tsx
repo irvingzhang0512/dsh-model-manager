@@ -58,6 +58,8 @@ const style = `
 .dmm-root .dmm-toast button{border:0;background:transparent;color:inherit;cursor:pointer;font-size:15px;line-height:1;padding:0 2px}
 .dmm-steps{margin:6px 0;padding-left:20px;list-style:disc}.dmm-steps li{margin:5px 0;font-size:13px;line-height:1.65}
 .dmm-hint{border-left:3px solid var(--dsw-alias-brand-primary,#356dde);background:var(--dsw-alias-fill-canvas,#f6f7f9);border-radius:0 8px 8px 0;padding:8px 12px;margin:8px 0;font-size:12px;color:var(--dsw-alias-text-secondary,#555);line-height:1.7}
+.dmm-composer summary{cursor:pointer;user-select:none}
+.dmm-popcard{padding:10px 12px;box-shadow:0 10px 28px rgba(0,0,0,.14)}
 `
 function injectStyle(): void {
   if (document.querySelector('style[data-dsh-model-manager]')) return
@@ -388,14 +390,34 @@ function ManagerSection() {
       </div>)}
     </>}
     {tab === '别名与推理配置' && <>
+      <div className="dmm-card">
+        <strong>这一页是干什么的？</strong>
+        <p style={{ margin: '6px 0', fontSize: 13 }}>两件事：给一组模型起<strong>好记的名字（别名）</strong>，以及把插件统一的推理档位<strong>翻译</strong>成每个模型支持的实际参数。两者都在别的页面被引用：</p>
+        <ul className="dmm-steps">
+          <li><strong>别名 @名字</strong>：绑定一串具体模型，按顺序当兜底——第 1 个请求失败自动换第 2 个。配好后，「Manual/Auto」页的目标模型、视觉模型、输入框的「模型管理」控件里都能直接选 @名字；DSH 原生模型选择器的「模型管理」下也会出现它。以后想换后端模型，只改这里的候选顺序，引用处不用动。</li>
+          <li><strong>推理档位映射</strong>：fast / balanced / deep / max 是插件统一的四档语义；输入框控件或「Manual/Auto」页选了其中一档，发请求时按这里的映射换成该模型在宿主声明的实际档位。没映射的档位等于「不可选」，强行使用会报「未配置 X 档位」。</li>
+        </ul>
+        <p className="dmm-muted">也就是说：先在这一页建好 @别名 与档位映射，「Manual/Auto」页与输入框控件里才有内容可选、才能按预期生效。</p>
+      </div>
       <div className="dmm-card"><div className="dmm-row"><input placeholder="别名，如 fast" value={aliasName} onChange={event => setAliasName(event.target.value)} /><button onClick={() => { if (!/^[a-z][a-z0-9_-]*$/.test(aliasName) || draft.aliases[aliasName]) return; edit(next => { next.aliases[aliasName] = [] }); setAliasName('') }}>添加别名</button></div><p className="dmm-muted">候选按顺序尝试；每个别名至少添加一个具体模型后才能保存。</p></div>
       {aliases.map(alias => <div className="dmm-card" key={alias}><div className="dmm-row"><strong>@{alias}</strong><button onClick={() => edit(next => { delete next.aliases[alias] })}>删除</button></div>{draft.aliases[alias].map((ref, index) => <div className="dmm-row" key={index}><span>{index + 1}.</span><SelectModel value={ref} models={snapshot.models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.aliases[alias][index] = value })} /><button onClick={() => edit(next => { next.aliases[alias].splice(index, 1) })}>移除</button></div>)}<button onClick={() => edit(next => { if (snapshot.models[0]) next.aliases[alias].push({ providerId: snapshot.models[0].providerId, modelId: snapshot.models[0].modelId }) })}>添加候选</button></div>)}
       <div className="dmm-card"><strong>推理档位映射</strong><p className="dmm-muted">只有宿主声明的实际档位才能使用。配置按 Provider 和模型隔离。</p>{snapshot.models.filter(m => m.reasoningEfforts.length).map(model => <div className="dmm-row" key={`${model.providerId}:${model.modelId}`}><span>{model.name} · {model.providerId}</span>{(['fast', 'balanced', 'deep', 'max'] as const).map(tier => <label key={tier}>{tier}<select value={draft.models[JSON.stringify([model.providerId, model.modelId])]?.tiers?.[tier] ?? ''} onChange={event => edit(next => { const key = JSON.stringify([model.providerId, model.modelId]); next.models[key] ??= {}; next.models[key].tiers ??= {}; next.models[key].tiers![tier] = event.target.value || undefined })}><option value="">不可选</option>{model.reasoningEfforts.map(e => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}</select></label>)}</div>)}</div>
     </>}
     {tab === 'Manual/Auto' && <>
-      <div className="dmm-card"><div className="dmm-row"><label>模式 <select value={draft.mode} onChange={event => edit(next => { next.mode = event.target.value as 'manual' | 'auto' })}><option value="manual">Manual</option><option value="auto">Auto</option></select></label></div>
+      <div className="dmm-card">
+        <strong>Manual/Auto 是干什么的？</strong>
+        <p style={{ margin: '6px 0', fontSize: 13 }}>决定<strong>走「模型管理」入口的会话</strong>实际用哪个模型、怎么推理。什么时候会走这个入口：DSH 模型选择器里选了「模型管理」下的条目、输入框「模型管理」控件点过「应用」、或开启了视觉辅助（会自动切换）。没走这个入口时本页不生效。</p>
+        <ul className="dmm-steps">
+          <li><strong>模式 Manual / Auto</strong>：两套可以整套切换的方案——当前是 Manual 时主对话按 manual 行执行，是 Auto 时按 auto 行执行。两行字段相同：目标模型 / 思考 / 推理档位 / 输出上限。</li>
+          <li><strong>目标模型</strong>：留空 = 插件不指定，用你在 DSH 里选的模型；选 @别名 = 按候选顺序兜底；选具体模型 = 固定用它。</li>
+          <li><strong>思考与推理档位</strong>：档位需要先在「别名与推理配置」页完成映射；「关闭思考」只有模型公开 off 档位时可选，且不能与非关闭档位同时选。</li>
+          <li><strong>子 Agent 角色（委派分工）</strong>：勾选启用并绑定模型后，主 Agent 可把搜索 / 编码 / 审查 / 强分析 / 看图任务委派给对应模型；与当前 Manual/Auto 模式无关。main 行不参与委派——主对话模型由 manual/auto 行决定。</li>
+          <li><strong>优先级</strong>：输入框「模型管理」控件的会话临时覆盖高于这一页的全局设置。</li>
+        </ul>
+      </div>
+      <div className="dmm-card"><div className="dmm-row"><label>模式 <select value={draft.mode} onChange={event => edit(next => { next.mode = event.target.value as 'manual' | 'auto' })}><option value="manual">Manual（用 manual 行）</option><option value="auto">Auto（用 auto 行）</option></select></label></div>
       {(['manual', 'auto'] as const).map(mode => <div className="dmm-row" key={mode}><strong>{mode}</strong><SelectModel value={draft[mode].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next[mode].target = value })} /><ThinkingSelect value={draft[mode].thinking} offAvailable={supportsOff(draft[mode].target, draft, snapshot.models)} onChange={value => edit(next => { next[mode].thinking = value; if (value === 'off') next[mode].tier = 'auto' })} /><select aria-label={`${mode} 推理档位`} value={draft[mode].tier ?? 'inherit'} onChange={event => edit(next => { next[mode].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft[mode].thinking === 'off' && !['auto'].includes(t)}>{t}</option>)}</select><input type="number" min="1" placeholder="输出上限" value={draft[mode].maxOutputTokens ?? ''} onChange={event => edit(next => { next[mode].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></div>)}
-      </div><div className="dmm-card"><strong>Auto 子 Agent 角色</strong>{roles.map(role => <div className="dmm-row" key={role}><label><input type="checkbox" checked={draft.roles[role].enabled} onChange={event => edit(next => { next.roles[role].enabled = event.target.checked })} />{role}</label><SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next.roles[role].target = value })} /><ThinkingSelect value={draft.roles[role].thinking} offAvailable={supportsOff(draft.roles[role].target, draft, snapshot.models)} onChange={value => edit(next => { next.roles[role].thinking = value; if (value === 'off') next.roles[role].tier = 'auto' })} /><select value={draft.roles[role].tier ?? 'auto'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t} disabled={draft.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></div>)}</div>
+      </div><div className="dmm-card"><strong>子 Agent 角色（委派分工）</strong><p className="dmm-muted">勾选启用并绑定模型后，主 Agent 才能在任务里把对应工作委派出去；与当前 Manual/Auto 模式无关。</p>{roles.map(role => <div className="dmm-row" key={role}><label><input type="checkbox" disabled={role === 'main'} checked={draft.roles[role].enabled} onChange={event => edit(next => { next.roles[role].enabled = event.target.checked })} />{role}</label>{role === 'main' && <span className="dmm-muted">主对话模型由上方 manual/auto 行决定，此处不参与委派</span>}<SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next.roles[role].target = value })} /><ThinkingSelect value={draft.roles[role].thinking} offAvailable={supportsOff(draft.roles[role].target, draft, snapshot.models)} onChange={value => edit(next => { next.roles[role].thinking = value; if (value === 'off') next.roles[role].tier = 'auto' })} /><select value={draft.roles[role].tier ?? 'auto'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t} disabled={draft.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></div>)}</div>
     </>}
     {tab === '视觉' && <VisionSection draft={draft} models={snapshot.models} aliases={aliases} edit={edit} />}
     {tab === '可靠性' && <div className="dmm-card"><div className="dmm-row"><label>最多实际尝试 <input type="number" min="1" max="3" value={draft.reliability.maxAttempts} onChange={event => edit(next => { next.reliability.maxAttempts = Number(event.target.value) })} /></label><label><input type="checkbox" checked={draft.reliability.retryTransient} onChange={event => edit(next => { next.reliability.retryTransient = event.target.checked })} />网络失败重试一次</label><label><input type="checkbox" checked={draft.reliability.parameterDowngrade} onChange={event => edit(next => { next.reliability.parameterDowngrade = event.target.checked })} />允许推理参数被拒时降级</label></div><strong>上下文溢出专用候选</strong>{(draft.reliability.longContextCandidates ?? []).map((ref, index) => <div className="dmm-row" key={index}><SelectModel value={ref} models={snapshot.models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.reliability.longContextCandidates![index] = value })} /><button onClick={() => edit(next => { next.reliability.longContextCandidates?.splice(index, 1) })}>移除</button></div>)}<button onClick={() => edit(next => { const candidate = snapshot.models.filter(model => model.contextWindow).sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0))[0]; if (candidate) { next.reliability.longContextCandidates ??= []; next.reliability.longContextCandidates.push({ providerId: candidate.providerId, modelId: candidate.modelId }) } })}>添加长上下文候选</button><p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却。上下文溢出仅尝试此列表；本轮明确覆盖的参数不会静默降级。</p></div>}
@@ -473,10 +495,26 @@ function ComposerStatus({ sessionId, modelDirectories }: { sessionId?: string; m
     try {
       await request('/overrides', { method: 'PUT', body: JSON.stringify({ sessionId, scope, ...(clear ? {} : { selection: { target: selection, thinking, tier, ...(maxOutputTokens ? { maxOutputTokens: Number(maxOutputTokens) } : {}) } }) }) })
       if (!clear) await selectManaged(modelDirectories.directoryFor(sessionId), selection ?? snapshot.config[snapshot.config.mode].target, true)
-      setState(clear ? '已清除' : scope === 'nextTurn' ? '本轮覆盖已设置' : '会话覆盖已设置')
+      setState(clear ? '已清除' : scope === 'nextTurn' ? '已设置（仅下一条消息）' : '已设置（本会话有效）')
     } catch (error) { setState(String(error)) }
   }
-  return <details className="dmm-composer"><summary>模型管理 · {snapshot.config.mode}{state ? ` · ${state}` : ''}</summary><div className="dmm-card"><div className="dmm-row"><SelectModel value={selection} models={snapshot.models} aliases={aliases} onChange={setSelection} /><ThinkingSelect value={thinking} offAvailable={supportsOff(selection, snapshot.config, snapshot.models)} onChange={value => { setThinking(value); if (value === 'off') setTier('auto') }} /><select aria-label="本轮推理档位" value={tier} onChange={event => setTier(event.target.value as Tier | 'inherit')}><option value="inherit">推理继承</option>{tiers.map(item => <option key={item} disabled={thinking === 'off' && item !== 'auto'}>{item}</option>)}</select><input aria-label="本轮输出上限" type="number" min="1" placeholder="输出上限" value={maxOutputTokens} onChange={event => setMaxOutputTokens(event.target.value)} /><select value={scope} onChange={event => setScope(event.target.value as 'session' | 'nextTurn')}><option value="nextTurn">本轮</option><option value="session">会话</option></select><button onClick={() => void save()}>应用</button><button onClick={() => void save(true)}>清除</button></div></div></details>
+  return <details className="dmm-composer">
+    <summary title="临时调整本会话的模型与推理参数，不改全局设置">模型管理 · {snapshot.config.mode === 'manual' ? '手动' : '自动'}{state ? ` · ${state}` : ''}</summary>
+    <div className="dmm-card dmm-popcard">
+      <p className="dmm-muted" style={{ margin: '2px 0 8px' }}>给<strong>当前会话</strong>临时换模型或推理参数，优先级高于「设置 → 模型管理 → Manual/Auto」的全局设置；想让所有会话都变，去那里改。</p>
+      <div className="dmm-row">
+        <label>模型 <SelectModel value={selection} models={snapshot.models} aliases={aliases} onChange={setSelection} /></label>
+        <ThinkingSelect value={thinking} offAvailable={supportsOff(selection, snapshot.config, snapshot.models)} onChange={value => { setThinking(value); if (value === 'off') setTier('auto') }} />
+        <select aria-label="本轮推理档位" value={tier} onChange={event => setTier(event.target.value as Tier | 'inherit')}><option value="inherit">档位继承全局</option>{tiers.map(item => <option key={item} disabled={thinking === 'off' && item !== 'auto'}>{item}</option>)}</select>
+        <input aria-label="本轮输出上限" type="number" min="1" placeholder="输出上限" value={maxOutputTokens} onChange={event => setMaxOutputTokens(event.target.value)} />
+      </div>
+      <div className="dmm-row">
+        <label>范围 <select value={scope} onChange={event => setScope(event.target.value as 'session' | 'nextTurn')}><option value="nextTurn">仅下一条消息</option><option value="session">本会话一直有效</option></select></label>
+        <button onClick={() => void save()}>应用</button>
+        <button onClick={() => void save(true)}>清除</button>
+      </div>
+    </div>
+  </details>
 }
 
 /** 面板错误边界：渲染异常时显示可重试的错误卡片，而不是让整个设置区白屏。 */
