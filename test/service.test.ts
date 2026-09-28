@@ -22,6 +22,33 @@ describe('宿主桥接与版本控制', () => {
     expect(mutate).toHaveBeenCalledWith('llm-pi-ai', [{ op: 'unset', path: ['providers', 'p', 'modelOverrides', 'm', 'input'] }], 8)
     expect(JSON.stringify(mutate.mock.calls)).not.toContain('SECRET_REF')
   })
+  it('探测读写 input 声明：覆盖路径可设置与删除', async () => {
+    const mutate = vi.fn(async () => {})
+    const settings = { get: () => ({ providers: { p: { modelOverrides: { m: { input: ['text'] } } } } }), mutate, describe: () => [{ ns: 'llm-pi-ai', revision: 3 }] }
+    const llm = { listConfigurableProviders: () => [{ provider: 'p', settingsNs: 'llm-pi-ai' }] }
+    const bridge = new HostModelBridge(llm as never, settings as never)
+    expect(bridge.modelInput({ providerId: 'p', modelId: 'm' })).toEqual(['text'])
+    expect(bridge.modelInput({ providerId: 'p', modelId: 'ghost' })).toBeUndefined()
+    expect(bridge.currentRevision()).toBe(3)
+    await bridge.setInput({ providerId: 'p', modelId: 'm' }, ['text', 'image'], 3)
+    expect(mutate).toHaveBeenCalledWith('llm-pi-ai', [{ op: 'set', path: ['providers', 'p', 'modelOverrides', 'm', 'input'], value: ['text', 'image'] }], 3)
+    await bridge.setInput({ providerId: 'p', modelId: 'm' }, undefined, 4)
+    expect(mutate).toHaveBeenLastCalledWith('llm-pi-ai', [{ op: 'unset', path: ['providers', 'p', 'modelOverrides', 'm', 'input'] }], 4)
+  })
+  it('显式模型清单下的 input 声明通过整表替换设置与删除', async () => {
+    const mutate = vi.fn(async () => {})
+    const models = [{ id: 'm', input: ['text'] }, { id: 'n', input: ['text', 'image'] }]
+    const settings = { get: () => ({ providers: { p: { models } } }), mutate, describe: () => [{ ns: 'llm-pi-ai', revision: 1 }] }
+    const llm = { listConfigurableProviders: () => [{ provider: 'p', settingsNs: 'llm-pi-ai' }] }
+    const bridge = new HostModelBridge(llm as never, settings as never)
+    expect(bridge.modelInput({ providerId: 'p', modelId: 'n' })).toEqual(['text', 'image'])
+    await bridge.setInput({ providerId: 'p', modelId: 'n' }, undefined, 1)
+    const call = mutate.mock.calls[0] as [string, { op: string; path: string[]; value: unknown }[], number]
+    expect(call[0]).toBe('llm-pi-ai')
+    expect(call[1][0].op).toBe('set')
+    expect(call[1][0].value).toEqual([{ id: 'm', input: ['text'] }, { id: 'n' }])
+    expect(models).toEqual([{ id: 'm', input: ['text'] }, { id: 'n', input: ['text', 'image'] }])
+  })
   it('配置冲突拒绝过期版本且不覆盖已保存值', async () => {
     const bridge = { catalog: async () => [] }
     const service = new ModelManagerService(bridge, 'unused-test-path')

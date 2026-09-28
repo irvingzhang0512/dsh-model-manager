@@ -12,6 +12,13 @@ export interface ModelBridge {
   clearNative?(ref: ModelRef, fields: readonly ('image' | 'contextWindow' | 'maxTokens')[], revision: number): Promise<void>
 }
 
+/** 探测时需要精确读写模型的 input 模态声明：读原值、写临时值、按原值恢复（undefined 表示删除该字段）。 */
+export interface ModelInputBridge {
+  modelInput(ref: ModelRef): readonly string[] | undefined
+  setInput(ref: ModelRef, input: readonly string[] | undefined, revision: number): Promise<void>
+  currentRevision(): number | undefined
+}
+
 export class HostModelBridge implements ModelBridge {
   constructor(private readonly llm: LlmRuntime, private readonly settings: SettingsProvider) {}
 
@@ -70,6 +77,39 @@ export class HostModelBridge implements ModelBridge {
     if (section?.providers?.[ref.providerId]?.models?.length) throw new Error('此 Provider 使用显式模型清单，无法安全地清除字段覆盖')
     const names = { image: 'input', contextWindow: 'contextWindow', maxTokens: 'maxTokens' } as const
     await this.settings.mutate('llm-pi-ai', fields.map(field => ({ op: 'unset' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, names[field]] })), revision)
+  }
+
+  /** 读取模型当前生效的 input 模态声明：显式清单优先，其次 modelOverrides；undefined 表示未显式声明。 */
+  modelInput(ref: ModelRef): readonly string[] | undefined {
+    const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string; input?: string[] }[]; modelOverrides?: Record<string, { input?: string[] }> }> } | undefined
+    const profile = section?.providers?.[ref.providerId]
+    if (profile?.models?.length) return profile.models.find(item => item.id === ref.modelId)?.input
+    return profile?.modelOverrides?.[ref.modelId]?.input
+  }
+
+  /** 精确设置或删除 input 模态声明；恢复探测前的原值时使用。 */
+  async setInput(ref: ModelRef, input: readonly string[] | undefined, revision: number): Promise<void> {
+    const entry = this.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
+    if (!entry || entry.settingsNs !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
+    const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
+    const profile = section?.providers?.[ref.providerId]
+    if (profile?.models?.length) {
+      const index = profile.models.findIndex(item => item.id === ref.modelId)
+      if (index < 0) throw new Error('模型不在该 Provider 的配置清单中')
+      const models = structuredClone(profile.models) as { id: string; input?: string[] }[]
+      if (input === undefined) delete models[index].input
+      else models[index] = { ...models[index], input: [...input] }
+      await this.settings.mutate('llm-pi-ai', [{ op: 'set', path: ['providers', ref.providerId, 'models'], value: models }], revision)
+    } else {
+      const ops = input === undefined
+        ? [{ op: 'unset' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, 'input'] }]
+        : [{ op: 'set' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, 'input'], value: [...input] }]
+      await this.settings.mutate('llm-pi-ai', ops, revision)
+    }
+  }
+
+  currentRevision(): number | undefined {
+    return this.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision
   }
 }
 

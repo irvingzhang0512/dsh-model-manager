@@ -11,9 +11,9 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CONFIG, managedId, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeItem, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, managedId, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeItem, type ProbeSuggestion, type Selection, type Verification } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
-import { HostModelBridge, ModelManagerService, resolveDataDir } from './service.js'
+import { HostModelBridge, ModelManagerService, resolveDataDir, type ModelInputBridge } from './service.js'
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
 import { registerManagerTools } from './tools.js'
 import { probePng } from './probe-image.js'
@@ -86,6 +86,65 @@ export async function verify(llm: LlmRuntime, attachments: AttachmentStore, serv
   }
   await service.saveVerification(result)
   return result
+}
+
+export interface ProbeResult {
+  verifications: Verification[]
+  suggestions: ProbeSuggestion[]
+  cancelled: boolean
+  /** 宿主声明为「不支持」时是否已临时提权为支持并实测（无论成败都已恢复或尝试恢复）。 */
+  elevated: boolean
+  /** 探测后恢复宿主原声明失败；面板中该模型的「宿主原生图片」可能停留在「支持」。 */
+  restoreFailed: boolean
+  notes: string[]
+}
+
+/**
+ * 对一个模型执行能力探测。宿主在发出请求前会按模型声明把图片投影成文字占位，
+ * 因此声明为「不支持」的模型必须先把宿主 input 声明临时提为支持再实测，否则探测永远得出「未观察到」。
+ * 提权无论成败都会恢复原声明；提权失败时跳过图片项并记录说明，避免把「图片未送达」误判成模型能力。
+ */
+export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, service: ModelManagerService, inputBridge: ModelInputBridge, ref: ModelRef, items: readonly ProbeItem[], nativeImage: 'yes' | 'no' | 'unknown', signal: AbortSignal): Promise<ProbeResult> {
+  const verifications: Verification[] = []
+  const notes: string[] = []
+  let elevated = false
+  let restoreFailed = false
+  const needsElevation = items.includes('image') && nativeImage === 'no'
+  let original: readonly string[] | undefined
+  if (needsElevation) {
+    original = inputBridge.modelInput(ref)
+    const revision = inputBridge.currentRevision()
+    if (revision === undefined) notes.push('无法读取宿主设置版本，图片探测被跳过。')
+    else {
+      try { await inputBridge.setInput(ref, ['text', 'image'], revision); elevated = true }
+      catch (error) { notes.push(`临时提权宿主声明失败（${String(error)}），图片探测被跳过。`) }
+    }
+  }
+  try {
+    for (const item of items) {
+      if (signal.aborted) break
+      if (item === 'image' && needsElevation && !elevated) continue
+      verifications.push(await verify(llm, attachments, service, ref, item, signal))
+    }
+  } finally {
+    if (elevated) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const revision = inputBridge.currentRevision()
+          if (revision === undefined) throw new Error('无法读取宿主设置版本')
+          await inputBridge.setInput(ref, original, revision)
+          restoreFailed = false
+          break
+        } catch (error) {
+          restoreFailed = true
+          if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 50))
+          else notes.push(`恢复宿主声明失败（${String(error)}），请到模型卡片核对「宿主原生图片」。`)
+        }
+      }
+      await service.refresh().catch(() => {})
+    }
+  }
+  return { verifications, suggestions: probeSuggestions(verifications), cancelled: signal.aborted, elevated, restoreFailed, notes }
 }
 
 export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void {
@@ -176,13 +235,10 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
       const items: ProbeItem[] = input.items?.length ? input.items : ['image', 'tools']
       if (items.some(item => item !== 'image' && item !== 'tools')) throw new Error('无效探测项')
       const ref: ModelRef = { providerId: input.providerId, modelId: input.modelId }
-      if (!service.model(ref)) throw new Error('模型未加载')
-      const verifications: Verification[] = []
-      for (const item of items) {
-        if (abort.signal.aborted) break
-        verifications.push(await verify(ctx.llm, ctx.attachments, service, ref, item, abort.signal))
-      }
-      json(res, 200, { verifications, suggestions: probeSuggestions(verifications), cancelled: abort.signal.aborted })
+      const record = service.model(ref)
+      if (!record) throw new Error('模型未加载')
+      const result = await probeModel(ctx.llm, ctx.attachments, service, bridge, ref, items, record.nativeImage, abort.signal)
+      json(res, 200, result)
     } catch (err) { if (!res.writableEnded) error(res, err) }
   } }), 'dsh-model-manager: probe route')
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, verify } from '../src/index.ts'
+import { apply, probeModel, verify } from '../src/index.ts'
 import { DEFAULT_CONFIG } from '../src/domain.ts'
 
 vi.mock('@deepseek-ai/dsh-tools', () => ({ defineTool: (options: unknown) => options }))
@@ -164,5 +164,119 @@ describe('宿主装配', () => {
     await probe.handler(fakeRequest({ providerId: 'p', modelId: 'm', items: ['reasoning'] }), invalid.res)
     expect(invalid.result.status).toBe(400)
     expect(JSON.parse(invalid.result.body).error).toContain('无效探测项')
+  })
+  it('探测对声明不支持的模型临时提权实测并恢复原声明', async () => {
+    const model = { providerId: 'p', modelId: 'm', name: 'm' }
+    const service = {
+      model: () => model,
+      snapshot: () => ({ config: structuredClone(DEFAULT_CONFIG) }),
+      signature: () => 'sig',
+      saveVerification: async () => {},
+      refresh: async () => [],
+    }
+    const llm = {
+      resolveModelInfo: async () => model,
+      stream: (options: { tools?: unknown[] }) => (async function* () {
+        if (options.tools?.length) yield { type: 'tool-call-delta', name: 'model_manager_probe' }
+        yield { type: 'text-delta', text: '红色' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })(),
+    }
+    const bridge = {
+      modelInput: vi.fn(() => undefined),
+      setInput: vi.fn(async () => {}),
+      currentRevision: vi.fn(() => 5),
+    }
+    const attachments = { saveImage: async () => ({ id: 'probe-image' }) }
+    const controller = new AbortController()
+    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, ['image', 'tools'], 'no', controller.signal)
+    expect(bridge.setInput.mock.calls.map(call => call[1])).toEqual([['text', 'image'], undefined])
+    expect(result.elevated).toBe(true)
+    expect(result.restoreFailed).toBe(false)
+    expect(result.notes).toEqual([])
+    expect(result.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high', 'pluginImage:yes:high', 'pluginTools:yes:high'])
+  })
+  it('探测恢复宿主声明时写回原值而不是固定值', async () => {
+    const model = { providerId: 'p', modelId: 'm', name: 'm' }
+    const service = {
+      model: () => model,
+      snapshot: () => ({ config: structuredClone(DEFAULT_CONFIG) }),
+      signature: () => 'sig',
+      saveVerification: async () => {},
+      refresh: async () => [],
+    }
+    const llm = {
+      resolveModelInfo: async () => model,
+      stream: () => (async function* () {
+        yield { type: 'text-delta', text: '红色' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })(),
+    }
+    const bridge = {
+      modelInput: vi.fn(() => ['text']),
+      setInput: vi.fn(async () => {}),
+      currentRevision: vi.fn(() => 5),
+    }
+    const attachments = { saveImage: async () => ({ id: 'probe-image' }) }
+    const controller = new AbortController()
+    await probeModel(llm as never, attachments as never, service as never, bridge as never, model, ['image'], 'no', controller.signal)
+    expect(bridge.setInput.mock.calls.map(call => call[1])).toEqual([['text', 'image'], ['text']])
+  })
+  it('提权失败时跳过图片探测并记录说明', async () => {
+    const model = { providerId: 'p', modelId: 'm', name: 'm' }
+    const service = {
+      model: () => model,
+      snapshot: () => ({ config: structuredClone(DEFAULT_CONFIG) }),
+      signature: () => 'sig',
+      saveVerification: async () => {},
+      refresh: async () => [],
+    }
+    const llm = {
+      resolveModelInfo: async () => model,
+      stream: () => (async function* () {
+        yield { type: 'text-delta', text: '红色' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })(),
+    }
+    const bridge = {
+      modelInput: () => undefined,
+      setInput: vi.fn(async () => { throw new Error('SETTINGS_CONFLICT') }),
+      currentRevision: () => 5,
+    }
+    const attachments = { saveImage: async () => ({ id: 'probe-image' }) }
+    const controller = new AbortController()
+    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, ['image', 'tools'], 'no', controller.signal)
+    expect(result.elevated).toBe(false)
+    expect(result.notes[0]).toContain('临时提权宿主声明失败')
+    expect(result.verifications.map(item => item.kind)).toEqual(['tools'])
+  })
+  it('探测后恢复宿主声明失败时给出警告', async () => {
+    const model = { providerId: 'p', modelId: 'm', name: 'm' }
+    const service = {
+      model: () => model,
+      snapshot: () => ({ config: structuredClone(DEFAULT_CONFIG) }),
+      signature: () => 'sig',
+      saveVerification: async () => {},
+      refresh: async () => [],
+    }
+    const llm = {
+      resolveModelInfo: async () => model,
+      stream: () => (async function* () {
+        yield { type: 'text-delta', text: '红色' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })(),
+    }
+    let calls = 0
+    const bridge = {
+      modelInput: () => undefined,
+      setInput: vi.fn(async () => { calls++; if (calls > 1) throw new Error('SETTINGS_CONFLICT') }),
+      currentRevision: () => 5,
+    }
+    const attachments = { saveImage: async () => ({ id: 'probe-image' }) }
+    const controller = new AbortController()
+    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, ['image'], 'no', controller.signal)
+    expect(calls).toBe(3)
+    expect(result.restoreFailed).toBe(true)
+    expect(result.notes.join()).toContain('恢复宿主声明失败')
   })
 })
