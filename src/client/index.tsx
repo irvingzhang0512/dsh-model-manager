@@ -60,6 +60,10 @@ const style = `
 .dmm-hint{border-left:3px solid var(--dsw-alias-brand-primary,#356dde);background:var(--dsw-alias-fill-canvas,#f6f7f9);border-radius:0 8px 8px 0;padding:8px 12px;margin:8px 0;font-size:12px;color:var(--dsw-alias-text-secondary,#555);line-height:1.7}
 .dmm-composer summary{cursor:pointer;user-select:none}
 .dmm-popcard{padding:10px 12px;box-shadow:0 10px 28px rgba(0,0,0,.14)}
+.dmm-guide{background:var(--dsw-alias-fill-canvas,#f7f8fa);border:1px solid var(--dsw-alias-border-primary,#e3e6eb);border-radius:10px;padding:12px 14px;margin:10px 0}
+.dmm-guide>strong{display:block;font-size:14px;margin-bottom:6px}
+.dmm-guide p{margin:6px 0;font-size:13px;line-height:1.7}
+.dmm-guide .dmm-steps{margin:6px 0 2px}
 `
 function injectStyle(): void {
   if (document.querySelector('style[data-dsh-model-manager]')) return
@@ -85,11 +89,11 @@ function supportsOff(target: ModelRef | string | undefined, config: ManagerConfi
   const refs = typeof target === 'string' ? config.aliases[target.slice(1)] ?? [] : [target]
   return refs.length > 0 && refs.every(ref => models.some(model => model.providerId === ref.providerId && model.modelId === ref.modelId && model.reasoningEfforts.some(e => e.id === 'off')))
 }
-function ThinkingSelect({ value, offAvailable, onChange }: { value?: 'inherit' | 'auto' | 'off'; offAvailable: boolean; onChange: (value: 'inherit' | 'auto' | 'off') => void }) {
-  return <select aria-label="思考模式" value={value ?? 'inherit'} onChange={event => onChange(event.target.value as 'inherit' | 'auto' | 'off')}><option value="inherit">思考继承</option><option value="auto">思考自动</option><option value="off" disabled={!offAvailable}>关闭思考{offAvailable ? '' : '（模型不支持）'}</option></select>
+function ThinkingSelect({ value, offAvailable, disabled, onChange }: { value?: 'inherit' | 'auto' | 'off'; offAvailable: boolean; disabled?: boolean; onChange: (value: 'inherit' | 'auto' | 'off') => void }) {
+  return <select aria-label="思考模式" disabled={disabled} value={value ?? 'inherit'} onChange={event => onChange(event.target.value as 'inherit' | 'auto' | 'off')}><option value="inherit">思考继承</option><option value="auto">思考自动</option><option value="off" disabled={!offAvailable}>关闭思考{offAvailable ? '' : '（模型不支持）'}</option></select>
 }
-function SelectModel({ value, models, aliases, onChange }: { value?: ModelRef | string; models: ModelRecord[]; aliases: string[]; onChange: (next?: ModelRef | string) => void }) {
-  return <select value={refValue(value)} onChange={event => onChange(parseRef(event.target.value))}>
+function SelectModel({ value, models, aliases, disabled, onChange }: { value?: ModelRef | string; models: ModelRecord[]; aliases: string[]; disabled?: boolean; onChange: (next?: ModelRef | string) => void }) {
+  return <select disabled={disabled} value={refValue(value)} onChange={event => onChange(parseRef(event.target.value))}>
     <option value="">跟随宿主／未设置</option>
     {aliases.map(alias => <option key={alias} value={`@${alias}`}>@{alias}</option>)}
     {models.map(model => <option key={`${model.providerId}:${model.modelId}`} value={JSON.stringify([model.providerId, model.modelId])}>{model.name} · {model.providerId}</option>)}
@@ -155,7 +159,7 @@ const policyHelp: Record<ManagerConfig['vision']['policy'], string> = {
 
 function VisionSection({ draft, models, aliases, edit }: { draft: ManagerConfig; models: ModelRecord[]; aliases: string[]; edit: (fn: (next: ManagerConfig) => void) => void }) {
   return <>
-    <div className="dmm-card">
+    <div className="dmm-guide">
       <strong>视觉辅助是做什么的？</strong>
       <p className="dmm-muted" style={{ margin: '6px 0' }}>你把图片粘贴或拖入输入框发送后，图片需要随消息交给当前对话模型。DSH 默认不加工图片：模型声明「支持图片」就发原图；声明「不支持」则图片到不了模型——它只能看到一行占位文字，或直接收到报错。</p>
       <p style={{ margin: '6px 0', fontSize: 13 }}>开启「视觉辅助」后，插件在每次请求发出前接管图片路由：</p>
@@ -172,7 +176,7 @@ function VisionSection({ draft, models, aliases, edit }: { draft: ManagerConfig;
       <div className="dmm-row"><label>视觉模型 <SelectModel value={draft.vision.target} models={models.filter(m => m.nativeImage === 'yes')} aliases={aliases} onChange={value => edit(next => { next.vision.target = value })} /></label></div>
       <div className="dmm-hint"><strong>什么时候会用到：</strong>对话模型自己看不了图时，插件把原图发给它、拿回文字结论，对话模型全程只处理文字。下拉列表已只显示声明支持图片的模型，建议挑一个视觉能力够用、价格便宜、速度快的型号。<br /><strong>留空会怎样：</strong>自动回退到「Manual/Auto」页 Auto 子 Agent 角色里 vision 角色绑定的模型；两处都为空且对话模型不支持图片时，带图片的请求将报错。<br /><strong>什么时候可以留空：</strong>对话模型全部原生支持看图、策略又是「原生优先」时，它永远不会被用到。</div>
     </div>
-    <div className="dmm-card">
+    <div className="dmm-guide">
       <strong>看图工具的工作方式</strong>
       <ul className="dmm-steps">
         <li>对话模型收到的不是原图，而是形如「[图片附件 ID] 请使用 model_manager_inspect_image 工具查看此原图」的文字占位，由它决定何时、带着什么问题去看图。</li>
@@ -368,9 +372,27 @@ function ManagerSection() {
     return draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'
   }
   return <div className="dmm-root">
-    <h2>模型管理</h2><div className="dmm-muted">管理模型声明、别名、角色和视觉辅助。原有附件上传与发送流程保持不变。目录只代表宿主已加载的模型；外部导入若尚未被宿主加载，需要先刷新宿主。</div>
+    <h2>模型管理</h2>
+    <div className="dmm-guide">
+      <strong>这个插件是干什么的？</strong>
+      <p>模型已经能在 DSH 里调用之后，用它统一管理四件事：① 补模型能力声明（能否收图、上下文多大）；② 建别名与推理档位映射；③ 决定会话实际用哪个模型（Manual/Auto）与失败兜底（可靠性）；④ 让不支持图片的模型也能看图（视觉辅助）。它不导入模型、也不管 API Key。</p>
+      <ul className="dmm-steps">
+        <li><strong>推荐配置顺序</strong>：「模型」核对声明 → 「别名与推理配置」建 @别名与档位映射 → 「Manual/Auto」选方案 → 需要看图再配「视觉」→ 点底部「保存设置」。每个标签页顶部都有「这一页是干什么的」说明卡。</li>
+        <li><strong>配好后聊天界面会看到</strong>：DSH 模型选择器多出「模型管理」Provider（含具体模型与 @别名）；输入框左下角出现「模型管理 · 手动/自动」折叠控件——那里可以按会话临时覆盖这里的全局设置。</li>
+        <li><strong>看不到刚导入的模型</strong>：目录只代表宿主已加载的模型，点「刷新目录」即可，不必重启 DSH。</li>
+      </ul>
+    </div>
     <div className="dmm-tabs">{tabs.map(item => <button key={item} aria-selected={tab === item} onClick={() => { setTab(item); if (item === '日志') void request('/logs').then(result => setLogs(result.events)).catch(error => notify('error', String(error))) }}>{item}</button>)}</div>
     {tab === '模型' && <>
+      <div className="dmm-guide">
+        <strong>这一页是干什么的？</strong>
+        <p>列出宿主已加载的模型，核对并修正每个模型的能力声明——声明准不准，直接决定聊天里的行为：</p>
+        <ul className="dmm-steps">
+          <li><strong>原生图片声明</strong>：声明「不支持」但实际支持 → 聊天里贴图会被宿主拦成文字占位，模型看不到图；声明「支持」但实际不支持 → 带图请求可能报错。不确定就点「AI 探测能力」实测（发一次真实请求、消耗少量 token）。</li>
+          <li><strong>「保存到宿主」才真正生效</strong>：修正后的声明要写进 DSH（llm-pi-ai），聊天里贴图才会按图片处理；「插件图片声明」只影响本插件的视觉路由判断，不改宿主。</li>
+          <li>卡片里的灰色证据行来自「验证」页的结果；配置改动后旧证据会标「已过期」。</li>
+        </ul>
+      </div>
       <FilterBar text={modelFilter} onText={setModelFilter} provider={providerFilter} onProvider={setProviderFilter} providers={providers} matched={filtered.length} total={snapshot.models.length} onReset={resetFilter}>
         <button disabled={refreshing} onClick={() => { setRefreshing(true); void refreshDirectory().catch(error => notify('error', `刷新目录失败：${String(error)}`)).finally(() => setRefreshing(false)) }}>{refreshing ? '刷新中…' : '刷新目录'}</button>
         <button disabled={busy || probing !== '' || !filtered.length} onClick={() => void probeBatch()}>AI 探测当前筛选（{filtered.length} 个）</button>
@@ -390,7 +412,7 @@ function ManagerSection() {
       </div>)}
     </>}
     {tab === '别名与推理配置' && <>
-      <div className="dmm-card">
+      <div className="dmm-guide">
         <strong>这一页是干什么的？</strong>
         <p style={{ margin: '6px 0', fontSize: 13 }}>两件事：给一组模型起<strong>好记的名字（别名）</strong>，以及把插件统一的推理档位<strong>翻译</strong>成每个模型支持的实际参数。两者都在别的页面被引用：</p>
         <ul className="dmm-steps">
@@ -404,7 +426,7 @@ function ManagerSection() {
       <div className="dmm-card"><strong>推理档位映射</strong><p className="dmm-muted">只有宿主声明的实际档位才能使用。配置按 Provider 和模型隔离。</p>{snapshot.models.filter(m => m.reasoningEfforts.length).map(model => <div className="dmm-row" key={`${model.providerId}:${model.modelId}`}><span>{model.name} · {model.providerId}</span>{(['fast', 'balanced', 'deep', 'max'] as const).map(tier => <label key={tier}>{tier}<select value={draft.models[JSON.stringify([model.providerId, model.modelId])]?.tiers?.[tier] ?? ''} onChange={event => edit(next => { const key = JSON.stringify([model.providerId, model.modelId]); next.models[key] ??= {}; next.models[key].tiers ??= {}; next.models[key].tiers![tier] = event.target.value || undefined })}><option value="">不可选</option>{model.reasoningEfforts.map(e => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}</select></label>)}</div>)}</div>
     </>}
     {tab === 'Manual/Auto' && <>
-      <div className="dmm-card">
+      <div className="dmm-guide">
         <strong>Manual/Auto 是干什么的？</strong>
         <p style={{ margin: '6px 0', fontSize: 13 }}>决定<strong>走「模型管理」入口的会话</strong>实际用哪个模型、怎么推理。什么时候会走这个入口：DSH 模型选择器里选了「模型管理」下的条目、输入框「模型管理」控件点过「应用」、或开启了视觉辅助（会自动切换）。没走这个入口时本页不生效。</p>
         <ul className="dmm-steps">
@@ -415,14 +437,35 @@ function ManagerSection() {
           <li><strong>优先级</strong>：输入框「模型管理」控件的会话临时覆盖高于这一页的全局设置。</li>
         </ul>
       </div>
-      <div className="dmm-card"><div className="dmm-row"><label>模式 <select value={draft.mode} onChange={event => edit(next => { next.mode = event.target.value as 'manual' | 'auto' })}><option value="manual">Manual（用 manual 行）</option><option value="auto">Auto（用 auto 行）</option></select></label></div>
-      {(['manual', 'auto'] as const).map(mode => <div className="dmm-row" key={mode}><strong>{mode}</strong><SelectModel value={draft[mode].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next[mode].target = value })} /><ThinkingSelect value={draft[mode].thinking} offAvailable={supportsOff(draft[mode].target, draft, snapshot.models)} onChange={value => edit(next => { next[mode].thinking = value; if (value === 'off') next[mode].tier = 'auto' })} /><select aria-label={`${mode} 推理档位`} value={draft[mode].tier ?? 'inherit'} onChange={event => edit(next => { next[mode].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft[mode].thinking === 'off' && !['auto'].includes(t)}>{t}</option>)}</select><input type="number" min="1" placeholder="输出上限" value={draft[mode].maxOutputTokens ?? ''} onChange={event => edit(next => { next[mode].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></div>)}
-      </div><div className="dmm-card"><strong>子 Agent 角色（委派分工）</strong><p className="dmm-muted">勾选启用并绑定模型后，主 Agent 才能在任务里把对应工作委派出去；与当前 Manual/Auto 模式无关。</p>{roles.map(role => <div className="dmm-row" key={role}><label><input type="checkbox" disabled={role === 'main'} checked={draft.roles[role].enabled} onChange={event => edit(next => { next.roles[role].enabled = event.target.checked })} />{role}</label>{role === 'main' && <span className="dmm-muted">主对话模型由上方 manual/auto 行决定，此处不参与委派</span>}<SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next.roles[role].target = value })} /><ThinkingSelect value={draft.roles[role].thinking} offAvailable={supportsOff(draft.roles[role].target, draft, snapshot.models)} onChange={value => edit(next => { next.roles[role].thinking = value; if (value === 'off') next.roles[role].tier = 'auto' })} /><select value={draft.roles[role].tier ?? 'auto'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t} disabled={draft.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></div>)}</div>
+      <div className="dmm-card"><div className="dmm-row"><label>模式 <select value={draft.mode} onChange={event => edit(next => { next.mode = event.target.value as 'manual' | 'auto' })}><option value="manual">Manual（用 manual 行）</option><option value="auto">Auto（用 auto 行）</option></select></label></div><p className="dmm-muted">切换模式 = 整套切换主对话方案；保存后对走「模型管理」入口的会话立即生效。</p></div>
+      {(['manual', 'auto'] as const).map(mode => <div className="dmm-card" key={mode}><strong>{mode === 'manual' ? 'Manual 行' : 'Auto 行'}</strong><p className="dmm-muted">当前模式是 {mode === 'manual' ? 'Manual' : 'Auto'} 时，主对话按这一行执行。</p><div className="dmm-row"><label>目标模型 <SelectModel value={draft[mode].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next[mode].target = value })} /></label></div><div className="dmm-row"><label>思考 <ThinkingSelect value={draft[mode].thinking} offAvailable={supportsOff(draft[mode].target, draft, snapshot.models)} onChange={value => edit(next => { next[mode].thinking = value; if (value === 'off') next[mode].tier = 'auto' })} /></label><label>推理档位 <select aria-label={`${mode} 推理档位`} value={draft[mode].tier ?? 'inherit'} onChange={event => edit(next => { next[mode].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft[mode].thinking === 'off' && !['auto'].includes(t)}>{t}</option>)}</select></label><label>输出上限 <input type="number" min="1" placeholder="不限" value={draft[mode].maxOutputTokens ?? ''} onChange={event => edit(next => { next[mode].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></label></div></div>)}<div className="dmm-card"><strong>子 Agent 角色（委派分工）</strong><p className="dmm-muted">勾选启用并绑定模型后，主 Agent 才能在任务里把对应工作委派出去；与当前 Manual/Auto 模式无关。</p>{roles.map(role => <div className="dmm-row" key={role}><label><input type="checkbox" disabled={role === 'main'} checked={draft.roles[role].enabled} onChange={event => edit(next => { next.roles[role].enabled = event.target.checked })} />{role}</label>{role === 'main' && <span className="dmm-muted">主对话模型由上方 manual/auto 行决定，此处不参与委派</span>}<label>目标 <SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} disabled={role === 'main'} onChange={value => edit(next => { next.roles[role].target = value })} /></label><label>思考 <ThinkingSelect value={draft.roles[role].thinking} offAvailable={supportsOff(draft.roles[role].target, draft, snapshot.models)} disabled={role === 'main'} onChange={value => edit(next => { next.roles[role].thinking = value; if (value === 'off') next.roles[role].tier = 'auto' })} /></label><label>档位 <select value={draft.roles[role].tier ?? 'auto'} disabled={role === 'main'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t} disabled={draft.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></label></div>)}</div>
     </>}
     {tab === '视觉' && <VisionSection draft={draft} models={snapshot.models} aliases={aliases} edit={edit} />}
-    {tab === '可靠性' && <div className="dmm-card"><div className="dmm-row"><label>最多实际尝试 <input type="number" min="1" max="3" value={draft.reliability.maxAttempts} onChange={event => edit(next => { next.reliability.maxAttempts = Number(event.target.value) })} /></label><label><input type="checkbox" checked={draft.reliability.retryTransient} onChange={event => edit(next => { next.reliability.retryTransient = event.target.checked })} />网络失败重试一次</label><label><input type="checkbox" checked={draft.reliability.parameterDowngrade} onChange={event => edit(next => { next.reliability.parameterDowngrade = event.target.checked })} />允许推理参数被拒时降级</label></div><strong>上下文溢出专用候选</strong>{(draft.reliability.longContextCandidates ?? []).map((ref, index) => <div className="dmm-row" key={index}><SelectModel value={ref} models={snapshot.models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.reliability.longContextCandidates![index] = value })} /><button onClick={() => edit(next => { next.reliability.longContextCandidates?.splice(index, 1) })}>移除</button></div>)}<button onClick={() => edit(next => { const candidate = snapshot.models.filter(model => model.contextWindow).sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0))[0]; if (candidate) { next.reliability.longContextCandidates ??= []; next.reliability.longContextCandidates.push({ providerId: candidate.providerId, modelId: candidate.modelId }) } })}>添加长上下文候选</button><p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却。上下文溢出仅尝试此列表；本轮明确覆盖的参数不会静默降级。</p></div>}
-    {tab === '验证' && <div className="dmm-card"><FilterBar text={modelFilter} onText={setModelFilter} provider={providerFilter} onProvider={setProviderFilter} providers={providers} matched={filtered.length} total={snapshot.models.length} onReset={resetFilter} /><div className="dmm-row"><SelectModel value={verifyTarget} models={snapshot.models} aliases={[]} onChange={setVerifyTarget} /><select value={verifyKind} onChange={event => setVerifyKind(event.target.value as Verification['kind'])}><option value="text">文字</option><option value="image">图片</option><option value="tools">工具</option><option value="reasoning">推理档位</option></select><button disabled={!verifyTarget || busy} onClick={() => { if (!verifyTarget || typeof verifyTarget === 'string') return; setBusy(true); void verifyOne(verifyTarget, verifyKind).then(() => notify('success', '验证已完成（1 次模型请求）。')).catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证一次</button><button disabled={busy || filtered.length === 0} onClick={() => void verifyBatch(filtered, verifyKind)}>批量验证当前筛选（{filtered.length} 次）</button>{busy && verifyAbort.current && <button onClick={() => verifyAbort.current?.abort()}>取消批量验证</button>}{probeProgress && <span className="dmm-muted">{probeProgress}</span>}</div>{verifyResult && <pre>{JSON.stringify(verifyResult, null, 2)}</pre>}<p className="dmm-muted">批量验证默认串行且需要确认；推理档位仅验证参数是否被接受，不宣称证明内部推理强度。</p></div>}
-    {tab === '日志' && <div className="dmm-card"><button onClick={() => void request('/logs').then(result => setLogs(result.events)).catch(error => notify('error', String(error)))}>刷新日志</button><pre>{logs.map(event => JSON.stringify(event)).join('\n')}</pre></div>}
+    {tab === '可靠性' && <>
+      <div className="dmm-guide">
+        <strong>这一页是干什么的？</strong>
+        <p>只对走「模型管理」入口的请求生效，决定请求失败时怎么兜底。聊天里的表现通常是「卡一下换了个模型继续答」；实际用了哪个模型可去「日志」页核对。</p>
+        <ul className="dmm-steps">
+          <li><strong>最多实际尝试（1–3）</strong>：候选按顺序尝试的总次数上限；目标选了 @别名时，第 1 个失败自动换第 2 个。</li>
+          <li><strong>网络失败重试一次</strong>：同一模型立即再试一次；限流（429）会短暂冷却，认证错误会跳过同 Provider 的其它模型。</li>
+          <li><strong>允许参数被拒时降级</strong>：推理档位参数被模型拒绝时，去掉档位再试一次；你本轮明确指定的参数不会被静默降级。</li>
+          <li><strong>上下文溢出专用候选</strong>：只有报「上下文溢出」时才用这个列表重试，平时不参与；「添加长上下文候选」会自动挑当前上下文最大的模型。</li>
+        </ul>
+      </div>
+      <div className="dmm-card"><div className="dmm-row"><label>最多实际尝试 <input type="number" min="1" max="3" value={draft.reliability.maxAttempts} onChange={event => edit(next => { next.reliability.maxAttempts = Number(event.target.value) })} /></label><label><input type="checkbox" checked={draft.reliability.retryTransient} onChange={event => edit(next => { next.reliability.retryTransient = event.target.checked })} />网络失败重试一次</label><label><input type="checkbox" checked={draft.reliability.parameterDowngrade} onChange={event => edit(next => { next.reliability.parameterDowngrade = event.target.checked })} />允许推理参数被拒时降级</label></div><strong>上下文溢出专用候选</strong>{(draft.reliability.longContextCandidates ?? []).map((ref, index) => <div className="dmm-row" key={index}><SelectModel value={ref} models={snapshot.models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.reliability.longContextCandidates![index] = value })} /><button onClick={() => edit(next => { next.reliability.longContextCandidates?.splice(index, 1) })}>移除</button></div>)}<button onClick={() => edit(next => { const candidate = snapshot.models.filter(model => model.contextWindow).sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0))[0]; if (candidate) { next.reliability.longContextCandidates ??= []; next.reliability.longContextCandidates.push({ providerId: candidate.providerId, modelId: candidate.modelId }) } })}>添加长上下文候选</button><p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却。上下文溢出仅尝试此列表；本轮明确覆盖的参数不会静默降级。</p></div>
+    </>}
+    {tab === '验证' && <>
+      <div className="dmm-guide">
+        <strong>这一页是干什么的？</strong>
+        <p>给指定模型发一次真实请求，确认它可用、声明属实。会消耗 token；结果记录在案，并显示在「模型」页对应卡片的证据行：</p>
+        <ul className="dmm-steps">
+          <li><strong>文字</strong>＝Provider 可调用、基础参数正确；<strong>图片</strong>＝发内置小图问颜色并核对答案，证明真的看懂了图；<strong>工具</strong>＝真的会发起工具调用；<strong>推理档位</strong>＝档位参数被接受（不证明推理强度变化）。</li>
+          <li>「批量验证」按当前筛选串行发送，先弹确认，可中途取消。</li>
+        </ul>
+      </div>
+      <div className="dmm-card"><FilterBar text={modelFilter} onText={setModelFilter} provider={providerFilter} onProvider={setProviderFilter} providers={providers} matched={filtered.length} total={snapshot.models.length} onReset={resetFilter} /><div className="dmm-row"><SelectModel value={verifyTarget} models={snapshot.models} aliases={[]} onChange={setVerifyTarget} /><select value={verifyKind} onChange={event => setVerifyKind(event.target.value as Verification['kind'])}><option value="text">文字</option><option value="image">图片</option><option value="tools">工具</option><option value="reasoning">推理档位</option></select><button disabled={!verifyTarget || busy} onClick={() => { if (!verifyTarget || typeof verifyTarget === 'string') return; setBusy(true); void verifyOne(verifyTarget, verifyKind).then(() => notify('success', '验证已完成（1 次模型请求）。')).catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证一次</button><button disabled={busy || filtered.length === 0} onClick={() => void verifyBatch(filtered, verifyKind)}>批量验证当前筛选（{filtered.length} 次）</button>{busy && verifyAbort.current && <button onClick={() => verifyAbort.current?.abort()}>取消批量验证</button>}{probeProgress && <span className="dmm-muted">{probeProgress}</span>}</div>{verifyResult && <pre>{JSON.stringify(verifyResult, null, 2)}</pre>}</div>
+    </>}
+    {tab === '日志' && <div className="dmm-card"><p className="dmm-muted">记录走「模型管理」入口的每次调用（主请求 / 子任务委派 / 看图），含实际使用的 Provider 与模型、路由、尝试次数、耗时与状态；最多约 200 条、保留 7 天。想在聊天里确认「刚才实际用了哪个模型」，来这里对。</p><button onClick={() => void request('/logs').then(result => setLogs(result.events)).catch(error => notify('error', String(error)))}>刷新日志</button><pre>{logs.map(event => JSON.stringify(event)).join('\n')}</pre></div>}
     <div className="dmm-actions">
       <button className="dmm-primary" disabled={busy || !dirty} onClick={() => void save()}>{busy ? '处理中…' : '保存设置'}</button>
       <button disabled={busy} onClick={() => void reload()} title="放弃未保存的修改，重新读取已保存的配置">重新加载</button>
