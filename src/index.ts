@@ -172,11 +172,14 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
     if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
     try {
-      const input = await body(req) as ModelRef & { image?: boolean; contextWindow?: number; maxTokens?: number; revision: number }
+      const input = await body(req) as ModelRef & { image?: boolean; contextWindow?: number; maxTokens?: number; clear?: ('image' | 'contextWindow' | 'maxTokens')[]; revision: number }
       if (!service.model(input)) throw new Error('模型未加载')
+      if (input.clear && (!Array.isArray(input.clear) || !input.clear.length || input.clear.some(field => !['image', 'contextWindow', 'maxTokens'].includes(field)))) throw new Error('无效的清除字段')
+      if (input.clear && (input.image !== undefined || input.contextWindow !== undefined || input.maxTokens !== undefined)) throw new Error('清除与设置不能在同一次操作中混用')
       if (input.contextWindow !== undefined && (!Number.isInteger(input.contextWindow) || input.contextWindow < 1)) throw new Error('上下文容量必须为正整数')
       if (input.maxTokens !== undefined && (!Number.isInteger(input.maxTokens) || input.maxTokens < 1)) throw new Error('最大输出能力必须为正整数')
-      await bridge.applyNative(input, input, input.revision)
+      if (input.clear) await bridge.clearNative(input, input.clear, input.revision)
+      else await bridge.applyNative(input, input, input.revision)
       await service.refresh()
       const revision = ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision
       json(res, 200, { revision })

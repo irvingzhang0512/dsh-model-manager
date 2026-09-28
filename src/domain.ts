@@ -44,6 +44,7 @@ export interface ModelRecord extends ModelRef {
   source: 'host' | 'user'
   loaded: boolean
   nativeEditable?: boolean
+  nativeClearable?: boolean
   nativeEditReason?: string
 }
 export interface Verification {

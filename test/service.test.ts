@@ -14,6 +14,14 @@ describe('宿主桥接与版本控制', () => {
     expect(mutate).toHaveBeenCalledWith('llm-pi-ai', [{ op: 'set', path: ['providers', 'p', 'modelOverrides', 'm', 'input'], value: ['text', 'image'] }], 7)
     expect(JSON.stringify(mutate.mock.calls)).not.toContain('SECRET_REF')
   })
+  it('清除指定模型字段覆盖只发送 unset 操作', async () => {
+    const mutate = vi.fn(async () => {})
+    const settings = { get: () => ({ providers: { p: { apiKeyEnv: 'SECRET_REF', modelOverrides: { m: { input: ['text', 'image'], maxTokens: 2048 } } } } }), mutate }
+    const llm = { listConfigurableProviders: () => [{ provider: 'p', settingsNs: 'llm-pi-ai' }] }
+    await new HostModelBridge(llm as never, settings as never).clearNative({ providerId: 'p', modelId: 'm' }, ['image'], 8)
+    expect(mutate).toHaveBeenCalledWith('llm-pi-ai', [{ op: 'unset', path: ['providers', 'p', 'modelOverrides', 'm', 'input'] }], 8)
+    expect(JSON.stringify(mutate.mock.calls)).not.toContain('SECRET_REF')
+  })
   it('配置冲突拒绝过期版本且不覆盖已保存值', async () => {
     const bridge = { catalog: async () => [] }
     const service = new ModelManagerService(bridge, 'unused-test-path')

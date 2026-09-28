@@ -83,7 +83,7 @@ export class ManagedAdapter extends LlmAdapter {
     let attempt = 0
     let previousProvider: string | undefined
     let contextOnly = false
-    const queue = [...candidates]
+    const queue = selection?.target ? resolveSelection(config, selection.target) : [...candidates]
     const longContextCandidates = config.reliability.longContextCandidates ?? []
     const tried = new Set<string>()
     for (const candidate of queue) {
@@ -130,16 +130,20 @@ export class ManagedAdapter extends LlmAdapter {
         let failure: Extract<StreamChunk, { type: 'finish' }> | undefined
         let usage: Extract<StreamChunk, { type: 'usage' }>['usage'] | undefined
         const started = Date.now()
-        for await (const chunk of this.llm.stream(request)) {
-          if (chunk.type === 'usage') usage = chunk.usage
-          if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
-            failure = chunk
-            break
+        try {
+          for await (const chunk of this.llm.stream(request)) {
+            if (chunk.type === 'usage') usage = chunk.usage
+            if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
+              failure = chunk
+              break
+            }
+            if (chunk.type === 'block-start' || chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta' || chunk.type === 'block-end') visible = true
+            if (chunk.type === 'tool-call-delta' && chunk.name && fromWire.has(chunk.name)) yield { ...chunk, name: fromWire.get(chunk.name)! }
+            else if (chunk.type === 'block-end' && chunk.block.type === 'tool-call' && fromWire.has(chunk.block.name)) yield { ...chunk, block: { ...chunk.block, name: fromWire.get(chunk.block.name)! } }
+            else yield chunk
           }
-          if (chunk.type === 'block-start' || chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta' || chunk.type === 'block-end') visible = true
-          if (chunk.type === 'tool-call-delta' && chunk.name && fromWire.has(chunk.name)) yield { ...chunk, name: fromWire.get(chunk.name)! }
-          else if (chunk.type === 'block-end' && chunk.block.type === 'tool-call' && fromWire.has(chunk.block.name)) yield { ...chunk, block: { ...chunk.block, name: fromWire.get(chunk.block.name)! } }
-          else yield chunk
+        } catch (error) {
+          failure = { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: { code: 'NETWORK', message: error instanceof Error ? error.message : String(error) } } } as Extract<StreamChunk, { type: 'finish' }>
         }
         const failedReason = failure?.reason
         const failureInfo = failedReason && 'failure' in failedReason ? failedReason.failure : undefined

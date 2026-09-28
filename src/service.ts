@@ -9,6 +9,7 @@ import { DEFAULT_CONFIG, mergeSelection, modelKey, resolveSelection, validateCon
 export interface ModelBridge {
   catalog(): Promise<ModelRecord[]>
   applyNative(ref: ModelRef, fields: { image?: boolean; contextWindow?: number; maxTokens?: number }, revision: number): Promise<void>
+  clearNative?(ref: ModelRef, fields: readonly ('image' | 'contextWindow' | 'maxTokens')[], revision: number): Promise<void>
 }
 
 export class HostModelBridge implements ModelBridge {
@@ -32,6 +33,7 @@ export class HostModelBridge implements ModelBridge {
           defaultMaxTokens: 'defaultMaxTokens' in info ? info.defaultMaxTokens : undefined,
           source: 'host' as const, loaded: true,
           nativeEditable: canWrite,
+          nativeClearable: canWrite && !configured?.providers?.[provider.id]?.models?.length,
           nativeEditReason: canWrite ? undefined : writable.has(provider.id) ? '模型不在 Provider 的可编辑配置清单中' : '该 Provider 未公开可写模型字段',
         }
       }))
@@ -59,6 +61,15 @@ export class HostModelBridge implements ModelBridge {
       for (const [field, value] of Object.entries(values)) ops.push({ op: 'set', path: [...fieldPath, field], value })
     }
     if (ops.length) await this.settings.mutate('llm-pi-ai', ops, revision)
+  }
+
+  async clearNative(ref: ModelRef, fields: readonly ('image' | 'contextWindow' | 'maxTokens')[], revision: number): Promise<void> {
+    const entry = this.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
+    if (!entry || entry.settingsNs !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
+    const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
+    if (section?.providers?.[ref.providerId]?.models?.length) throw new Error('此 Provider 使用显式模型清单，无法安全地清除字段覆盖')
+    const names = { image: 'input', contextWindow: 'contextWindow', maxTokens: 'maxTokens' } as const
+    await this.settings.mutate('llm-pi-ai', fields.map(field => ({ op: 'unset' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, names[field]] })), revision)
   }
 }
 

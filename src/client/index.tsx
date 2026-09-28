@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import type { ManagerConfig, ModelRecord, ModelRef, Role, Tier, Verification } from '../domain.js'
 
 export const inject = ['slots', 'modelDirectories']
-type ModelDirectory = { load(): Promise<{ current: { provider: string; model: string } | null }>; select(selection: { provider: string; model: string }): Promise<void> }
+type ModelDirectory = { store: { getSnapshot(): { current: { provider: string; model: string } | null }; subscribe(listener: () => void): () => void }; load(): Promise<{ current: { provider: string; model: string } | null }>; select(selection: { provider: string; model: string }): Promise<void> }
 type ModelDirectories = { directoryFor(sessionId: string): ModelDirectory }
 const managedProvider = 'dsh-model-manager'
 function managedModel(target: ModelRef | string): string {
@@ -71,6 +71,7 @@ function NativeEditor({ model, revision, refresh, report }: { model: ModelRecord
   const [context, setContext] = useState(model.contextWindow?.toString() ?? '')
   const [output, setOutput] = useState(model.defaultMaxTokens?.toString() ?? '')
   const [busy, setBusy] = useState(false)
+  useEffect(() => { setImage(model.nativeImage); setContext(model.contextWindow?.toString() ?? ''); setOutput(model.defaultMaxTokens?.toString() ?? '') }, [model.nativeImage, model.contextWindow, model.defaultMaxTokens])
   const save = async () => {
     if (revision === undefined) return
     setBusy(true)
@@ -85,7 +86,17 @@ function NativeEditor({ model, revision, refresh, report }: { model: ModelRecord
     } catch (error) { report(String(error)) }
     finally { setBusy(false) }
   }
-  return <div className="dmm-row"><label>宿主原生图片 <select disabled={!model.nativeEditable} value={image} onChange={event => setImage(event.target.value as ModelRecord['nativeImage'])}><option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option></select></label><label>上下文容量 <input disabled={!model.nativeEditable} type="number" min="1" value={context} onChange={event => setContext(event.target.value)} /></label><label>模型最大输出 <input disabled={!model.nativeEditable} type="number" min="1" value={output} onChange={event => setOutput(event.target.value)} /></label><button disabled={busy || revision === undefined || !model.nativeEditable} onClick={() => void save()}>保存到宿主</button>{!model.nativeEditable && <span className="dmm-muted">{model.nativeEditReason}</span>}</div>
+  const clear = async (field: 'image' | 'contextWindow' | 'maxTokens') => {
+    if (revision === undefined) return
+    setBusy(true)
+    try {
+      await request('/native', { method: 'POST', body: JSON.stringify({ providerId: model.providerId, modelId: model.modelId, revision, clear: [field] }) })
+      await refresh()
+      report('已清除该字段的宿主覆盖，后续请求使用宿主默认声明。')
+    } catch (error) { report(String(error)) }
+    finally { setBusy(false) }
+  }
+  return <div className="dmm-row"><label>宿主原生图片 <select disabled={!model.nativeEditable} value={image} onChange={event => setImage(event.target.value as ModelRecord['nativeImage'])}><option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option></select></label><label>上下文容量 <input disabled={!model.nativeEditable} type="number" min="1" value={context} onChange={event => setContext(event.target.value)} /></label><label>模型最大输出 <input disabled={!model.nativeEditable} type="number" min="1" value={output} onChange={event => setOutput(event.target.value)} /></label><button disabled={busy || revision === undefined || !model.nativeEditable} onClick={() => void save()}>保存到宿主</button>{model.nativeClearable && <><button disabled={busy || revision === undefined} onClick={() => void clear('image')}>清除图片覆盖</button><button disabled={busy || revision === undefined} onClick={() => void clear('contextWindow')}>清除容量覆盖</button><button disabled={busy || revision === undefined} onClick={() => void clear('maxTokens')}>清除输出覆盖</button></>}{!model.nativeEditable && <span className="dmm-muted">{model.nativeEditReason}</span>}</div>
 }
 
 function ManagerSection() {
@@ -178,18 +189,33 @@ function ComposerStatus({ sessionId, modelDirectories }: { sessionId?: string; m
   const [state, setState] = useState('')
   useEffect(() => {
     let active = true
+    let stopDirectory: (() => void) | undefined
+    let syncing = false
+    let configured: ModelRef | string | undefined
+    let visionEnabled = false
+    const synchronize = async (directory: ModelDirectory) => {
+      if (syncing || !active || !configured && !visionEnabled) return
+      syncing = true
+      try { await selectManaged(directory, configured, visionEnabled) }
+      finally { syncing = false }
+    }
     const refresh = async () => {
       const next = await request('') as Snapshot
       if (!active) return
       setSnapshot(next)
       if (!sessionId) return
-      const configured = next.config[next.config.mode].target
-      if (configured || next.config.vision.enabled) await selectManaged(modelDirectories.directoryFor(sessionId), configured, next.config.vision.enabled)
+      configured = next.config[next.config.mode].target
+      visionEnabled = next.config.vision.enabled
+      const directory = modelDirectories.directoryFor(sessionId)
+      if (!stopDirectory) stopDirectory = directory.store.subscribe(() => {
+        if (directory.store.getSnapshot().current?.provider !== managedProvider) void synchronize(directory).catch(error => { if (active) setState(String(error)) })
+      })
+      await synchronize(directory)
     }
     void refresh().catch(error => { if (active) setState(String(error)) })
     const onConfig = () => { void refresh().catch(error => { if (active) setState(String(error)) }) }
     window.addEventListener('dmm:config', onConfig)
-    return () => { active = false; window.removeEventListener('dmm:config', onConfig) }
+    return () => { active = false; stopDirectory?.(); window.removeEventListener('dmm:config', onConfig) }
   }, [sessionId, modelDirectories])
   if (!snapshot) return <span className="dmm-composer">模型管理…</span>
   const aliases = Object.keys(snapshot.config.aliases)
