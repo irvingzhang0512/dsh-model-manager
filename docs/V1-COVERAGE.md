@@ -8,7 +8,7 @@
 | 原生图片、容量、输出能力写回 | `src/service.ts` 的 `HostModelBridge` | 精确字段设置与清除覆盖已通过设置服务契约测试；显式模型清单因无法区分原始声明而禁用清除；真实字段编辑及图片上传回归待完成 |
 | 推理档位映射 | `src/domain.ts`、`src/adapter.ts` | 非法档位拒绝和真实档位列表已测试；各 Provider 实际参数验收待完成 |
 | 指定模型文字、图片、工具、推理参数验证，批量串行与取消 | `src/index.ts`、`src/probe-image.ts`、`src/client/index.tsx` | 真实文字、图片、工具及 `off` 推理参数请求被接受，图片红色答案核对通过；批量 GUI 文字验证通过；网络异常和取消的独立证据已通过测试；推理内部强度不可由接口成功证明 |
-| AI 能力探测（真实图片/工具请求 → 建议映射 → 确认写入，含声明临时提权实测） | `src/domain.ts` 的 `probeSuggestions`、`src/index.ts` 的 `probeModel` 与 `/probe` 路由、`src/service.ts` 的 input 读写、`src/client/index.tsx` 的探测按钮与模态建议预览 | 提权→实测→恢复流程、提权失败跳过、恢复失败警告与建议映射规则均已通过单元与集成测试；真实 GUI 探测、宿主写入确认与批量探测待验收 |
+| AI 能力探测（真实图片请求 → 建议映射 → 确认写入，含声明临时提权实测） | `src/domain.ts` 的 `probeSuggestions`、`src/index.ts` 的 `probeModel` 与 `/probe` 路由、`src/service.ts` 的 input 读写、`src/client/index.tsx` 的探测按钮与模态建议预览 | 提权→实测→恢复流程、提权失败跳过、恢复失败警告与建议映射规则均已通过单元与集成测试；真实 GUI 探测、宿主写入确认与批量探测待验收 |
 | 受管理入口、Manual、每轮/会话覆盖、配置快照 | `src/adapter.ts`、`src/index.ts`、`src/service.ts` | 单元测试、真实宿主路由及文字对话成功；Manual 目标优先级、模型目录刷新后旧请求快照与轮次/请求 ID 日志已测；宿主点号工具名经请求内映射后不再使 DeepSeek 拒绝，看图工具实际调用通过 |
 | Auto 角色委派、并发限制、显式升级档位、角色提示 | `src/tools.ts`、`src/index.ts` | 真实 GUI 的 search 子 Agent 已通过受管理入口调用另一模型并返回结果，日志核对成功；按工作区限制编码并发和显式升级映射已通过单元测试，待真实验收 |
 | 四种视觉策略、附件引用、看图工具、区域裁剪、关闭视觉后历史会话继续 | `src/adapter.ts`、`src/tools.ts` | 策略、工具结果图片引用、归一化区域实际像素裁剪以及视觉失败/取消不缓存单元测试；真实 GUI 单图追问、红蓝多图、历史图片区域裁剪工具调用及关闭视觉后的历史会话继续通过；工具返回图片待真实验收 |

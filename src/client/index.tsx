@@ -21,7 +21,7 @@ type Tab = '模型' | '别名与推理配置' | 'Manual/Auto' | '视觉' | '可�
 const tabs: Tab[] = ['模型', '别名与推理配置', 'Manual/Auto', '视觉', '可靠性', '验证', '日志']
 const roles: Role[] = ['main', 'search', 'coding', 'review', 'strong', 'vision']
 const tiers: Tier[] = ['auto', 'fast', 'balanced', 'deep', 'max']
-const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明', pluginTools: '插件工具声明' }
+const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明' }
 type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
 type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[] }
 type Support = 'yes' | 'no' | 'unknown'
@@ -248,7 +248,7 @@ function ManagerSection() {
     if (!snapshot) return
     const models = filtered
     if (!models.length) return
-    if (!window.confirm(`将对当前筛选的 ${models.length} 个模型逐个发出真实探测请求（图片 + 工具，会消耗 token）。只写入高置信结论：图片能力写宿主声明与插件声明，工具能力只写插件声明。是否继续？`)) return
+    if (!window.confirm(`将对当前筛选的 ${models.length} 个模型逐个发出真实图片探测请求（会消耗 token）。只写入高置信结论（宿主声明与插件声明）。是否继续？`)) return
     setBusy(true)
     let revision = snapshot.nativeRevision
     let done = 0, hostApplied = 0, inconclusive = 0, restoreFailedCount = 0
@@ -280,7 +280,6 @@ function ManagerSection() {
           next.models[key] ??= {}
           next.models[key].capability ??= {}
           if (item.field === 'pluginImage') next.models[key].capability!.image = item.value
-          if (item.field === 'pluginTools') next.models[key].capability!.tools = item.value
         }
       })
       notify('success', `批量探测完成：${done}/${models.length} 个模型；写宿主 ${hostApplied} 项、插件声明 ${pluginEdits.length} 项、无结论 ${inconclusive} 个。${pluginEdits.length ? '插件声明需再点页面底部「保存设置」落盘。' : ''}${restoreFailedCount ? ` ${restoreFailedCount} 个模型恢复宿主声明失败，请逐一核对。` : ''}`)
@@ -308,7 +307,6 @@ function ManagerSection() {
         next.models[key].capability ??= {}
         for (const item of pluginChosen) {
           if (item.field === 'pluginImage') next.models[key].capability!.image = item.value
-          if (item.field === 'pluginTools') next.models[key].capability!.tools = item.value
         }
       })
       setPreview(null)
@@ -325,8 +323,7 @@ function ManagerSection() {
   const resetFilter = () => { setModelFilter(''); setProviderFilter('') }
   const currentSupport = (model: ModelRecord, field: ProbeField): Support => {
     if (field === 'hostImage') return model.nativeImage
-    const settings = draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability
-    return (field === 'pluginImage' ? settings?.image : settings?.tools) ?? 'unknown'
+    return draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'
   }
   return <div className="dmm-root">
     <h2>模型管理</h2><div className="dmm-muted">管理模型声明、别名、角色和视觉辅助。原有附件上传与发送流程保持不变。目录只代表宿主已加载的模型；外部导入若尚未被宿主加载，需要先刷新宿主。</div>
@@ -340,12 +337,12 @@ function ManagerSection() {
       {filtered.length === 0 && <div className="dmm-card dmm-empty dmm-muted">没有匹配的模型。调整筛选条件，或点「清除筛选」查看全部 {snapshot.models.length} 个模型。</div>}
       {filtered.map(model => <div className="dmm-card" key={`${model.providerId}:${model.modelId}`}>
         <strong>{model.name}</strong> <span className="dmm-muted">{model.providerId} / {model.modelId}</span>
-        <div className="dmm-row">原生图片：{model.nativeImage}；工具：{model.nativeTools}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}</div>
+        <div className="dmm-row">原生图片：{model.nativeImage}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}</div>
         <div className="dmm-muted">{snapshot.verifications.filter(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId).map(item => `${item.kind}: ${item.status} / ${item.behavior ?? '未知'}${item.stale ? '（已过期）' : ''}`).join('；') || '尚无验证证据'}</div>
         <NativeEditor model={model} revision={snapshot.nativeRevision} refresh={async () => { await refreshDirectory(true) }} notify={notify} />
         <div className="dmm-row">
           <button disabled={busy || probing !== ''} onClick={() => void probeOne(model)}>{probing === `${model.providerId}:${model.modelId}` ? '探测中…' : 'AI 探测能力'}</button>
-          <span className="dmm-muted">各发一次图片与工具的真实请求，按结果给出可直接写入的结论</span>
+          <span className="dmm-muted">发一次真实图片探测请求，按结果给出可直接写入的结论</span>
         </div>
         <div className="dmm-row"><label>插件图片声明 <select value={draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'} onChange={event => edit(next => { const key = JSON.stringify([model.providerId, model.modelId]); next.models[key] ??= {}; next.models[key].capability ??= {}; next.models[key].capability!.image = event.target.value as 'yes' | 'no' | 'unknown' })}><option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option></select></label></div>
       </div>)}

@@ -89,7 +89,7 @@ describe('宿主桥接与版本控制', () => {
   it('模型配置变化后原验证证据标为过期', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dmm-evidence-'))
     try {
-      const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'no' as const, nativeTools: 'unknown' as const, reasoningEfforts: [], source: 'host' as const, loaded: true }
+      const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'no' as const as const, reasoningEfforts: [], source: 'host' as const, loaded: true }
       const service = new ModelManagerService({ catalog: async () => [model], applyNative: async () => {} }, dir)
       await service.init()
       await service.saveVerification({ model, kind: 'image', status: 'rejected', checkedAt: '2026-01-01', signature: service.signature(model), requestCount: 1 })
@@ -103,7 +103,7 @@ describe('宿主桥接与版本控制', () => {
   it('推理设置变更使推理验证过期但不污染文字证据', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dmm-reasoning-'))
     try {
-      const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'no' as const, nativeTools: 'unknown' as const, reasoningEfforts: [{ id: 'off', name: 'Off' }], source: 'host' as const, loaded: true }
+      const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'no' as const as const, reasoningEfforts: [{ id: 'off', name: 'Off' }], source: 'host' as const, loaded: true }
       const service = new ModelManagerService({ catalog: async () => [model], applyNative: async () => {} }, dir)
       await service.init()
       await service.saveVerification({ model, kind: 'reasoning', status: 'accepted', checkedAt: '2026-01-01', signature: service.signature(model, 'reasoning'), requestCount: 1 })

@@ -6,7 +6,6 @@ export type Role = 'main' | 'search' | 'coding' | 'review' | 'strong' | 'vision'
 export interface ModelRef { providerId: string; modelId: string }
 export interface CapabilityOverride {
   image?: Support
-  tools?: Support
   thinking?: Support
   contextWindow?: number
   maxOutputTokens?: number
@@ -37,7 +36,6 @@ export interface ManagerConfig {
 export interface ModelRecord extends ModelRef {
   name: string
   nativeImage: Support
-  nativeTools: Support
   reasoningEfforts: { id: string; name: string }[]
   contextWindow?: number
   defaultMaxTokens?: number
@@ -59,9 +57,7 @@ export interface Verification {
 }
 
 /** 探测可写入的配置位置：宿主声明（写 llm-pi-ai）或插件声明（写本插件配置）。 */
-export type ProbeField = 'hostImage' | 'pluginImage' | 'pluginTools'
-/** 探测可执行的验证项；只做能由一次真实请求得出结论的能力，不猜测容量与档位。 */
-export type ProbeItem = 'image' | 'tools'
+export type ProbeField = 'hostImage' | 'pluginImage'
 
 export interface ProbeSuggestion {
   field: ProbeField
@@ -72,29 +68,21 @@ export interface ProbeSuggestion {
 
 /**
  * 把探测得到的验证证据映射成可预览的配置建议。
- * 只依据行为证据：识别出探测图颜色、真的发起工具调用才算高置信；
+ * 只依据行为证据：识别出探测图颜色才算高置信；
  * 网络错误、取消、请求被拒一律不给建议，避免把偶发故障写成模型能力。
  */
 export function probeSuggestions(verifications: Verification[]): ProbeSuggestion[] {
   const suggestions: ProbeSuggestion[] = []
   for (const item of verifications) {
-    if (item.kind === 'image') {
-      if (item.status === 'accepted' && item.behavior === 'observed') {
-        const reason = '图片探测通过：模型正确识别了探测图的颜色'
-        suggestions.push({ field: 'hostImage', value: 'yes', confidence: 'high', reason })
-        suggestions.push({ field: 'pluginImage', value: 'yes', confidence: 'high', reason })
-      } else if (item.status === 'accepted' && item.behavior === 'not-observed') {
-        suggestions.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片探测未通过：${item.detail ?? '模型未识别出探测图颜色'}` })
-      } else if (item.status === 'rejected') {
-        suggestions.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片请求被拒绝：${item.detail ?? '宿主或模型拒绝了图片参数'}` })
-      }
-    }
-    if (item.kind === 'tools') {
-      if (item.status === 'accepted' && item.behavior === 'observed') {
-        suggestions.push({ field: 'pluginTools', value: 'yes', confidence: 'high', reason: '工具探测通过：模型真的发起了探针工具调用' })
-      } else if (item.status === 'accepted' && item.behavior === 'not-observed') {
-        suggestions.push({ field: 'pluginTools', value: 'no', confidence: 'low', reason: '工具探测未通过：模型没有发起工具调用' })
-      }
+    if (item.kind !== 'image') continue
+    if (item.status === 'accepted' && item.behavior === 'observed') {
+      const reason = '图片探测通过：模型正确识别了探测图的颜色'
+      suggestions.push({ field: 'hostImage', value: 'yes', confidence: 'high', reason })
+      suggestions.push({ field: 'pluginImage', value: 'yes', confidence: 'high', reason })
+    } else if (item.status === 'accepted' && item.behavior === 'not-observed') {
+      suggestions.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片探测未通过：${item.detail ?? '模型未识别出探测图颜色'}` })
+    } else if (item.status === 'rejected') {
+      suggestions.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片请求被拒绝：${item.detail ?? '宿主或模型拒绝了图片参数'}` })
     }
   }
   return suggestions

@@ -34,7 +34,6 @@ export class HostModelBridge implements ModelBridge {
         return {
           providerId: provider.id, modelId: model.id, name: model.name,
           nativeImage: info.inputModalities ? info.inputModalities.includes('image') ? 'yes' as const : 'no' as const : 'unknown' as const,
-          nativeTools: 'unknown' as const,
           reasoningEfforts: 'reasoning' in info && info.reasoning ? info.reasoning.efforts.map(e => ({ id: e.id as string, name: e.name })) : [],
           contextWindow: 'context' in info ? info.context?.contextWindow : undefined,
           defaultMaxTokens: 'defaultMaxTokens' in info ? info.defaultMaxTokens : undefined,

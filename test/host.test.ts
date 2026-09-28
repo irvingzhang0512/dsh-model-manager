@@ -127,14 +127,14 @@ describe('宿主装配', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
     const probe = routes.find(route => route.path === '/api/model-manager/probe')!
     const { res, result } = fakeResponse()
-    await probe.handler(fakeRequest({ providerId: 'p', modelId: 'm', items: ['image'] }), res)
+    await probe.handler(fakeRequest({ providerId: 'p', modelId: 'm' }), res)
     const payload = JSON.parse(result.body) as { verifications: { kind: string; status: string; behavior?: string }[]; suggestions: { field: string; value: string; confidence: string }[] }
     expect(result.status).toBe(200)
     expect(asked).toEqual(['image'])
     expect(payload.verifications[0]).toMatchObject({ kind: 'image', status: 'accepted', behavior: 'observed' })
     expect(payload.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high', 'pluginImage:yes:high'])
   })
-  it('探测路由拒绝未加载的模型与非法探测项', async () => {
+  it('探测路由拒绝未加载的模型', async () => {
     temporary = await mkdtemp(join(tmpdir(), 'dmm-probe-bad-'))
     process.env.DSH_HOME = temporary
     const routes: { path: string; handler: Function }[] = []
@@ -157,13 +157,9 @@ describe('宿主装配', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
     const probe = routes.find(route => route.path === '/api/model-manager/probe')!
     const missing = fakeResponse()
-    await probe.handler(fakeRequest({ providerId: 'p', modelId: 'ghost', items: ['image'] }), missing.res)
+    await probe.handler(fakeRequest({ providerId: 'p', modelId: 'ghost' }), missing.res)
     expect(missing.result.status).toBe(400)
     expect(JSON.parse(missing.result.body).error).toContain('模型未加载')
-    const invalid = fakeResponse()
-    await probe.handler(fakeRequest({ providerId: 'p', modelId: 'm', items: ['reasoning'] }), invalid.res)
-    expect(invalid.result.status).toBe(400)
-    expect(JSON.parse(invalid.result.body).error).toContain('无效探测项')
   })
   it('探测对声明不支持的模型临时提权实测并恢复原声明', async () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm' }
@@ -176,8 +172,7 @@ describe('宿主装配', () => {
     }
     const llm = {
       resolveModelInfo: async () => model,
-      stream: (options: { tools?: unknown[] }) => (async function* () {
-        if (options.tools?.length) yield { type: 'tool-call-delta', name: 'model_manager_probe' }
+      stream: () => (async function* () {
         yield { type: 'text-delta', text: '红色' }
         yield { type: 'finish', reason: { kind: 'stop' } }
       })(),
@@ -189,12 +184,12 @@ describe('宿主装配', () => {
     }
     const attachments = { saveImage: async () => ({ id: 'probe-image' }) }
     const controller = new AbortController()
-    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, ['image', 'tools'], 'no', controller.signal)
+    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, 'no', controller.signal)
     expect(bridge.setInput.mock.calls.map(call => call[1])).toEqual([['text', 'image'], undefined])
     expect(result.elevated).toBe(true)
     expect(result.restoreFailed).toBe(false)
     expect(result.notes).toEqual([])
-    expect(result.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high', 'pluginImage:yes:high', 'pluginTools:yes:high'])
+    expect(result.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high', 'pluginImage:yes:high'])
   })
   it('探测恢复宿主声明时写回原值而不是固定值', async () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm' }
@@ -219,7 +214,7 @@ describe('宿主装配', () => {
     }
     const attachments = { saveImage: async () => ({ id: 'probe-image' }) }
     const controller = new AbortController()
-    await probeModel(llm as never, attachments as never, service as never, bridge as never, model, ['image'], 'no', controller.signal)
+    await probeModel(llm as never, attachments as never, service as never, bridge as never, model, 'no', controller.signal)
     expect(bridge.setInput.mock.calls.map(call => call[1])).toEqual([['text', 'image'], ['text']])
   })
   it('提权失败时跳过图片探测并记录说明', async () => {
@@ -245,10 +240,11 @@ describe('宿主装配', () => {
     }
     const attachments = { saveImage: async () => ({ id: 'probe-image' }) }
     const controller = new AbortController()
-    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, ['image', 'tools'], 'no', controller.signal)
+    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, 'no', controller.signal)
     expect(result.elevated).toBe(false)
     expect(result.notes[0]).toContain('临时提权宿主声明失败')
-    expect(result.verifications.map(item => item.kind)).toEqual(['tools'])
+    expect(result.verifications).toEqual([])
+    expect(result.suggestions).toEqual([])
   })
   it('探测后恢复宿主声明失败时给出警告', async () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm' }
@@ -274,7 +270,7 @@ describe('宿主装配', () => {
     }
     const attachments = { saveImage: async () => ({ id: 'probe-image' }) }
     const controller = new AbortController()
-    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, ['image'], 'no', controller.signal)
+    const result = await probeModel(llm as never, attachments as never, service as never, bridge as never, model, 'no', controller.signal)
     expect(calls).toBe(3)
     expect(result.restoreFailed).toBe(true)
     expect(result.notes.join()).toContain('恢复宿主声明失败')

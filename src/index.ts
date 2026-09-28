@@ -11,7 +11,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CONFIG, managedId, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeItem, type ProbeSuggestion, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, managedId, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Selection, type Verification } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import { HostModelBridge, ModelManagerService, resolveDataDir, type ModelInputBridge } from './service.js'
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
@@ -100,16 +100,16 @@ export interface ProbeResult {
 }
 
 /**
- * 对一个模型执行能力探测。宿主在发出请求前会按模型声明把图片投影成文字占位，
+ * 对一个模型执行图片能力探测。宿主在发出请求前会按模型声明把图片投影成文字占位，
  * 因此声明为「不支持」的模型必须先把宿主 input 声明临时提为支持再实测，否则探测永远得出「未观察到」。
- * 提权无论成败都会恢复原声明；提权失败时跳过图片项并记录说明，避免把「图片未送达」误判成模型能力。
+ * 提权无论成败都会恢复原声明；提权失败时跳过探测并记录说明，避免把「图片未送达」误判成模型能力。
  */
-export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, service: ModelManagerService, inputBridge: ModelInputBridge, ref: ModelRef, items: readonly ProbeItem[], nativeImage: 'yes' | 'no' | 'unknown', signal: AbortSignal): Promise<ProbeResult> {
+export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, service: ModelManagerService, inputBridge: ModelInputBridge, ref: ModelRef, nativeImage: 'yes' | 'no' | 'unknown', signal: AbortSignal): Promise<ProbeResult> {
   const verifications: Verification[] = []
   const notes: string[] = []
   let elevated = false
   let restoreFailed = false
-  const needsElevation = items.includes('image') && nativeImage === 'no'
+  const needsElevation = nativeImage === 'no'
   let original: readonly string[] | undefined
   if (needsElevation) {
     original = inputBridge.modelInput(ref)
@@ -121,11 +121,7 @@ export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, 
     }
   }
   try {
-    for (const item of items) {
-      if (signal.aborted) break
-      if (item === 'image' && needsElevation && !elevated) continue
-      verifications.push(await verify(llm, attachments, service, ref, item, signal))
-    }
+    if (!signal.aborted && !(needsElevation && !elevated)) verifications.push(await verify(llm, attachments, service, ref, 'image', signal))
   } finally {
     if (elevated) {
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -232,13 +228,11 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     const abort = new AbortController()
     res.on('close', () => { if (!res.writableEnded) abort.abort() })
     try {
-      const input = await body(req) as { providerId: string; modelId: string; items?: ProbeItem[] }
-      const items: ProbeItem[] = input.items?.length ? input.items : ['image', 'tools']
-      if (items.some(item => item !== 'image' && item !== 'tools')) throw new Error('无效探测项')
+      const input = await body(req) as { providerId: string; modelId: string }
       const ref: ModelRef = { providerId: input.providerId, modelId: input.modelId }
       const record = service.model(ref)
       if (!record) throw new Error('模型未加载')
-      const result = await probeModel(ctx.llm, ctx.attachments, service, bridge, ref, items, record.nativeImage, abort.signal)
+      const result = await probeModel(ctx.llm, ctx.attachments, service, bridge, ref, record.nativeImage, abort.signal)
       json(res, 200, result)
     } catch (err) { if (!res.writableEnded) error(res, err) }
   } }), 'dsh-model-manager: probe route')

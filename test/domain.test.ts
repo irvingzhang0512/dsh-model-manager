@@ -20,12 +20,12 @@ describe('模型配置', () => {
     expect(() => validateConfig(config)).toThrow()
   })
   it('推理档位必须逐模型映射', () => {
-    const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const, nativeTools: 'unknown' as const, reasoningEfforts: [{ id: 'medium', name: 'Medium' }], source: 'host' as const, loaded: true }
+    const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const as const, reasoningEfforts: [{ id: 'medium', name: 'Medium' }], source: 'host' as const, loaded: true }
     expect(mapEffort(model, { tiers: { balanced: 'medium' } }, 'balanced')).toBe('medium')
     expect(() => mapEffort(model, { tiers: { max: 'max' } }, 'max')).toThrow()
   })
   it('关闭思考必须有实际 off 档位且不能和 Deep 同时使用', () => {
-    const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const, nativeTools: 'unknown' as const, reasoningEfforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], source: 'host' as const, loaded: true }
+    const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const as const, reasoningEfforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], source: 'host' as const, loaded: true }
     expect(mapSelectionEffort(model, { tiers: { deep: 'high' } }, { thinking: 'off', tier: 'auto' })).toBe('off')
     expect(() => mapSelectionEffort(model, { tiers: { deep: 'high' } }, { thinking: 'off', tier: 'deep' })).toThrow()
     expect(mergeSelection({ tier: 'deep' }, { tier: 'inherit' }).tier).toBe('deep')
@@ -63,13 +63,5 @@ describe('探测建议', () => {
   })
   it('网络错误和取消不产生任何建议', () => {
     expect(probeSuggestions([evidence('image', 'network-error'), evidence('tools', 'cancelled')])).toEqual([])
-  })
-  it('工具探测只有真发起调用才算通过', () => {
-    expect(probeSuggestions([evidence('tools', 'accepted', 'observed')])).toEqual([{ field: 'pluginTools', value: 'yes', confidence: 'high', reason: expect.stringContaining('工具调用') }])
-    expect(probeSuggestions([evidence('tools', 'accepted', 'not-observed')])[0]).toMatchObject({ field: 'pluginTools', value: 'no', confidence: 'low' })
-  })
-  it('同时探测图片与工具时逐项给出建议', () => {
-    const suggestions = probeSuggestions([evidence('image', 'accepted', 'observed'), evidence('tools', 'accepted', 'observed')])
-    expect(suggestions.map(item => `${item.field}:${item.value}`)).toEqual(['hostImage:yes', 'pluginImage:yes', 'pluginTools:yes'])
   })
 })

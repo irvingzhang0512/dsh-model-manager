@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { ManagedAdapter, VisionRegistry } from '../src/adapter.ts'
 import { DEFAULT_CONFIG, managedId, type ModelRecord } from '../src/domain.ts'
 
-const model: ModelRecord = { providerId: 'provider-a', modelId: 'text', name: 'Text', nativeImage: 'no', nativeTools: 'unknown', reasoningEfforts: [{ id: 'low', name: 'Low' }], source: 'host', loaded: true }
+const model: ModelRecord = { providerId: 'provider-a', modelId: 'text', name: 'Text', nativeImage: 'no', reasoningEfforts: [{ id: 'low', name: 'Low' }], source: 'host', loaded: true }
 const fallbackModel: ModelRecord = { ...model, providerId: 'provider-b' }
 function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: string, request: any) => AsyncIterable<any>, records: ModelRecord[] = [model, fallbackModel]) {
   const calls: any[] = []
