@@ -1,0 +1,5 @@
+- insert:
+    - id: dsh-model-manager
+      name: dsh-model-manager
+      inject: [llm, settings, tools, subagents, attachments, webServer]
+      config: {}
