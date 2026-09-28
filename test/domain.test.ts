@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_CONFIG, classifyFailure, fromManagedId, managedId, mapEffort, mapSelectionEffort, mergeSelection, resolveSelection, validateConfig, visionRoute } from '../src/domain.ts'
+import { DEFAULT_CONFIG, classifyFailure, fromManagedId, managedId, mapEffort, mapSelectionEffort, mergeSelection, probeSuggestions, resolveSelection, validateConfig, visionRoute, type Verification } from '../src/domain.ts'
+
+function evidence(kind: Verification['kind'], status: Verification['status'], behavior?: Verification['behavior'], detail?: string): Verification {
+  return { model: { providerId: 'p', modelId: 'm' }, kind, status, behavior, detail, checkedAt: '2026-01-01T00:00:00.000Z', signature: 's', requestCount: 1 }
+}
 
 describe('模型配置', () => {
   it('不同 Provider 的同名模型 ID 不碰撞', () => {
@@ -37,5 +41,35 @@ describe('模型配置', () => {
     expect(classifyFailure(401)).toBe('auth')
     expect(classifyFailure(400, 'context_length_exceeded')).toBe('context')
     expect(classifyFailure(503)).toBe('retry')
+  })
+})
+
+describe('探测建议', () => {
+  it('图片识别通过同时建议写宿主和插件声明', () => {
+    const suggestions = probeSuggestions([evidence('image', 'accepted', 'observed')])
+    expect(suggestions).toEqual([
+      { field: 'hostImage', value: 'yes', confidence: 'high', reason: expect.stringContaining('正确识别') },
+      { field: 'pluginImage', value: 'yes', confidence: 'high', reason: expect.stringContaining('正确识别') },
+    ])
+  })
+  it('图片答错只建议插件声明为不支持，且置信度低', () => {
+    const suggestions = probeSuggestions([evidence('image', 'accepted', 'not-observed')])
+    expect(suggestions).toHaveLength(1)
+    expect(suggestions[0]).toMatchObject({ field: 'pluginImage', value: 'no', confidence: 'low' })
+  })
+  it('图片请求被拒只建议插件声明为不支持', () => {
+    const suggestions = probeSuggestions([evidence('image', 'rejected', undefined, 'unsupported image input')])
+    expect(suggestions).toEqual([{ field: 'pluginImage', value: 'no', confidence: 'low', reason: expect.stringContaining('unsupported image input') }])
+  })
+  it('网络错误和取消不产生任何建议', () => {
+    expect(probeSuggestions([evidence('image', 'network-error'), evidence('tools', 'cancelled')])).toEqual([])
+  })
+  it('工具探测只有真发起调用才算通过', () => {
+    expect(probeSuggestions([evidence('tools', 'accepted', 'observed')])).toEqual([{ field: 'pluginTools', value: 'yes', confidence: 'high', reason: expect.stringContaining('工具调用') }])
+    expect(probeSuggestions([evidence('tools', 'accepted', 'not-observed')])[0]).toMatchObject({ field: 'pluginTools', value: 'no', confidence: 'low' })
+  })
+  it('同时探测图片与工具时逐项给出建议', () => {
+    const suggestions = probeSuggestions([evidence('image', 'accepted', 'observed'), evidence('tools', 'accepted', 'observed')])
+    expect(suggestions.map(item => `${item.field}:${item.value}`)).toEqual(['hostImage:yes', 'pluginImage:yes', 'pluginTools:yes'])
   })
 })

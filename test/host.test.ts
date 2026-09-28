@@ -10,6 +10,28 @@ vi.mock('@deepseek-ai/dsh-tools', () => ({ defineTool: (options: unknown) => opt
 let temporary: string | undefined
 afterEach(async () => { if (temporary) await rm(temporary, { recursive: true, force: true }); temporary = undefined; delete process.env.DSH_HOME })
 
+function fakeRequest(payload: unknown) {
+  const text = JSON.stringify(payload)
+  return {
+    method: 'POST',
+    headers: { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+    socket: { remoteAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() { yield Buffer.from(text) },
+  }
+}
+
+function fakeResponse() {
+  const result = { status: 0, body: '', ended: false }
+  const res = {
+    get writableEnded() { return result.ended },
+    setHeader: () => {},
+    on: () => {},
+    writeHead: (status: number) => { result.status = status },
+    end: (text: string) => { result.body = text; result.ended = true },
+  }
+  return { res, result }
+}
+
 describe('宿主装配', () => {
   it('验证传输异常与取消产生独立证据，不改变能力声明', async () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm' }
@@ -63,9 +85,84 @@ describe('宿主装配', () => {
     expect(toolNames).toContain('model_manager_inspect_image')
     expect(prompts).toContain('dsh-model-manager')
     expect(routes.map(route => route.path)).toEqual([
-      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/refresh', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/overrides',
+      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/overrides',
     ])
     expect(new Set(routes.map(route => route.path)).size).toBe(routes.length)
     for (const dispose of disposers.reverse()) dispose()
+  })
+  it('探测路由发出真实请求并把证据映射成建议', async () => {
+    temporary = await mkdtemp(join(tmpdir(), 'dmm-probe-'))
+    process.env.DSH_HOME = temporary
+    const routes: { path: string; handler: Function }[] = []
+    const model = { providerId: 'p', modelId: 'm', name: 'm', inputModalities: ['text', 'image'] }
+    const asked: string[] = []
+    const fake = {
+      settings: {
+        register: () => ({ watch: () => () => {} }),
+        get: (ns: string) => ns === 'dsh-model-manager' ? structuredClone(DEFAULT_CONFIG) : undefined,
+        describe: () => [{ ns: 'dsh-model-manager', revision: 0 }],
+      },
+      llm: {
+        listProviders: () => [{ id: 'p' }],
+        listConfigurableProviders: () => [],
+        listModels: async () => [{ id: 'm', name: 'm' }],
+        resolveModelInfo: async () => model,
+        registerAdapter: () => () => {},
+        stream: (options: { messages: { content: { type: string }[] }[] }) => (async function* () {
+          asked.push(options.messages[0].content.some(part => part.type === 'image') ? 'image' : 'text')
+          yield { type: 'text-delta', text: '红色' }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        })(),
+      },
+      tools: { register: () => () => {} },
+      subagents: {},
+      attachments: { saveImage: async () => ({ id: 'probe-image' }) },
+      systemPrompt: { section: () => () => {} },
+      webServer: { register: (route: { path: string; handler: Function }) => { routes.push(route); return () => {} } },
+      on: () => () => {},
+      effect: (register: () => () => void) => { register() },
+      logger: { error: () => {} },
+    }
+    apply(fake as never)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const probe = routes.find(route => route.path === '/api/model-manager/probe')!
+    const { res, result } = fakeResponse()
+    await probe.handler(fakeRequest({ providerId: 'p', modelId: 'm', items: ['image'] }), res)
+    const payload = JSON.parse(result.body) as { verifications: { kind: string; status: string; behavior?: string }[]; suggestions: { field: string; value: string; confidence: string }[] }
+    expect(result.status).toBe(200)
+    expect(asked).toEqual(['image'])
+    expect(payload.verifications[0]).toMatchObject({ kind: 'image', status: 'accepted', behavior: 'observed' })
+    expect(payload.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high', 'pluginImage:yes:high'])
+  })
+  it('探测路由拒绝未加载的模型与非法探测项', async () => {
+    temporary = await mkdtemp(join(tmpdir(), 'dmm-probe-bad-'))
+    process.env.DSH_HOME = temporary
+    const routes: { path: string; handler: Function }[] = []
+    const fake = {
+      settings: {
+        register: () => ({ watch: () => () => {} }),
+        get: (ns: string) => ns === 'dsh-model-manager' ? structuredClone(DEFAULT_CONFIG) : undefined,
+        describe: () => [{ ns: 'dsh-model-manager', revision: 0 }],
+      },
+      llm: { listProviders: () => [], listConfigurableProviders: () => [], listModels: async () => [], registerAdapter: () => () => {}, resolveModelInfo: async () => ({}), stream: () => (async function* () {})() },
+      tools: { register: () => () => {} },
+      subagents: {}, attachments: {},
+      systemPrompt: { section: () => () => {} },
+      webServer: { register: (route: { path: string; handler: Function }) => { routes.push(route); return () => {} } },
+      on: () => () => {},
+      effect: (register: () => () => void) => { register() },
+      logger: { error: () => {} },
+    }
+    apply(fake as never)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const probe = routes.find(route => route.path === '/api/model-manager/probe')!
+    const missing = fakeResponse()
+    await probe.handler(fakeRequest({ providerId: 'p', modelId: 'ghost', items: ['image'] }), missing.res)
+    expect(missing.result.status).toBe(400)
+    expect(JSON.parse(missing.result.body).error).toContain('模型未加载')
+    const invalid = fakeResponse()
+    await probe.handler(fakeRequest({ providerId: 'p', modelId: 'm', items: ['reasoning'] }), invalid.res)
+    expect(invalid.result.status).toBe(400)
+    expect(JSON.parse(invalid.result.body).error).toContain('无效探测项')
   })
 })

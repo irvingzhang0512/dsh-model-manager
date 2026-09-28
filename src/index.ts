@@ -11,7 +11,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CONFIG, managedId, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, managedId, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeItem, type Selection, type Verification } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import { HostModelBridge, ModelManagerService, resolveDataDir } from './service.js'
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
@@ -165,6 +165,26 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
       json(res, 200, { verification })
     } catch (err) { if (!res.writableEnded) error(res, err) }
   } }), 'dsh-model-manager: verify route')
+
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/probe', handler: async (req, res) => {
+    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
+    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
+    const abort = new AbortController()
+    res.on('close', () => { if (!res.writableEnded) abort.abort() })
+    try {
+      const input = await body(req) as { providerId: string; modelId: string; items?: ProbeItem[] }
+      const items: ProbeItem[] = input.items?.length ? input.items : ['image', 'tools']
+      if (items.some(item => item !== 'image' && item !== 'tools')) throw new Error('无效探测项')
+      const ref: ModelRef = { providerId: input.providerId, modelId: input.modelId }
+      if (!service.model(ref)) throw new Error('模型未加载')
+      const verifications: Verification[] = []
+      for (const item of items) {
+        if (abort.signal.aborted) break
+        verifications.push(await verify(ctx.llm, ctx.attachments, service, ref, item, abort.signal))
+      }
+      json(res, 200, { verifications, suggestions: probeSuggestions(verifications), cancelled: abort.signal.aborted })
+    } catch (err) { if (!res.writableEnded) error(res, err) }
+  } }), 'dsh-model-manager: probe route')
 
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/refresh', handler: async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }

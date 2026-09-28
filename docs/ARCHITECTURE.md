@@ -16,6 +16,7 @@
 |---|---|---|---|
 | `/api/model-manager` | GET、PUT | PUT: `{revision, config}` | `{revision, config, models}`；冲突 409，非法配置 400 |
 | `/api/model-manager/verify` | POST | `{providerId, modelId, kind}` | `{verification}`；无效模型 400 |
+| `/api/model-manager/probe` | POST | `{providerId, modelId, items?: ('image'\|'tools')[]}` | `{verifications, suggestions, cancelled}`；缺省探测图片与工具；建议只依据行为证据，网络错误与取消不产生建议 |
 | `/api/model-manager/refresh` | POST | 无 | 最新宿主已加载模型目录与配置快照 |
 | `/api/model-manager/native` | POST | `{providerId, modelId, image?, contextWindow?, maxTokens?, revision}` | `{revision}`；冲突 409 |
 | `/api/model-manager/logs` | GET | 无 | `{events}` |
