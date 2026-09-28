@@ -6,7 +6,7 @@ describe('客户端 bundle', () => {
   it('loader id 与包名一致，设置区和输入区插槽注册', async () => {
     let loaded: any
     const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
-    const react = { createElement: () => ({}), useState: (value: unknown) => [value, () => {}], useEffect: () => {} }
+    const react = { createElement: () => ({}), useState: (value: unknown) => [value, () => {}], useEffect: () => {}, Component: class {}, cloneElement: () => ({}) }
     const document = { querySelector: () => ({}), createElement: () => ({}), head: { appendChild: () => {} } }
     runInNewContext(source, { window: { __ModuleLoader__: { load: (entry: any) => { loaded = entry } } }, document })
     expect(loaded.id).toBe('dsh-model-manager')

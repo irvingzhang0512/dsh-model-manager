@@ -279,4 +279,38 @@ describe('宿主装配', () => {
     expect(result.restoreFailed).toBe(true)
     expect(result.notes.join()).toContain('恢复宿主声明失败')
   })
+  it('保存设置的响应包含完整快照，避免客户端渲染崩溃白屏', async () => {
+    temporary = await mkdtemp(join(tmpdir(), 'dmm-put-'))
+    process.env.DSH_HOME = temporary
+    const routes: { path: string; handler: Function }[] = []
+    const fake = {
+      settings: {
+        register: () => ({ watch: () => () => {} }),
+        get: (ns: string) => ns === 'dsh-model-manager' ? structuredClone(DEFAULT_CONFIG) : undefined,
+        describe: () => [{ ns: 'dsh-model-manager', revision: 1 }],
+        replace: async () => {},
+      },
+      llm: { listProviders: () => [], listConfigurableProviders: () => [], listModels: async () => [], registerAdapter: () => () => {}, resolveModelInfo: async () => ({}), stream: () => (async function* () {})() },
+      tools: { register: () => () => {} },
+      subagents: {}, attachments: {},
+      systemPrompt: { section: () => () => {} },
+      webServer: { register: (route: { path: string; handler: Function }) => { routes.push(route); return () => {} } },
+      on: () => () => {},
+      effect: (register: () => () => void) => { register() },
+      logger: { error: () => {} },
+    }
+    apply(fake as never)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const config = routes.find(route => route.path === '/api/model-manager')!
+    const put = fakeRequest({ config: structuredClone(DEFAULT_CONFIG), revision: 1 })
+    put.method = 'PUT'
+    const { res, result } = fakeResponse()
+    await config.handler(put, res)
+    const payload = JSON.parse(result.body) as { revision: number; config?: unknown; models: unknown[]; verifications: unknown[] }
+    expect(result.status).toBe(200)
+    expect(payload.revision).toBe(1)
+    expect(payload.config).toBeTruthy()
+    expect(Array.isArray(payload.models)).toBe(true)
+    expect(Array.isArray(payload.verifications)).toBe(true)
+  })
 })

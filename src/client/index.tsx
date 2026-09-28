@@ -26,6 +26,13 @@ type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
 type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[] }
 type Support = 'yes' | 'no' | 'unknown'
 const supportLabels: Record<Support, string> = { yes: '支持', no: '不支持', unknown: '未知' }
+/** 归一化所有快照响应：models/verifications 缺失兜底为空数组，避免渲染时 TypeError 白屏；config 缺失说明服务端异常，抛错走失败路径。 */
+function asSnapshot(value: any): Snapshot {
+  if (!value?.config) throw new Error('模型管理响应不完整，请重试或重启 DSH')
+  return { ...value,
+    models: Array.isArray(value?.models) ? value.models : [],
+    verifications: Array.isArray(value?.verifications) ? value.verifications : [] }
+}
 
 const style = `
 .dmm-root{padding:20px;max-width:1100px;color:var(--dsw-alias-text-primary,#222)}
@@ -164,13 +171,13 @@ function ManagerSection() {
     timers.current.push(window.setTimeout(() => setNotices(list => list.filter(item => item.id !== id)), ttl))
   }, [])
 
-  const load = async () => { const next = await request('') as Snapshot; setSnapshot(next); setDraft(structuredClone(next.config)); setFatal('') }
+  const load = async () => { const next = asSnapshot(await request('')); setSnapshot(next); setDraft(structuredClone(next.config)); setFatal('') }
   useEffect(() => { void load().catch(error => setFatal(String(error))) }, [])
   /** 只刷新宿主目录与证据，不覆盖用户正在编辑的草稿。 */
   const refreshDirectory = async (silent = false): Promise<Snapshot | null> => {
     if (!snapshot) return null
     const before = new Set(snapshot.models.map(model => `${model.providerId}:${model.modelId}`))
-    const next = await request('/refresh', { method: 'POST' }) as Snapshot
+    const next = asSnapshot(await request('/refresh', { method: 'POST' }))
     const after = new Set(next.models.map(model => `${model.providerId}:${model.modelId}`))
     const added = [...after].filter(key => !before.has(key)).length
     const removed = [...before].filter(key => !after.has(key)).length
@@ -183,7 +190,7 @@ function ManagerSection() {
     if (!snapshot || !draft) return
     setBusy(true)
     try {
-      const next = await request('', { method: 'PUT', body: JSON.stringify({ revision: snapshot.revision, config: draft }) }) as Snapshot
+      const next = asSnapshot(await request('', { method: 'PUT', body: JSON.stringify({ revision: snapshot.revision, config: draft }) }))
       setSnapshot(next); setDraft(structuredClone(next.config)); window.dispatchEvent(new Event('dmm:config'))
       notify('success', '已保存插件配置（所有标签页），后续请求使用新配置。')
     } catch (error) {
@@ -198,7 +205,7 @@ function ManagerSection() {
   const verifyOne = async (ref: ModelRef, kind: Verification['kind'], signal?: AbortSignal) => {
     const result = await request('/verify', { method: 'POST', body: JSON.stringify({ ...ref, kind }), signal })
     setVerifyResult(result.verification)
-    const fresh = await request('') as Snapshot
+    const fresh = asSnapshot(await request(''))
     setSnapshot(fresh)
   }
   const verifyBatch = async (models: ModelRecord[], kind: Verification['kind']) => {
@@ -263,7 +270,7 @@ function ManagerSection() {
             } else pluginEdits.push({ model, field: item.field, value: item.value })
           }
         } catch (error) { setProbeProgress(`「${model.name}」探测失败：${String(error)}`) }
-        const next = await request('/refresh', { method: 'POST' }) as Snapshot
+        const next = asSnapshot(await request('/refresh', { method: 'POST' }))
         setSnapshot(next); revision = next.nativeRevision
         done++
       }
@@ -405,7 +412,7 @@ function ComposerStatus({ sessionId, modelDirectories }: { sessionId?: string; m
       finally { syncing = false }
     }
     const refresh = async () => {
-      const next = await request('') as Snapshot
+      const next = asSnapshot(await request(''))
       if (!active) return
       setSnapshot(next)
       if (!sessionId) return
@@ -435,8 +442,18 @@ function ComposerStatus({ sessionId, modelDirectories }: { sessionId?: string; m
   return <details className="dmm-composer"><summary>模型管理 · {snapshot.config.mode}{state ? ` · ${state}` : ''}</summary><div className="dmm-card"><div className="dmm-row"><SelectModel value={selection} models={snapshot.models} aliases={aliases} onChange={setSelection} /><ThinkingSelect value={thinking} offAvailable={supportsOff(selection, snapshot.config, snapshot.models)} onChange={value => { setThinking(value); if (value === 'off') setTier('auto') }} /><select aria-label="本轮推理档位" value={tier} onChange={event => setTier(event.target.value as Tier | 'inherit')}><option value="inherit">推理继承</option>{tiers.map(item => <option key={item} disabled={thinking === 'off' && item !== 'auto'}>{item}</option>)}</select><input aria-label="本轮输出上限" type="number" min="1" placeholder="输出上限" value={maxOutputTokens} onChange={event => setMaxOutputTokens(event.target.value)} /><select value={scope} onChange={event => setScope(event.target.value as 'session' | 'nextTurn')}><option value="nextTurn">本轮</option><option value="session">会话</option></select><button onClick={() => void save()}>应用</button><button onClick={() => void save(true)}>清除</button></div></div></details>
 }
 
+/** 面板错误边界：渲染异常时显示可重试的错误卡片，而不是让整个设置区白屏。 */
+class PanelBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null }
+  static getDerivedStateFromError(error: Error): { error: Error } { return { error } }
+  render() {
+    if (this.state.error) return <div className="dmm-root"><div className="dmm-card"><strong>模型管理界面出错</strong><p className="dmm-error">{String(this.state.error)}</p><button onClick={() => this.setState({ error: null })}>重试</button><span className="dmm-muted">若反复出现，请重启 DSH 或反馈此错误文本。</span></div></div>
+    return this.props.children
+  }
+}
+
 export function apply(ctx: { modelDirectories: ModelDirectories; slots: { inject(name: string, register: () => () => void): void; register(options: { name: string; id: string; order: number; label?: () => string; inject?: (sessionId: string) => { sessionId: string } }, component: (props: any) => React.ReactElement): () => void } }): void {
   injectStyle()
-  ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'model-manager', order: 12, label: () => '模型管理' }, ManagerSection))
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'model-manager-status', order: 60, label: () => '模型管理模式', inject: (sessionId: string) => ({ sessionId }) }, (props: { sessionId?: string }) => <ComposerStatus {...props} modelDirectories={ctx.modelDirectories} />))
+  ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'model-manager', order: 12, label: () => '模型管理' }, (props: any) => <PanelBoundary><ManagerSection {...props} /></PanelBoundary>))
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'model-manager-status', order: 60, label: () => '模型管理模式', inject: (sessionId: string) => ({ sessionId }) }, (props: { sessionId?: string }) => <PanelBoundary><ComposerStatus {...props} modelDirectories={ctx.modelDirectories} /></PanelBoundary>))
 }

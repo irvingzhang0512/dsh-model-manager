@@ -207,8 +207,9 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
     try {
       const input = await body(req) as { config: ManagerConfig; revision: number }
-      const revision = await service.update(input.config, input.revision)
-      json(res, 200, { revision, config: service.snapshot().config, models: service.snapshot().models, nativeRevision: ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision })
+      await service.update(input.config, input.revision)
+      // 必须返回完整快照（含 verifications）：客户端保存后会用该响应整体替换渲染状态，缺字段会导致渲染崩溃白屏。
+      json(res, 200, { ...service.snapshot(), nativeRevision: ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision })
     } catch (err) { error(res, err) }
   } }), 'dsh-model-manager: config route')
 
