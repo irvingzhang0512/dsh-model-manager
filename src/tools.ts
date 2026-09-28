@@ -1,5 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createHash, randomUUID } from 'node:crypto'
+import sharp from 'sharp'
 import type { GenerateOptions, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
@@ -11,6 +12,21 @@ import type { VisionRegistry } from './adapter.js'
 import { MANAGED_PROVIDER } from './adapter.js'
 
 const roles: Role[] = ['search', 'coding', 'review', 'strong', 'vision']
+
+async function cropImage(data: Uint8Array, region: string): Promise<Buffer> {
+  const parts = region.split(',').map(value => Number(value.trim()))
+  if (parts.length !== 4 || parts.some(value => !Number.isFinite(value))) throw new Error('裁剪区域须为 x,y,width,height，数值范围 0 到 1')
+  const [x, y, width, height] = parts
+  if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1 || y + height > 1) throw new Error('裁剪区域超出图片范围')
+  const source = Buffer.from(data)
+  const dimensions = await sharp(source).metadata()
+  if (!dimensions.width || !dimensions.height) throw new Error('无法读取图片尺寸')
+  const left = Math.floor(x * dimensions.width)
+  const top = Math.floor(y * dimensions.height)
+  const right = Math.min(dimensions.width, Math.ceil((x + width) * dimensions.width))
+  const bottom = Math.min(dimensions.height, Math.ceil((y + height) * dimensions.height))
+  return sharp(source).extract({ left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) }).png().toBuffer()
+}
 
 export function registerManagerTools(deps: { tools: ToolRuntime; subagents: SubagentRuntime; llm: LlmRuntime; attachments: AttachmentStore; service: ModelManagerService; vision: VisionRegistry }): () => void {
   const disposers: (() => void)[] = []
@@ -73,7 +89,7 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
     parameters: {
       attachment_id: { type: 'string', required: true },
       question: { type: 'string', required: true },
-      region: { type: 'string', description: '可选区域描述；当前版本作为问题提示，不裁剪像素。' },
+      region: { type: 'string', description: '可选裁剪区域：归一化 x,y,width,height，例如 0.25,0.25,0.5,0.5。' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     execute: async (args, exec) => {
@@ -94,11 +110,12 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
         await deps.service.log({ action: 'vision', session, provider: target.providerId, model: target.modelId, status: 'cache-hit' })
         return cached
       }
-      const prompt = `${args.question}${args.region ? `\n请特别关注区域：${args.region}` : ''}`
-      const messages: GenerateOptions['messages'] = [{ id: `model-manager:${Date.now()}` as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: prompt }, { type: 'image', attachment: ref }] }]
       const managedRequestId = randomUUID()
       const started = Date.now()
       try {
+        const visualRef = args.region ? await deps.attachments.saveImage({ data: await cropImage(image.data, args.region), mediaType: 'image/png' }) : ref
+        const prompt = `${args.question}${args.region ? '\n这张图是原图指定区域的裁剪。' : ''}`
+        const messages: GenerateOptions['messages'] = [{ id: `model-manager:${Date.now()}` as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: prompt }, { type: 'image', attachment: visualRef }] }]
         let result = ''
         for await (const chunk of deps.llm.stream({ provider: target.providerId, model: target.modelId, messages, signal: exec.signal, sessionId: session as never })) {
           if (chunk.type === 'text-delta') result += chunk.text
