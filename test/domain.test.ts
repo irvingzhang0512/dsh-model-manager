@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_CONFIG, classifyFailure, fromManagedId, managedId, mapEffort, resolveSelection, validateConfig, visionRoute } from '../src/domain.ts'
+import { DEFAULT_CONFIG, classifyFailure, fromManagedId, managedId, mapEffort, mapSelectionEffort, mergeSelection, resolveSelection, validateConfig, visionRoute } from '../src/domain.ts'
 
 describe('模型配置', () => {
   it('不同 Provider 的同名模型 ID 不碰撞', () => {
@@ -19,6 +19,12 @@ describe('模型配置', () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const, nativeTools: 'unknown' as const, reasoningEfforts: [{ id: 'medium', name: 'Medium' }], source: 'host' as const, loaded: true }
     expect(mapEffort(model, { tiers: { balanced: 'medium' } }, 'balanced')).toBe('medium')
     expect(() => mapEffort(model, { tiers: { max: 'max' } }, 'max')).toThrow()
+  })
+  it('关闭思考必须有实际 off 档位且不能和 Deep 同时使用', () => {
+    const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const, nativeTools: 'unknown' as const, reasoningEfforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], source: 'host' as const, loaded: true }
+    expect(mapSelectionEffort(model, { tiers: { deep: 'high' } }, { thinking: 'off', tier: 'auto' })).toBe('off')
+    expect(() => mapSelectionEffort(model, { tiers: { deep: 'high' } }, { thinking: 'off', tier: 'deep' })).toThrow()
+    expect(mergeSelection({ tier: 'deep' }, { tier: 'inherit' }).tier).toBe('deep')
   })
   it('视觉四策略保留未知与否的区别', () => {
     expect(visionRoute('native-first', 'unknown', true)).toBe('sidecar')

@@ -1,7 +1,8 @@
 import { LlmAdapter, type ContentBlock, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type PreparedAdapterCall, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { classifyFailure, fromManagedId, managedId, mapEffort, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRef } from './domain.js'
+import { classifyFailure, fromManagedId, managedId, mergeSelection, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRef } from './domain.js'
+import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
 
 export const MANAGED_PROVIDER = 'dsh-model-manager'
@@ -14,6 +15,7 @@ export class VisionRegistry {
     this.bySession.set(session, images)
   }
   get(session: string, id: string): ImageAttachmentRef | undefined { return this.bySession.get(session)?.get(id) }
+  has(session: string, id: string): boolean { return this.bySession.get(session)?.has(id) ?? false }
   clear(session: string): void { this.bySession.delete(session) }
 }
 
@@ -53,41 +55,54 @@ export class ManagedAdapter extends LlmAdapter {
     const model: LlmResolvedModelInfo = { ...info, provider, id, name: id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
     return { model, stream: (options: GenerateOptions) => {
       const session = options.sessionId as string || 'one-shot'
-      const selection = { ...(snapshot.config.mode === 'manual' ? snapshot.config.manual : snapshot.config.auto), ...this.service.activeSelection(session) }
-      return this.streamWithSnapshot(options, snapshot.config, candidates, selection)
+      const override = this.service.activeSelection(session)
+      const selection = mergeSelection(snapshot.config.mode === 'manual' ? snapshot.config.manual : snapshot.config.auto, override)
+      return this.streamWithSnapshot(options, snapshot.config, candidates, selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
     } }
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const config = this.service.snapshot().config
     const session = options.sessionId as string || 'one-shot'
-    const selection = { ...(config.mode === 'manual' ? config.manual : config.auto), ...this.service.activeSelection(session) }
-    yield* this.streamWithSnapshot(options, config, requestedModel(options.model, config), selection)
+    const override = this.service.activeSelection(session)
+    const selection = mergeSelection(config.mode === 'manual' ? config.manual : config.auto, override)
+    yield* this.streamWithSnapshot(options, config, requestedModel(options.model, config), selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
   }
 
-  private async *streamWithSnapshot(options: GenerateOptions, config: ManagerConfig, candidates: ModelRef[], selection: ReturnType<ModelManagerService['activeSelection']>): AsyncIterable<StreamChunk> {
+  private async *streamWithSnapshot(options: GenerateOptions, config: ManagerConfig, candidates: ModelRef[], selection: ReturnType<ModelManagerService['activeSelection']>, lockedParams: boolean): AsyncIterable<StreamChunk> {
     const session = options.sessionId as string || 'one-shot'
     const collect = (blocks: ContentBlock[]): ImageAttachmentRef[] => blocks.flatMap(block => block.type === 'image' ? [block.attachment] : block.type === 'tool-result' ? collect(block.content) : [])
     const allImages = options.messages.flatMap(m => collect(m.content))
+    const lastUser = [...options.messages].reverse().find(message => message.role === 'user')
+    const currentUserImages = lastUser ? collect(lastUser.content) : []
+    const historicalOnly = currentUserImages.length === 0 || currentUserImages.every(ref => this.vision.has(session, ref.attachmentId as string))
     this.vision.add(session, allImages)
     let attempt = 0
     let previousProvider: string | undefined
-    for (const candidate of candidates) {
+    let contextOnly = false
+    const queue = [...candidates]
+    const longContextCandidates = config.reliability.longContextCandidates ?? []
+    const tried = new Set<string>()
+    for (const candidate of queue) {
       if (attempt >= config.reliability.maxAttempts) break
+      if (tried.has(modelKey(candidate))) continue
+      if (contextOnly && !longContextCandidates.some(ref => modelKey(ref) === modelKey(candidate))) continue
       if ((this.cooldown.get(modelKey(candidate)) ?? 0) > Date.now()) continue
       if (previousProvider === candidate.providerId) continue
       const model = this.service.model(candidate)
       if (!model) continue
+      tried.add(modelKey(candidate))
       const nativeImage = config.models[modelKey(candidate)]?.capability?.image ?? model.nativeImage
-      const route = allImages.length && config.vision.enabled ? visionRoute(config.vision.policy, nativeImage, !!config.vision.target) : nativeImage === 'yes' ? 'native' : allImages.length ? 'error' : 'native'
+      const route = allImages.length && config.vision.enabled ? visionRoute(config.vision.policy, nativeImage, !!config.vision.target) : nativeImage === 'yes' ? 'native' : allImages.length ? historicalOnly ? 'history' : 'error' : 'native'
       if (route === 'error') throw new Error('当前模型不支持图片，且视觉辅助不可用')
-      const effort = mapEffort(model, config.models[modelKey(candidate)], selection?.tier)
-      const prepared = route === 'sidecar' ? this.sidecarMessages(options.messages) : options.messages
+      const effort = genericProviderAdapter.reasoningEffort(model, config.models[modelKey(candidate)], selection ?? {})
+      const prepared = route === 'sidecar' || route === 'history' ? this.sidecarMessages(options.messages, route === 'history') : options.messages
       const request = { ...options, provider: candidate.providerId, model: candidate.modelId, messages: prepared,
         reasoningEffort: effort as GenerateOptions['reasoningEffort'] ?? options.reasoningEffort,
         maxTokens: selection?.maxOutputTokens ?? options.maxTokens }
       let retryThis = false
       let retried = false
+      let downgraded = false
       do {
         retryThis = false
         attempt++
@@ -107,25 +122,34 @@ export class ManagedAdapter extends LlmAdapter {
         const failedReason = failure?.reason
         const failureInfo = failedReason && 'failure' in failedReason ? failedReason.failure : undefined
         await this.service.log({ session, logicalProvider: MANAGED_PROVIDER, logicalModel: options.model, provider: candidate.providerId,
-          model: candidate.modelId, attempt, route, effort, durationMs: Date.now() - started, status: failedReason?.kind ?? 'success',
+          model: candidate.modelId, attempt, route, effort: request.reasoningEffort, durationMs: Date.now() - started, status: failedReason?.kind ?? 'success',
           failureCode: failureInfo?.code, httpStatus: failureInfo?.status, requestId: failureInfo?.requestId, usage })
         if (!failure) return
         if (visible || failedReason?.kind === 'aborted' || attempt >= config.reliability.maxAttempts) { yield failure; return }
         const classification = classifyFailure(failureInfo?.status, failureInfo?.code)
         if (classification === 'cooldown') this.cooldown.set(modelKey(candidate), Date.now() + 30000)
         if (classification === 'auth') previousProvider = candidate.providerId
-        if (classification === 'retry' && config.reliability.retryTransient && !retried && attempt < config.reliability.maxAttempts) { retryThis = true; retried = true }
-        else if (!['cooldown', 'auth', 'retry'].includes(classification)) { yield failure; return }
+        if (classification === 'context') {
+          if (!longContextCandidates.length) { yield failure; return }
+          contextOnly = true
+          for (const ref of longContextCandidates) if (!queue.some(item => modelKey(item) === modelKey(ref))) queue.push(ref)
+        }
+        if (classification === 'parameter' && config.reliability.parameterDowngrade && !lockedParams && !downgraded && request.reasoningEffort && /reasoning|effort|thinking/i.test(failureInfo?.message ?? '') && attempt < config.reliability.maxAttempts) {
+          request.reasoningEffort = undefined
+          downgraded = true
+          retryThis = true
+        } else if (classification === 'retry' && config.reliability.retryTransient && !retried && attempt < config.reliability.maxAttempts) { retryThis = true; retried = true }
+        else if (!['cooldown', 'auth', 'retry', 'context'].includes(classification)) { yield failure; return }
       } while (retryThis)
     }
     yield { type: 'finish', reason: { kind: 'error', failure: { code: 'NO_CANDIDATE', message: '模型候选均不可用或已达到尝试上限' } } }
   }
 
-  private sidecarMessages(messages: GenerateOptions['messages']): GenerateOptions['messages'] {
+  private sidecarMessages(messages: GenerateOptions['messages'], historyOnly = false): GenerateOptions['messages'] {
     const transform = (blocks: ContentBlock[]): ContentBlock[] => {
       const result: ContentBlock[] = []
       for (const block of blocks) {
-        if (block.type === 'image') result.push({ type: 'text', text: `[图片附件 ${block.attachment.attachmentId}] 请使用 model_manager_inspect_image 工具查看此原图；可对同一附件继续追问。` })
+        if (block.type === 'image') result.push({ type: 'text', text: historyOnly ? `[历史图片附件 ${block.attachment.attachmentId}] 当前视觉辅助已关闭，无法重新查看原图。` : `[图片附件 ${block.attachment.attachmentId}] 请使用 model_manager_inspect_image 工具查看此原图；可对同一附件继续追问。` })
         else if (block.type === 'tool-result') result.push({ ...block, content: transform(block.content) })
         else result.push(block)
       }

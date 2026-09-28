@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
-import { DEFAULT_CONFIG, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, mergeSelection, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
 
 export interface ModelBridge {
   catalog(): Promise<ModelRecord[]>
@@ -77,6 +77,7 @@ export class ModelManagerService {
   private models: ModelRecord[] = []
   private writeQueue: Promise<void> = Promise.resolve()
   private verification = new Map<string, Verification>()
+  private visionCache = new Map<string, { answer: string; at: number }>()
   private overrides = new Map<string, { session?: Selection; nextTurn?: Selection; active?: { turn: number; selection: Selection } }>()
   constructor(private readonly bridge: ModelBridge, private readonly dataDir: string, private readonly settings?: SettingsProvider) {}
 
@@ -94,10 +95,15 @@ export class ModelManagerService {
       const saved = JSON.parse(await readFile(join(this.dataDir, 'overrides.json'), 'utf8')) as Record<string, { session?: Selection; nextTurn?: Selection }>
       for (const [session, value] of Object.entries(saved)) this.overrides.set(session, value)
     } catch { /* 首次启动 */ }
+    try {
+      const saved = JSON.parse(await readFile(join(this.dataDir, 'vision-cache.json'), 'utf8')) as Record<string, { answer: string; at: number }>
+      for (const [key, value] of Object.entries(saved)) if (value.at > Date.now() - 7 * 86400000) this.visionCache.set(key, value)
+    } catch { /* 首次启动或损坏时不复用缓存 */ }
   }
 
-  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[] } {
-    return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models) }
+  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] } {
+    return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models),
+      verifications: [...this.verification.values()].map(value => ({ ...structuredClone(value), stale: value.signature !== this.signature(value.model) })) }
   }
 
   async refresh(): Promise<ModelRecord[]> {
@@ -135,6 +141,11 @@ export class ModelManagerService {
       resolveSelection(this.config, selection.target)
     }
     const value = this.overrides.get(session) ?? {}
+    const preview = { ...value, [scope]: selection }
+    const global = this.config.mode === 'manual' ? this.config.manual : this.config.auto
+    const effective = mergeSelection(mergeSelection(global, preview.session), preview.nextTurn)
+    if (effective.thinking === 'off' && effective.tier && !['auto', 'inherit'].includes(effective.tier)) throw new Error('关闭思考不能同时选择非关闭推理档位')
+    if (effective.maxOutputTokens !== undefined && (!Number.isInteger(effective.maxOutputTokens) || effective.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
     if (selection) value[scope] = structuredClone(selection)
     else delete value[scope]
     this.overrides.set(session, value)
@@ -151,11 +162,11 @@ export class ModelManagerService {
   effectiveSelection(session: string, turn: number): Selection {
     const value = this.overrides.get(session) ?? {}
     if (!value.active || value.active.turn !== turn) {
-      value.active = { turn, selection: { ...value.session, ...value.nextTurn } }
+      value.active = { turn, selection: mergeSelection(value.session ?? {}, value.nextTurn) }
       this.overrides.set(session, value)
     }
     const global = this.config.mode === 'manual' ? this.config.manual : this.config.auto
-    return structuredClone({ ...global, ...value.active.selection })
+    return structuredClone(mergeSelection(global, value.active.selection))
   }
 
   activeSelection(session: string): Selection | undefined { return this.overrides.get(session)?.active?.selection && structuredClone(this.overrides.get(session)!.active!.selection) }
@@ -177,6 +188,21 @@ export class ModelManagerService {
   getVerification(ref: ModelRef, kind: Verification['kind']): (Verification & { stale: boolean }) | undefined {
     const evidence = this.verification.get(this.verificationKey(ref, kind))
     return evidence && { ...evidence, stale: evidence.signature !== this.signature(ref) }
+  }
+
+  getVisionCache(key: string): string | undefined { return this.visionCache.get(key)?.answer }
+
+  async putVisionCache(key: string, answer: string): Promise<void> {
+    this.visionCache.set(key, { answer, at: Date.now() })
+    const target = join(this.dataDir, 'vision-cache.json')
+    this.writeQueue = this.writeQueue.catch(() => {}).then(async () => {
+      const current = [...this.visionCache.entries()].filter(([, value]) => value.at > Date.now() - 7 * 86400000).slice(-1000)
+      this.visionCache = new Map(current)
+      await writeFile(`${target}.tmp`, JSON.stringify(Object.fromEntries(current)), 'utf8')
+      try { await copyFile(target, `${target}.bak`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      await rename(`${target}.tmp`, target)
+    })
+    await this.writeQueue
   }
 
   async saveVerification(result: Verification): Promise<void> {

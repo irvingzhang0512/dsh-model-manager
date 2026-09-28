@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import type { ManagerConfig, ModelRecord, ModelRef, Role, Tier, Verification } from '../domain.js'
 
 export const inject = ['slots']
-type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[] }
+type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] }
 type Tab = '模型' | '别名与推理配置' | 'Manual/Auto' | '视觉' | '可靠性' | '验证' | '日志'
 const tabs: Tab[] = ['模型', '别名与推理配置', 'Manual/Auto', '视觉', '可靠性', '验证', '日志']
 const roles: Role[] = ['main', 'search', 'coding', 'review', 'strong', 'vision']
@@ -35,6 +35,14 @@ function parseRef(value: string): ModelRef | string | undefined {
   if (value.startsWith('@')) return value
   const [providerId, modelId] = JSON.parse(value) as [string, string]
   return { providerId, modelId }
+}
+function supportsOff(target: ModelRef | string | undefined, config: ManagerConfig, models: ModelRecord[]): boolean {
+  if (!target) return false
+  const refs = typeof target === 'string' ? config.aliases[target.slice(1)] ?? [] : [target]
+  return refs.length > 0 && refs.every(ref => models.some(model => model.providerId === ref.providerId && model.modelId === ref.modelId && model.reasoningEfforts.some(e => e.id === 'off')))
+}
+function ThinkingSelect({ value, offAvailable, onChange }: { value?: 'inherit' | 'auto' | 'off'; offAvailable: boolean; onChange: (value: 'inherit' | 'auto' | 'off') => void }) {
+  return <select aria-label="思考模式" value={value ?? 'inherit'} onChange={event => onChange(event.target.value as 'inherit' | 'auto' | 'off')}><option value="inherit">思考继承</option><option value="auto">思考自动</option><option value="off" disabled={!offAvailable}>关闭思考{offAvailable ? '' : '（模型不支持）'}</option></select>
 }
 function SelectModel({ value, models, aliases, onChange }: { value?: ModelRef | string; models: ModelRecord[]; aliases: string[]; onChange: (next?: ModelRef | string) => void }) {
   return <select value={refValue(value)} onChange={event => onChange(parseRef(event.target.value))}>
@@ -78,6 +86,7 @@ function ManagerSection() {
   const [verifyResult, setVerifyResult] = useState<Verification | null>(null)
   const [logs, setLogs] = useState<Record<string, unknown>[]>([])
   const [modelFilter, setModelFilter] = useState('')
+  const verifyAbort = useRef<AbortController | null>(null)
 
   const load = async () => { const next = await request('') as Snapshot; setSnapshot(next); setDraft(structuredClone(next.config)); setMessage('') }
   useEffect(() => { void load().catch(error => setMessage(String(error))) }, [])
@@ -88,6 +97,28 @@ function ManagerSection() {
     try { const next = await request('', { method: 'PUT', body: JSON.stringify({ revision: snapshot.revision, config: draft }) }) as Snapshot; setSnapshot(next); setDraft(structuredClone(next.config)); setMessage('已保存，后续请求使用新配置。') }
     catch (error) { setMessage(`${String(error)}。若配置冲突，请重新加载。`) }
     finally { setBusy(false) }
+  }
+  const verifyOne = async (ref: ModelRef, kind: Verification['kind'], signal?: AbortSignal) => {
+    const result = await request('/verify', { method: 'POST', body: JSON.stringify({ ...ref, kind }), signal })
+    setVerifyResult(result.verification)
+    const fresh = await request('') as Snapshot
+    setSnapshot(fresh)
+  }
+  const verifyBatch = async (models: ModelRecord[], kind: Verification['kind']) => {
+    if (!models.length || !window.confirm(`将串行发送 ${models.length} 次 ${kind} 模型验证请求。是否开始？`)) return
+    const controller = new AbortController()
+    verifyAbort.current = controller
+    setBusy(true)
+    let completed = 0
+    try {
+      for (const model of models) {
+        if (controller.signal.aborted) break
+        await verifyOne(model, kind, controller.signal)
+        completed++
+        setMessage(`已验证 ${completed}/${models.length} 个模型`)
+      }
+    } catch (error) { if (!controller.signal.aborted) setMessage(String(error)) }
+    finally { setMessage(`批量验证结束：${completed}/${models.length} 次请求${controller.signal.aborted ? '，已取消' : ''}`); setBusy(false); verifyAbort.current = null }
   }
   if (!draft || !snapshot) return <div className="dmm-root">{message || '正在加载模型管理…'}</div>
   const aliases = Object.keys(draft.aliases)
@@ -100,6 +131,7 @@ function ManagerSection() {
       {filtered.map(model => <div className="dmm-card" key={`${model.providerId}:${model.modelId}`}>
         <strong>{model.name}</strong> <span className="dmm-muted">{model.providerId} / {model.modelId}</span>
         <div className="dmm-row">原生图片：{model.nativeImage}；工具：{model.nativeTools}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}</div>
+        <div className="dmm-muted">{snapshot.verifications.filter(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId).map(item => `${item.kind}: ${item.status} / ${item.behavior ?? '未知'}${item.stale ? '（已过期）' : ''}`).join('；') || '尚无验证证据'}</div>
         <NativeEditor model={model} revision={snapshot.nativeRevision} refresh={load} report={setMessage} />
         <div className="dmm-row"><label>插件图片声明 <select value={draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'} onChange={event => edit(next => { const key = JSON.stringify([model.providerId, model.modelId]); next.models[key] ??= {}; next.models[key].capability ??= {}; next.models[key].capability!.image = event.target.value as 'yes' | 'no' | 'unknown' })}><option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option></select></label></div>
       </div>)}
@@ -111,12 +143,12 @@ function ManagerSection() {
     </>}
     {tab === 'Manual/Auto' && <>
       <div className="dmm-card"><div className="dmm-row"><label>模式 <select value={draft.mode} onChange={event => edit(next => { next.mode = event.target.value as 'manual' | 'auto' })}><option value="manual">Manual</option><option value="auto">Auto</option></select></label></div>
-      {(['manual', 'auto'] as const).map(mode => <div className="dmm-row" key={mode}><strong>{mode}</strong><SelectModel value={draft[mode].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next[mode].target = value })} /><select value={draft[mode].tier ?? 'inherit'} onChange={event => edit(next => { next[mode].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t}>{t}</option>)}</select><input type="number" min="1" placeholder="输出上限" value={draft[mode].maxOutputTokens ?? ''} onChange={event => edit(next => { next[mode].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></div>)}
-      </div><div className="dmm-card"><strong>Auto 子 Agent 角色</strong>{roles.map(role => <div className="dmm-row" key={role}><label><input type="checkbox" checked={draft.roles[role].enabled} onChange={event => edit(next => { next.roles[role].enabled = event.target.checked })} />{role}</label><SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next.roles[role].target = value })} /><select value={draft.roles[role].tier ?? 'auto'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t}>{t}</option>)}</select></div>)}</div>
+      {(['manual', 'auto'] as const).map(mode => <div className="dmm-row" key={mode}><strong>{mode}</strong><SelectModel value={draft[mode].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next[mode].target = value })} /><ThinkingSelect value={draft[mode].thinking} offAvailable={supportsOff(draft[mode].target, draft, snapshot.models)} onChange={value => edit(next => { next[mode].thinking = value; if (value === 'off') next[mode].tier = 'auto' })} /><select aria-label={`${mode} 推理档位`} value={draft[mode].tier ?? 'inherit'} onChange={event => edit(next => { next[mode].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft[mode].thinking === 'off' && !['auto'].includes(t)}>{t}</option>)}</select><input type="number" min="1" placeholder="输出上限" value={draft[mode].maxOutputTokens ?? ''} onChange={event => edit(next => { next[mode].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></div>)}
+      </div><div className="dmm-card"><strong>Auto 子 Agent 角色</strong>{roles.map(role => <div className="dmm-row" key={role}><label><input type="checkbox" checked={draft.roles[role].enabled} onChange={event => edit(next => { next.roles[role].enabled = event.target.checked })} />{role}</label><SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next.roles[role].target = value })} /><ThinkingSelect value={draft.roles[role].thinking} offAvailable={supportsOff(draft.roles[role].target, draft, snapshot.models)} onChange={value => edit(next => { next.roles[role].thinking = value; if (value === 'off') next.roles[role].tier = 'auto' })} /><select value={draft.roles[role].tier ?? 'auto'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t} disabled={draft.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></div>)}</div>
     </>}
     {tab === '视觉' && <div className="dmm-card"><div className="dmm-row"><label><input type="checkbox" checked={draft.vision.enabled} onChange={event => edit(next => { next.vision.enabled = event.target.checked })} />启用视觉辅助</label></div><div className="dmm-row"><label>策略 <select value={draft.vision.policy} onChange={event => edit(next => { next.vision.policy = event.target.value as ManagerConfig['vision']['policy'] })}><option value="native-first">Native First</option><option value="sidecar-first">Sidecar First</option><option value="native-only">Native Only</option><option value="sidecar-only">Sidecar Only</option></select></label><label>视觉模型 <SelectModel value={draft.vision.target} models={snapshot.models.filter(m => m.nativeImage === 'yes')} aliases={aliases} onChange={value => edit(next => { next.vision.target = value })} /></label></div><p className="dmm-muted">文字模型使用受管理入口接收原输入框的图片，并通过看图工具查询原图。裁剪区域当前作为关注区域描述。</p></div>}
-    {tab === '可靠性' && <div className="dmm-card"><div className="dmm-row"><label>最多实际尝试 <input type="number" min="1" max="3" value={draft.reliability.maxAttempts} onChange={event => edit(next => { next.reliability.maxAttempts = Number(event.target.value) })} /></label><label><input type="checkbox" checked={draft.reliability.retryTransient} onChange={event => edit(next => { next.reliability.retryTransient = event.target.checked })} />网络失败重试一次</label></div><p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却。参数降级默认关闭。</p></div>}
-    {tab === '验证' && <div className="dmm-card"><div className="dmm-row"><SelectModel value={verifyTarget} models={snapshot.models} aliases={[]} onChange={setVerifyTarget} /><select value={verifyKind} onChange={event => setVerifyKind(event.target.value as Verification['kind'])}><option value="text">文字</option><option value="image">图片</option><option value="tools">工具</option><option value="reasoning">推理档位</option></select><button disabled={!verifyTarget || busy} onClick={() => { if (!verifyTarget || typeof verifyTarget === 'string') return; setBusy(true); void request('/verify', { method: 'POST', body: JSON.stringify({ ...verifyTarget, kind: verifyKind }) }).then(result => { setVerifyResult(result.verification); setMessage('验证已完成（1 次模型请求）。') }).catch(error => setMessage(String(error))).finally(() => setBusy(false)) }}>验证一次</button></div>{verifyResult && <pre>{JSON.stringify(verifyResult, null, 2)}</pre>}<p className="dmm-muted">推理档位仅验证参数是否被接受，不宣称证明内部推理强度。</p></div>}
+    {tab === '可靠性' && <div className="dmm-card"><div className="dmm-row"><label>最多实际尝试 <input type="number" min="1" max="3" value={draft.reliability.maxAttempts} onChange={event => edit(next => { next.reliability.maxAttempts = Number(event.target.value) })} /></label><label><input type="checkbox" checked={draft.reliability.retryTransient} onChange={event => edit(next => { next.reliability.retryTransient = event.target.checked })} />网络失败重试一次</label><label><input type="checkbox" checked={draft.reliability.parameterDowngrade} onChange={event => edit(next => { next.reliability.parameterDowngrade = event.target.checked })} />允许推理参数被拒时降级</label></div><strong>上下文溢出专用候选</strong>{(draft.reliability.longContextCandidates ?? []).map((ref, index) => <div className="dmm-row" key={index}><SelectModel value={ref} models={snapshot.models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.reliability.longContextCandidates![index] = value })} /><button onClick={() => edit(next => { next.reliability.longContextCandidates?.splice(index, 1) })}>移除</button></div>)}<button onClick={() => edit(next => { const candidate = snapshot.models.filter(model => model.contextWindow).sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0))[0]; if (candidate) { next.reliability.longContextCandidates ??= []; next.reliability.longContextCandidates.push({ providerId: candidate.providerId, modelId: candidate.modelId }) } })}>添加长上下文候选</button><p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却。上下文溢出仅尝试此列表；本轮明确覆盖的参数不会静默降级。</p></div>}
+    {tab === '验证' && <div className="dmm-card"><div className="dmm-row"><input placeholder="筛选批量验证模型" value={modelFilter} onChange={event => setModelFilter(event.target.value)} /><SelectModel value={verifyTarget} models={snapshot.models} aliases={[]} onChange={setVerifyTarget} /><select value={verifyKind} onChange={event => setVerifyKind(event.target.value as Verification['kind'])}><option value="text">文字</option><option value="image">图片</option><option value="tools">工具</option><option value="reasoning">推理档位</option></select><button disabled={!verifyTarget || busy} onClick={() => { if (!verifyTarget || typeof verifyTarget === 'string') return; setBusy(true); void verifyOne(verifyTarget, verifyKind).then(() => setMessage('验证已完成（1 次模型请求）。')).catch(error => setMessage(String(error))).finally(() => setBusy(false)) }}>验证一次</button><button disabled={busy || filtered.length === 0} onClick={() => void verifyBatch(filtered, verifyKind)}>批量验证当前筛选（{filtered.length} 次）</button>{busy && verifyAbort.current && <button onClick={() => verifyAbort.current?.abort()}>取消批量验证</button>}</div>{verifyResult && <pre>{JSON.stringify(verifyResult, null, 2)}</pre>}<p className="dmm-muted">批量验证默认串行且需要确认；推理档位仅验证参数是否被接受，不宣称证明内部推理强度。</p></div>}
     {tab === '日志' && <div className="dmm-card"><button onClick={() => void request('/logs').then(result => setLogs(result.events)).catch(error => setMessage(String(error)))}>刷新日志</button><pre>{logs.map(event => JSON.stringify(event)).join('\n')}</pre></div>}
     <div className="dmm-row"><button className="dmm-primary" disabled={busy} onClick={() => void save()}>{busy ? '处理中…' : '保存设置'}</button><button onClick={() => void load().catch(error => setMessage(String(error)))}>重新加载</button><span className={message.includes('冲突') ? 'dmm-error' : 'dmm-muted'}>{message}</span></div>
   </div>
@@ -125,6 +157,9 @@ function ManagerSection() {
 function ComposerStatus({ sessionId }: { sessionId?: string }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [selection, setSelection] = useState<ModelRef | string>()
+  const [thinking, setThinking] = useState<'inherit' | 'auto' | 'off'>('inherit')
+  const [tier, setTier] = useState<Tier | 'inherit'>('inherit')
+  const [maxOutputTokens, setMaxOutputTokens] = useState('')
   const [scope, setScope] = useState<'session' | 'nextTurn'>('nextTurn')
   const [state, setState] = useState('')
   useEffect(() => { void request('').then((next: Snapshot) => setSnapshot(next)).catch(() => {}) }, [])
@@ -133,11 +168,11 @@ function ComposerStatus({ sessionId }: { sessionId?: string }) {
   const save = async (clear = false) => {
     if (!sessionId) { setState('无法获取会话 ID'); return }
     try {
-      await request('/overrides', { method: 'PUT', body: JSON.stringify({ sessionId, scope, ...(clear ? {} : { selection: { target: selection } }) }) })
+      await request('/overrides', { method: 'PUT', body: JSON.stringify({ sessionId, scope, ...(clear ? {} : { selection: { target: selection, thinking, tier, ...(maxOutputTokens ? { maxOutputTokens: Number(maxOutputTokens) } : {}) } }) }) })
       setState(clear ? '已清除' : scope === 'nextTurn' ? '本轮覆盖已设置' : '会话覆盖已设置')
     } catch (error) { setState(String(error)) }
   }
-  return <details className="dmm-composer"><summary>模型管理 · {snapshot.config.mode}{state ? ` · ${state}` : ''}</summary><div className="dmm-card"><div className="dmm-row"><SelectModel value={selection} models={snapshot.models} aliases={aliases} onChange={setSelection} /><select value={scope} onChange={event => setScope(event.target.value as 'session' | 'nextTurn')}><option value="nextTurn">本轮</option><option value="session">会话</option></select><button onClick={() => void save()}>应用</button><button onClick={() => void save(true)}>清除</button></div></div></details>
+  return <details className="dmm-composer"><summary>模型管理 · {snapshot.config.mode}{state ? ` · ${state}` : ''}</summary><div className="dmm-card"><div className="dmm-row"><SelectModel value={selection} models={snapshot.models} aliases={aliases} onChange={setSelection} /><ThinkingSelect value={thinking} offAvailable={supportsOff(selection, snapshot.config, snapshot.models)} onChange={value => { setThinking(value); if (value === 'off') setTier('auto') }} /><select aria-label="本轮推理档位" value={tier} onChange={event => setTier(event.target.value as Tier | 'inherit')}><option value="inherit">推理继承</option>{tiers.map(item => <option key={item} disabled={thinking === 'off' && item !== 'auto'}>{item}</option>)}</select><input aria-label="本轮输出上限" type="number" min="1" placeholder="输出上限" value={maxOutputTokens} onChange={event => setMaxOutputTokens(event.target.value)} /><select value={scope} onChange={event => setScope(event.target.value as 'session' | 'nextTurn')}><option value="nextTurn">本轮</option><option value="session">会话</option></select><button onClick={() => void save()}>应用</button><button onClick={() => void save(true)}>清除</button></div></div></details>
 }
 
 export function apply(ctx: { slots: { inject(name: string, register: () => () => void): void; register(options: { name: string; id: string; order: number; label?: () => string; inject?: (sessionId: string) => { sessionId: string } }, component: (props: any) => React.ReactElement): () => void } }): void {

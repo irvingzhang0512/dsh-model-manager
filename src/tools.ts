@@ -1,9 +1,11 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createHash } from 'node:crypto'
 import type { GenerateOptions, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { modelKey, resolveSelection, type Role } from './domain.js'
+import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
 import type { VisionRegistry } from './adapter.js'
 
@@ -13,7 +15,6 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
   const disposers: (() => void)[] = []
   let running = 0
   let coding = 0
-  const cache = new Map<string, string>()
 
   disposers.push(deps.tools.register(defineTool({
     name: 'model_manager_delegate',
@@ -39,7 +40,8 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
       running++
       if (role === 'coding') coding++
       try {
-        const effort = args.upgrade_tier ? config.models[modelKey(model)]?.tiers?.[args.upgrade_tier as 'fast' | 'balanced' | 'deep' | 'max'] : undefined
+        const record = deps.service.model(model)!
+        const effort = genericProviderAdapter.reasoningEffort(record, config.models[modelKey(model)], { ...roleConfig, tier: args.upgrade_tier as typeof roleConfig.tier ?? roleConfig.tier })
         const run = await deps.subagents.start(provider, {
           parent: exec.agent, signal: exec.signal, label: `${role}: ${args.task.slice(0, 40)}`,
           prompt: [{ type: 'text', text: `职责：${role}\n任务：${args.task}\n结果要求：${args.expected_result}` }],
@@ -75,9 +77,10 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
       if (!target) throw new Error('尚未绑定视觉模型')
       const info = await deps.llm.resolveModelInfo(target.providerId, target.modelId, exec.signal)
       if (!info.inputModalities?.includes('image')) throw new Error('视觉模型未声明原生图片能力')
-      await deps.attachments.readImage(ref, exec.signal)
-      const key = JSON.stringify([session, ref.attachmentId, args.question, args.region ?? '', modelKey(target), deps.service.signature(target)])
-      const cached = cache.get(key)
+      const image = await deps.attachments.readImage(ref, exec.signal)
+      const imageHash = createHash('sha256').update(image.data).digest('hex')
+      const key = createHash('sha256').update(JSON.stringify([session, imageHash, args.question, args.region ?? '', modelKey(target), deps.service.snapshot().revision, deps.service.signature(target)])).digest('hex')
+      const cached = deps.service.getVisionCache(key)
       if (cached) return cached
       const prompt = `${args.question}${args.region ? `\n请特别关注区域：${args.region}` : ''}`
       const messages: GenerateOptions['messages'] = [{ id: `model-manager:${Date.now()}` as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: prompt }, { type: 'image', attachment: ref }] }]
@@ -87,11 +90,11 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
         if (chunk.type === 'finish' && chunk.reason.kind !== 'stop') throw new Error(`视觉调用失败：${chunk.reason.kind}`)
       }
       if (!result) throw new Error('视觉模型未返回可用文字')
-      cache.set(key, result)
+      await deps.service.putVisionCache(key, result)
       await deps.service.log({ action: 'vision', session, provider: target.providerId, model: target.modelId, status: 'success' })
       return result
     },
   })))
 
-  return () => { for (const dispose of disposers.reverse()) dispose(); cache.clear() }
+  return () => { for (const dispose of disposers.reverse()) dispose() }
 }

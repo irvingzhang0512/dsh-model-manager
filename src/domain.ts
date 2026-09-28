@@ -18,6 +18,7 @@ export interface ModelSettings {
 }
 export interface Selection {
   target?: ModelRef | string
+  thinking?: 'inherit' | 'auto' | 'off'
   tier?: Tier | 'inherit'
   maxOutputTokens?: number
 }
@@ -31,7 +32,7 @@ export interface ManagerConfig {
   auto: Selection
   roles: Record<Role, RoleSettings>
   vision: { enabled: boolean; policy: VisionPolicy; target?: ModelRef | string }
-  reliability: { maxAttempts: number; retryTransient: boolean; parameterDowngrade: boolean }
+  reliability: { maxAttempts: number; retryTransient: boolean; parameterDowngrade: boolean; longContextCandidates?: ModelRef[] }
 }
 export interface ModelRecord extends ModelRef {
   name: string
@@ -67,7 +68,7 @@ export const DEFAULT_CONFIG: ManagerConfig = {
     vision: { enabled: false, target: '@vision', tier: 'auto' },
   },
   vision: { enabled: false, policy: 'native-first' },
-  reliability: { maxAttempts: 3, retryTransient: true, parameterDowngrade: false },
+  reliability: { maxAttempts: 3, retryTransient: true, parameterDowngrade: false, longContextCandidates: [] },
 }
 
 export function modelKey(ref: ModelRef): string {
@@ -101,10 +102,32 @@ export function mapEffort(record: ModelRecord, settings: ModelSettings | undefin
   return mapped
 }
 
+export function mapSelectionEffort(record: ModelRecord, settings: ModelSettings | undefined, selection: Selection): string | undefined {
+  if (selection.thinking === 'off') {
+    if (selection.tier && !['inherit', 'auto'].includes(selection.tier)) throw new Error('关闭思考不能同时选择非关闭推理档位')
+    const off = record.reasoningEfforts.find(e => e.id === 'off')
+    if (!off) throw new Error(`${record.name} 未公开关闭思考档位`)
+    return off.id
+  }
+  return mapEffort(record, settings, selection.tier)
+}
+
+export function mergeSelection(base: Selection, overlay?: Selection): Selection {
+  if (!overlay) return { ...base }
+  return {
+    ...base,
+    ...(overlay.target !== undefined ? { target: overlay.target } : {}),
+    ...(overlay.thinking && overlay.thinking !== 'inherit' ? { thinking: overlay.thinking } : {}),
+    ...(overlay.tier && overlay.tier !== 'inherit' ? { tier: overlay.tier } : {}),
+    ...(overlay.maxOutputTokens !== undefined ? { maxOutputTokens: overlay.maxOutputTokens } : {}),
+  }
+}
+
 export function validateConfig(config: ManagerConfig): void {
   if (config.version !== 1) throw new Error('不支持的配置版本')
   if (!['manual', 'auto'].includes(config.mode)) throw new Error('无效模式')
   if (!Number.isInteger(config.reliability.maxAttempts) || config.reliability.maxAttempts < 1 || config.reliability.maxAttempts > 3) throw new Error('尝试次数必须为 1–3')
+  if (config.reliability.longContextCandidates !== undefined && (!Array.isArray(config.reliability.longContextCandidates) || config.reliability.longContextCandidates.some(ref => !ref || typeof ref.providerId !== 'string' || typeof ref.modelId !== 'string' || !ref.providerId || !ref.modelId))) throw new Error('长上下文候选只能填写具体模型')
   for (const [name, refs] of Object.entries(config.aliases)) {
     if (!/^[a-z][a-z0-9_-]*$/.test(name) || !Array.isArray(refs) || !refs.length) throw new Error(`无效别名：${name}`)
     for (const ref of refs) if (!ref || typeof ref.providerId !== 'string' || typeof ref.modelId !== 'string' || !ref.providerId || !ref.modelId) throw new Error(`别名 ${name} 只能引用具体模型`)
@@ -112,6 +135,7 @@ export function validateConfig(config: ManagerConfig): void {
   for (const selection of [config.manual, config.auto, ...Object.values(config.roles).filter(role => role.enabled)]) {
     if (selection.target) resolveSelection(config, selection.target)
     if (selection.maxOutputTokens !== undefined && (!Number.isInteger(selection.maxOutputTokens) || selection.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
+    if (selection.thinking === 'off' && selection.tier && !['inherit', 'auto'].includes(selection.tier)) throw new Error('关闭思考不能同时选择非关闭推理档位')
   }
   if (config.vision.enabled && config.vision.target) resolveSelection(config, config.vision.target)
 }

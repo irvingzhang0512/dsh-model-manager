@@ -11,7 +11,8 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CONFIG, managedId, mapEffort, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, managedId, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type Selection, type Verification } from './domain.js'
+import { genericProviderAdapter } from './provider-adapter.js'
 import { HostModelBridge, ModelManagerService, resolveDataDir } from './service.js'
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
 import { registerManagerTools } from './tools.js'
@@ -60,7 +61,7 @@ async function verify(llm: LlmRuntime, attachments: AttachmentStore, service: Mo
     messages[0].content.push({ type: 'image', attachment })
   }
   const config = service.snapshot().config
-  const effort = kind === 'reasoning' ? mapEffort(model, config.models[modelKey(ref)], config.manual.tier) : undefined
+  const effort = kind === 'reasoning' ? genericProviderAdapter.reasoningEffort(model, config.models[modelKey(ref)], config.manual) : undefined
   const tools = kind === 'tools' ? [{ name: 'model_manager_probe', description: '测试工具，请调用', parameters: { type: 'object', properties: {} } }] : undefined
   let output = ''
   let usedTool = false
@@ -120,9 +121,8 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     const first = candidates[0]
     if (!first) return current
     const record = service.model(first)
-    const effort = selection.tier && selection.tier !== 'auto' && selection.tier !== 'inherit'
-      ? record ? mapEffort(record, config.models[modelKey(first)], selection.tier) : undefined : undefined
-    if (selection.tier && !['auto', 'inherit'].includes(selection.tier) && !record) throw new Error('所选模型尚未由宿主加载')
+    const effort = record ? genericProviderAdapter.reasoningEffort(record, config.models[modelKey(first)], selection) : undefined
+    if ((selection.thinking === 'off' || selection.tier && !['auto', 'inherit'].includes(selection.tier)) && !record) throw new Error('所选模型尚未由宿主加载')
     if (!selection.target && !config.vision.enabled && !effort && selection.maxOutputTokens === undefined) return current
     return { ...current, provider: MANAGED_PROVIDER,
       model: typeof selection.target === 'string' ? `alias:${selection.target.slice(1)}` : managedId(first),

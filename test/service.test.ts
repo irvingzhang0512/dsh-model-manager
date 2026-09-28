@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { DEFAULT_CONFIG } from '../src/domain.ts'
 import { HostModelBridge, ModelManagerService } from '../src/service.ts'
 
@@ -18,5 +21,32 @@ describe('宿主桥接与版本控制', () => {
     await service.update(newer, 0)
     await expect(service.update(DEFAULT_CONFIG, 0)).rejects.toThrow('SETTINGS_CONFLICT')
     expect(service.snapshot().config.mode).toBe('auto')
+  })
+  it('视觉缓存重启后可复用并按键隔离', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dmm-cache-'))
+    try {
+      const bridge = { catalog: async () => [] }
+      const first = new ModelManagerService(bridge, dir)
+      await first.init()
+      await first.putVisionCache('session-a:image-a:question-a', '红色')
+      const second = new ModelManagerService(bridge, dir)
+      await second.init()
+      expect(second.getVisionCache('session-a:image-a:question-a')).toBe('红色')
+      expect(second.getVisionCache('session-b:image-a:question-a')).toBeUndefined()
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+  it('模型配置变化后原验证证据标为过期', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dmm-evidence-'))
+    try {
+      const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'no' as const, nativeTools: 'unknown' as const, reasoningEfforts: [], source: 'host' as const, loaded: true }
+      const service = new ModelManagerService({ catalog: async () => [model], applyNative: async () => {} }, dir)
+      await service.init()
+      await service.saveVerification({ model, kind: 'image', status: 'rejected', checkedAt: '2026-01-01', signature: service.signature(model), requestCount: 1 })
+      expect(service.snapshot().verifications[0].stale).toBe(false)
+      const updated = structuredClone(DEFAULT_CONFIG)
+      updated.models['["p","m"]'] = { capability: { image: 'yes' } }
+      await service.update(updated, 0)
+      expect(service.snapshot().verifications[0].stale).toBe(true)
+    } finally { await rm(dir, { recursive: true, force: true }) }
   })
 })

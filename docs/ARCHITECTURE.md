@@ -6,6 +6,7 @@
 
 - `src/domain.ts`：`ModelRef`、`ManagerConfig`、`ModelRecord`、`Verification`、`RequestSelection`；`resolveSelection(config, selection)` 返回候选数组，`mapEffort(model, tier)` 返回实际档位或抛错。
 - `src/service.ts`：`HostModelBridge.catalog()` 返回模型记录数组；`ModelManagerService.snapshot()` 返回配置深拷贝；`update(next, revision)` 做版本检查；`saveVerification(result)` 保存验证证据；`log(event)` 追加脱敏事件。
+- `src/provider-adapter.ts`：`ModelProviderAdapter` 描述实际可用控制项，将经理档位映射为宿主公开的 `reasoningEffort`；首版 `GenericModelProviderAdapter` 不猜测未声明档位。
 - `src/adapter.ts`：`ManagedAdapter` 的 `listModels`、`resolveModel`、`stream` 委托 DSH LLM；只在请求流开始前决定候选和视觉策略。
 - `src/index.ts`：注册设置、受管理模型路由、工具、HTTP 与事件监听。所有注册由 `ctx.effect` 清理。
 
