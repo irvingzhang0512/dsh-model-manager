@@ -307,7 +307,13 @@ function ManagerSection() {
     timers.current.push(window.setTimeout(() => setNotices(list => list.filter(item => item.id !== id)), ttl))
   }, [])
 
-  const load = async () => { const next = asSnapshot(await request('')); setSnapshot(next); setDraft(structuredClone(next.config)); setFatal('') }
+  const load = async () => {
+    const next = asSnapshot(await request(''))
+    setSnapshot(next); setDraft(structuredClone(next.config)); setFatal('')
+    // 初始展开：只展开有异常验证证据的 Provider 组，其余收起（在 load 中做，避免早退分支后的条件 hooks）。
+    const bad = new Set(next.verifications.filter(item => item.stale || item.status === 'rejected' || item.status === 'network-error').map(item => `${item.model.providerId}:${item.model.modelId}`))
+    setExpanded(new Set([...new Set(next.models.map(model => model.providerId))].filter(id => next.models.some(model => model.providerId === id && bad.has(`${model.providerId}:${model.modelId}`)))))
+  }
   useEffect(() => { void load().catch(error => setFatal(String(error))) }, [])
   /** 只刷新宿主目录与证据，不覆盖用户正在编辑的草稿。 */
   const refreshDirectory = async (silent = false): Promise<Snapshot | null> => {
@@ -490,8 +496,6 @@ function ManagerSection() {
   const verifiedCount = (group: ModelRecord[]) => group.filter(model => snapshot.verifications.some(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId && item.status === 'accepted' && !item.stale)).length
   const groups = providers.map(id => ({ id, models: filtered.filter(model => model.providerId === id) })).filter(group => group.models.length)
   const groupOpen = (id: string) => filtering ? true : expanded.has(id)
-  const initialExpand = () => setExpanded(new Set(groups.filter(group => attention(group.models)).map(group => group.id)))
-  useEffect(() => { if (snapshot) initialExpand() }, [snapshot.models.length, snapshot.verifications.length])
   return <div className="dmm-root">
     <h2>模型管理</h2>
     <div className="dmm-guide">
