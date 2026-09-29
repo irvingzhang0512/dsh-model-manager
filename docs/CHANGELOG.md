@@ -2,6 +2,9 @@
 
 ## 未发布
 
+- 修复批量探测把「宿主声明写入」误报为探测失败：探测对声明「不支持」的模型会先提权、测完还原，这两次写把 `llm-pi-ai` 的 revision 推进两步，而批量循环仍用探测前的旧 token 写宿主声明，于是必然撞上 `settings namespace "llm-pi-ai" changed since it was read`，并被记成该模型「探测失败」，同时丢掉该模型已探测到的插件声明结论。现在 `/probe` 回传探测结束时的最新 `nativeRevision`，批量循环改用它（并用写入响应继续推进 token）；宿主声明写入与探测分开处理，写入失败单独计数上报，不再吞掉插件声明结论。
+- 版本冲突重试统一：`setInput` 的重试判据原先只在错误字符串里找 `Conflict`（实际靠宿主错误名 `SettingsConflictError` 偶然命中），而 `applyNative`/`clearNative` 完全没有重试——批量探测写宿主声明时撞上冲突就直接失败。现在三者统一走按错误形状判定的 `isSettingsConflict`（`code === 'SETTINGS_CONFLICT'` / `name === 'SettingsConflictError'` / 消息含 `changed since it was read`；插件解析到的是自己那份 `@deepseek-ai/dsh-settings` 拷贝，所以不用 `instanceof`），冲突时改用最新 revision 重试最多 3 次，且每次重试都重读分节重建 ops——显式模型清单的整表替换不会再用旧快照覆盖并发写入的兄弟模型字段；非冲突错误仍立即上抛、不重试。
+- 宿主的 `SETTINGS_CONFLICT` 现在按该判定映射为 409（此前用消息文本匹配，真实冲突被降级成 400）。
 - 修复读取现有 v1 设置时 web 启动失败：注册设置校验时先按现有迁移规则转换为 v2，再校验迁移结果。
 - 配置格式升级到 v2 并自动迁移旧配置（读取时把 v1 别名数组包成候选对象、长上下文候选转成内置别名 `@long-context`、丢弃 `mode`/`manual`）。
 - 删除 Manual/Auto 模式开关与 Manual 行：非 AUTO 的选择（具体模型或 @别名）就是固定模型，无需任何配置；只有选择器里的 AUTO 条目走托管——主对话按 `auto.main` 执行，任务按角色委派给子 Agent。AUTO 主模型未配置时回退宿主默认模型。

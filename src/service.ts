@@ -3,8 +3,20 @@ import { appendFile, copyFile, mkdir, readFile, rename, rm, stat, writeFile } fr
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
+import type { SettingsPathOp, SettingsProvider } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_CONFIG, mergeSelection, migrateConfig, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
+
+/**
+ * 宿主设置服务拒绝过期 revision 时抛出的冲突错误（`SettingsConflictError`，`code` 固定为 `SETTINGS_CONFLICT`）。
+ * 按形状判定而不是 `instanceof`：本插件解析到的是自己那份 `@deepseek-ai/dsh-settings` 拷贝，
+ * 与宿主抛出实例的构造函数不同源，`instanceof` 会漏判；错误消息是 `settings namespace "…" changed since it was read (expected …, now …)`。
+ */
+export function isSettingsConflict(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as { code?: unknown; name?: unknown; message?: unknown }
+  if (candidate.code === 'SETTINGS_CONFLICT' || candidate.name === 'SettingsConflictError') return true
+  return /changed since it was read|SETTINGS_CONFLICT/i.test(String(candidate.message ?? error))
+}
 
 export interface ModelBridge {
   catalog(): Promise<ModelRecord[]>
@@ -50,23 +62,28 @@ export class HostModelBridge implements ModelBridge {
   async applyNative(ref: ModelRef, fields: { image?: boolean; contextWindow?: number; maxTokens?: number }, revision: number): Promise<void> {
     const entry = this.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
     if (!entry || entry.settingsNs !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
-    const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
-    const profile = section?.providers?.[ref.providerId]
     const fieldPath = ['providers', ref.providerId, 'modelOverrides', ref.modelId]
-    const ops: { op: 'set'; path: string[]; value: unknown }[] = []
     const values = { ...(fields.image !== undefined ? { input: fields.image ? ['text', 'image'] : ['text'] } : {}),
       ...(fields.contextWindow !== undefined ? { contextWindow: fields.contextWindow } : {}),
       ...(fields.maxTokens !== undefined ? { maxTokens: fields.maxTokens } : {}) }
-    if (profile?.models?.length) {
-      const index = profile.models.findIndex(m => m.id === ref.modelId)
-      if (index < 0) throw new Error('模型不在该 Provider 的配置清单中')
-      const models = structuredClone(profile.models)
-      models[index] = { ...models[index], ...values }
-      ops.push({ op: 'set', path: ['providers', ref.providerId, 'models'], value: models })
-    } else {
-      for (const [field, value] of Object.entries(values)) ops.push({ op: 'set', path: [...fieldPath, field], value })
+    // 每次尝试都重读分节重建 ops：显式模型清单是整表替换，用旧快照重试会覆盖并发写入的兄弟模型字段。
+    const build = (): SettingsPathOp[] => {
+      const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
+      const profile = section?.providers?.[ref.providerId]
+      const ops: SettingsPathOp[] = []
+      if (profile?.models?.length) {
+        const index = profile.models.findIndex(m => m.id === ref.modelId)
+        if (index < 0) throw new Error('模型不在该 Provider 的配置清单中')
+        const models = structuredClone(profile.models)
+        models[index] = { ...models[index], ...values }
+        ops.push({ op: 'set', path: ['providers', ref.providerId, 'models'], value: models })
+      } else {
+        for (const [field, value] of Object.entries(values)) ops.push({ op: 'set', path: [...fieldPath, field], value })
+      }
+      return ops
     }
-    if (ops.length) await this.settings.mutate('llm-pi-ai', ops, revision)
+    // 先构建一次：保持「模型不在该 Provider 的配置清单中」等前置错误在写入前抛出，也让空字段集不发请求。
+    if (build().length) await this.mutate(build, revision)
   }
 
   async clearNative(ref: ModelRef, fields: readonly ('image' | 'contextWindow' | 'maxTokens')[], revision: number): Promise<void> {
@@ -75,7 +92,7 @@ export class HostModelBridge implements ModelBridge {
     const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
     if (section?.providers?.[ref.providerId]?.models?.length) throw new Error('此 Provider 使用显式模型清单，无法安全地清除字段覆盖')
     const names = { image: 'input', contextWindow: 'contextWindow', maxTokens: 'maxTokens' } as const
-    await this.settings.mutate('llm-pi-ai', fields.map(field => ({ op: 'unset' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, names[field]] })), revision)
+    await this.mutate(() => fields.map(field => ({ op: 'unset' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, names[field]] })), revision)
   }
 
   /** 读取模型当前生效的 input 模态声明：显式清单优先，其次 modelOverrides；undefined 表示未显式声明。 */
@@ -86,32 +103,43 @@ export class HostModelBridge implements ModelBridge {
     return profile?.modelOverrides?.[ref.modelId]?.input
   }
 
-  /** 精确设置或删除 input 模态声明；恢复探测前的原值时使用。宿主写入后 revision 可能被异步再推进（探测提权窗口内的常见竞态），这里对版本冲突做有限次自动重试。 */
+  /** 精确设置或删除 input 模态声明；恢复探测前的原值时使用。宿主 revision 可能被提权/还原等并发写入推进，冲突交给 `mutate` 重试。 */
   async setInput(ref: ModelRef, input: readonly string[] | undefined, revision: number): Promise<void> {
     const entry = this.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
     if (!entry || entry.settingsNs !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
-    const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
-    const profile = section?.providers?.[ref.providerId]
-    const ops = profile?.models?.length
-      ? (() => {
+    const build = (): SettingsPathOp[] => {
+      const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string; input?: string[] }[] }> } | undefined
+      const profile = section?.providers?.[ref.providerId]
+      if (profile?.models?.length) {
         const index = profile.models.findIndex(item => item.id === ref.modelId)
         if (index < 0) throw new Error('模型不在该 Provider 的配置清单中')
-        const models = structuredClone(profile.models) as { id: string; input?: string[] }[]
+        const models = structuredClone(profile.models)
         if (input === undefined) delete models[index].input
         else models[index] = { ...models[index], input: [...input] }
-        return [{ op: 'set' as const, path: ['providers', ref.providerId, 'models'], value: models }]
-      })()
-      : input === undefined
-        ? [{ op: 'unset' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, 'input'] }]
-        : [{ op: 'set' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, 'input'], value: [...input] }]
+        return [{ op: 'set', path: ['providers', ref.providerId, 'models'], value: models }]
+      }
+      return input === undefined
+        ? [{ op: 'unset', path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, 'input'] }]
+        : [{ op: 'set', path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, 'input'], value: [...input] }]
+    }
+    await this.mutate(build, revision)
+  }
+
+  /**
+   * 写入 `llm-pi-ai` 的唯一入口：宿主 namespace 的 revision 会被并发写入推进
+   * （探测提权 → 实测 → 还原就把 revision 推两次），调用方读取的 token 很容易已经过期。
+   * 首次仍按调用方 revision 做 CAS；只因冲突失败时改用最新 revision 重试有限次，其他错误立即上抛。
+   * 每次尝试都重新执行 `build()`，保证 ops 反映写入时刻的分节（显式模型清单的整表替换尤其如此）。
+   */
+  private async mutate(build: () => SettingsPathOp[], revision: number, attempts = 3): Promise<void> {
     let lastError: unknown
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       const expected = attempt === 0 ? revision : this.currentRevision()
       if (expected === undefined) throw new Error('无法读取宿主设置版本')
-      try { await this.settings.mutate('llm-pi-ai', ops, expected); return }
+      try { await this.settings.mutate('llm-pi-ai', build(), expected); return }
       catch (error) {
         lastError = error
-        if (!/CONFLICT/i.test(String(error))) throw error
+        if (!isSettingsConflict(error)) throw error
       }
     }
     throw lastError

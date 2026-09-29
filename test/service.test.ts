@@ -5,6 +5,11 @@ import { join } from 'node:path'
 import { DEFAULT_CONFIG } from '../src/domain.ts'
 import { HostModelBridge, ModelManagerService } from '../src/service.ts'
 
+/** 真实宿主的冲突错误形状：dsh-settings 的 SettingsConflictError（code=SETTINGS_CONFLICT，消息里没有字面量 CONFLICT）。 */
+function settingsConflict(expected: number, actual: number): Error {
+  return Object.assign(new Error(`settings namespace "llm-pi-ai" changed since it was read (expected revision ${expected}, now ${actual})`), { code: 'SETTINGS_CONFLICT', name: 'SettingsConflictError' })
+}
+
 describe('宿主桥接与版本控制', () => {
   it('模型覆盖只修改指定模型字段，不重写 Provider 凭据', async () => {
     const mutate = vi.fn(async () => {})
@@ -48,6 +53,43 @@ describe('宿主桥接与版本控制', () => {
     expect(call[1][0].op).toBe('set')
     expect(call[1][0].value).toEqual([{ id: 'm', input: ['text'] }, { id: 'n' }])
     expect(models).toEqual([{ id: 'm', input: ['text'] }, { id: 'n', input: ['text', 'image'] }])
+  })
+  it('探测写入撞上宿主 SETTINGS_CONFLICT 时改用最新 revision 重试', async () => {
+    const llm = { listConfigurableProviders: () => [{ provider: 'p', settingsNs: 'llm-pi-ai' }] }
+    const mutate = vi.fn().mockRejectedValueOnce(settingsConflict(23, 25)).mockResolvedValueOnce(undefined)
+    const settings = { get: () => ({ providers: { p: { modelOverrides: { m: { input: ['text'] } } } } }), mutate, describe: () => [{ ns: 'llm-pi-ai', revision: 25 }] }
+    await new HostModelBridge(llm as never, settings as never).setInput({ providerId: 'p', modelId: 'm' }, ['text', 'image'], 23)
+    expect(mutate.mock.calls.map(call => call[2])).toEqual([23, 25])
+    // 只带冲突消息、没有 code/name 的错误也必须重试：判定不再依赖错误字符串里恰好出现 Conflict。
+    const bare = vi.fn().mockRejectedValueOnce(new Error('settings namespace "llm-pi-ai" changed since it was read (expected revision 23, now 25)')).mockResolvedValueOnce(undefined)
+    const plainSettings = { get: () => ({ providers: { p: { modelOverrides: { m: { input: ['text'] } } } } }), mutate: bare, describe: () => [{ ns: 'llm-pi-ai', revision: 25 }] }
+    await new HostModelBridge(llm as never, plainSettings as never).setInput({ providerId: 'p', modelId: 'm' }, ['text', 'image'], 23)
+    expect(bare.mock.calls.map(call => call[2])).toEqual([23, 25])
+  })
+  it('宿主声明写入遇到版本冲突同样重试，非冲突错误只写一次', async () => {
+    const retried = vi.fn().mockRejectedValueOnce(settingsConflict(7, 9)).mockResolvedValueOnce(undefined)
+    const llm = { listConfigurableProviders: () => [{ provider: 'p', settingsNs: 'llm-pi-ai' }] }
+    const conflictBridge = new HostModelBridge(llm as never, { get: () => ({ providers: { p: {} } }), mutate: retried, describe: () => [{ ns: 'llm-pi-ai', revision: 9 }] } as never)
+    await conflictBridge.applyNative({ providerId: 'p', modelId: 'm' }, { image: true }, 7)
+    expect(retried.mock.calls.map(call => call[2])).toEqual([7, 9])
+    const refused = vi.fn(async () => { throw new Error('settings provider is read-only: "llm-pi-ai" cannot be updated in-process') })
+    const readonlyBridge = new HostModelBridge(llm as never, { get: () => ({ providers: { p: {} } }), mutate: refused, describe: () => [{ ns: 'llm-pi-ai', revision: 9 }] } as never)
+    await expect(readonlyBridge.applyNative({ providerId: 'p', modelId: 'm' }, { image: true }, 9)).rejects.toThrow('read-only')
+    expect(refused).toHaveBeenCalledTimes(1)
+  })
+  it('显式模型清单写入重试时重建 ops，不覆盖并发写入的兄弟模型字段', async () => {
+    let models = [{ id: 'm', input: ['text'] }, { id: 'n', input: ['text'] }]
+    const mutate = vi.fn(async () => { throw settingsConflict(1, 2) })
+    const settings = { get: () => ({ providers: { p: { models } } }), mutate, describe: () => [{ ns: 'llm-pi-ai', revision: 2 }] }
+    const llm = { listConfigurableProviders: () => [{ provider: 'p', settingsNs: 'llm-pi-ai' }] }
+    const bridge = new HostModelBridge(llm as never, settings as never)
+    const pending = bridge.applyNative({ providerId: 'p', modelId: 'm' }, { image: true }, 1)
+    // 第一次尝试发出后，兄弟模型被并发写入：重试必须基于新分节重建整表，而不是复用旧快照。
+    models = [{ id: 'm', input: ['text'] }, { id: 'n', input: ['text', 'image'] }]
+    await expect(pending).rejects.toThrow('changed since it was read')
+    const calls = mutate.mock.calls as unknown as [string, { value: { id: string; input?: string[] }[] }[], number][]
+    expect(calls.map(call => call[2])).toEqual([1, 2, 2])
+    expect(calls[1][1][0].value[1].input).toEqual(['text', 'image'])
   })
   it('配置冲突拒绝过期版本且不覆盖已保存值', async () => {
     const bridge = { catalog: async () => [] }

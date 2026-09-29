@@ -10,7 +10,7 @@ const roleLabels: Record<Role, string> = { search: 'Search · 检索与探索', 
 const tiers: Tier[] = ['auto', 'fast', 'balanced', 'deep', 'max']
 const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明' }
 type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
-type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[] }
+type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[]; nativeRevision?: number }
 /** 探测/验证结果弹出框：有建议时渲染勾选列表，无建议/失败/批量总结时渲染证据与说明。 */
 type ProbeDialog = {
   title: string
@@ -412,27 +412,38 @@ function ManagerSection() {
     if (!window.confirm(`将对当前筛选的 ${models.length} 个模型逐个发出真实图片探测请求（会消耗 token）。只写入高置信结论（宿主声明与插件声明）。是否继续？`)) return
     setBusy(true)
     let revision = snapshot.nativeRevision
-    let done = 0, hostApplied = 0, inconclusive = 0
+    let done = 0, hostApplied = 0, hostFailed = 0, inconclusive = 0
     const pluginEdits: { model: ModelRecord; field: ProbeField; value: Support }[] = []
     const restoreFailedModels: string[] = []
     const failures: string[] = []
+    const writeFailures: string[] = []
     try {
       for (const model of models) {
         setProbeProgress(`探测中 ${done + 1}/${models.length}：${model.name}`)
-        try {
-          const result = await request('/probe', { method: 'POST', body: JSON.stringify({ providerId: model.providerId, modelId: model.modelId, items: ['image', 'tools'] }) }) as ProbeResponse
+        let result: ProbeResponse | undefined
+        // 探测本身失败：记一笔，继续下一个模型（结论未产生，不算「无高置信」，也不写任何声明）。
+        try { result = await request('/probe', { method: 'POST', body: JSON.stringify({ providerId: model.providerId, modelId: model.modelId, items: ['image', 'tools'] }) }) as ProbeResponse }
+        catch (error) { failures.push(`「${model.name}」探测失败：${String(error)}`) }
+        if (result) {
+          // 探测期间可能提权/还原各写一次 llm-pi-ai，必须改用探测返回的最新 revision 写宿主声明，否则必然撞版本冲突。
+          if (typeof result.nativeRevision === 'number') revision = result.nativeRevision
           if (result.restoreFailed) restoreFailedModels.push(model.name)
           const high = result.suggestions.filter(item => item.confidence === 'high')
           if (!high.length) inconclusive++
           for (const item of high) {
-            if (item.field === 'hostImage') {
-              if (model.nativeEditable && revision !== undefined) {
-                await request('/native', { method: 'POST', body: JSON.stringify({ providerId: model.providerId, modelId: model.modelId, revision, image: item.value === 'yes' }) })
-                hostApplied++
-              }
-            } else pluginEdits.push({ model, field: item.field, value: item.value })
+            if (item.field !== 'hostImage') { pluginEdits.push({ model, field: item.field, value: item.value }); continue }
+            if (!model.nativeEditable || revision === undefined) continue
+            // 宿主声明写入与探测分开处理：写入失败不能吞掉该模型已经探测到的插件声明结论。
+            try {
+              const written = await request('/native', { method: 'POST', body: JSON.stringify({ providerId: model.providerId, modelId: model.modelId, revision, image: item.value === 'yes' }) }) as { revision?: number }
+              hostApplied++
+              if (typeof written?.revision === 'number') revision = written.revision
+            } catch (error) {
+              hostFailed++
+              writeFailures.push(`「${model.name}」宿主声明写入失败：${String(error)}（能力已探测，可在该模型卡片的「宿主原生图片」上单独重试）`)
+            }
           }
-        } catch (error) { failures.push(`「${model.name}」探测失败：${String(error)}`) }
+        }
         const next = asSnapshot(await request('/refresh', { method: 'POST' }))
         setSnapshot(next); revision = next.nativeRevision
         done++
@@ -449,9 +460,10 @@ function ManagerSection() {
         title: '批量探测结果',
         suggestions: [], checked: [],
         notes: [
-          `已完成 ${done}/${models.length} 个模型的探测：写入宿主声明 ${hostApplied} 项，插件声明改动 ${pluginEdits.length} 项${pluginEdits.length ? '（需再点页面底部「保存设置」落盘）' : ''}，无高置信结论 ${inconclusive} 个。`,
+          `已完成 ${done}/${models.length} 个模型的探测：写入宿主声明 ${hostApplied} 项${hostFailed ? `（另有 ${hostFailed} 项写入失败）` : ''}，插件声明改动 ${pluginEdits.length} 项${pluginEdits.length ? '（需再点页面底部「保存设置」落盘）' : ''}，无高置信结论 ${inconclusive} 个。`,
           ...restoreFailedModels.length ? [`以下模型探测后恢复宿主声明失败，请到模型卡片逐一核对「宿主原生图片」：${restoreFailedModels.join('、')}`] : [],
           ...failures,
+          ...writeFailures,
         ],
       })
     } catch (error) { setPreview({ title: '批量探测中断', suggestions: [], checked: [], failure: String(error) }) }

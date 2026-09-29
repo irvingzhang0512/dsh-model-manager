@@ -11,7 +11,7 @@
 ## 模块接口
 
 - `src/domain.ts`：`ModelRef`、`ManagerConfig`（v2）、`AliasConfig`、`ModelRecord`、`Verification`、`LONG_CONTEXT_ALIAS`；`resolveSelection(config, selection)` 返回候选数组；`mapEffort(model, tier)` 显式映射优先、缺省自动推断；`migrateConfig(input)` 把 v1 配置迁移成 v2；`validateConfig` 校验 v2。
-- `src/service.ts`：`HostModelBridge.catalog()` 返回模型记录数组；`ModelManagerService.snapshot()` 返回配置深拷贝（init/`onSettingsChanged` 均先迁移再校验）；`update(next, revision)` 做版本检查；`saveVerification(result)` 保存验证证据；`log(event)` 追加脱敏事件。
+- `src/service.ts`：`HostModelBridge.catalog()` 返回模型记录数组；`ModelManagerService.snapshot()` 返回配置深拷贝（init/`onSettingsChanged` 均先迁移再校验）；`update(next, revision)` 做版本检查；`saveVerification(result)` 保存验证证据；`log(event)` 追加脱敏事件。写 `llm-pi-ai` 的统一入口是私有 `mutate(build, revision)`：首次按调用方 revision 做 CAS，只因冲突（`isSettingsConflict`：`code === 'SETTINGS_CONFLICT'`／`name === 'SettingsConflictError'`／消息含 `changed since it was read`）才改用最新 revision 重试（最多 3 次），其他错误立即上抛；每次尝试重新执行 `build()` 重读分节重建 ops，因此显式模型清单的整表替换不会用旧快照覆盖并发写入。判定按错误形状而非 `instanceof`：插件解析到的是自己那份 `@deepseek-ai/dsh-settings` 拷贝，与宿主抛出实例不同源。
 - `src/provider-adapter.ts`：`ModelProviderAdapter` 描述实际可用控制项，将经理档位映射为宿主公开的 `reasoningEffort`；`GenericModelProviderAdapter` 不猜测未声明档位。
 - `src/adapter.ts`：`ManagedAdapter` 的 `listModels`、`resolveModel`、`stream` 委托 DSH LLM；AUTO 条目按 `auto.main` 解析主模型（未配置回退宿主默认模型），别名条目不带全局参数基线；兜底策略按「全局默认 + 别名覆盖」解析；只在请求流开始前决定候选和视觉策略。
 - `src/index.ts`：注册设置、受管理模型路由、工具、HTTP 与事件监听；`recommendAssignment` 用主模型（回退宿主默认模型）读模型目录产出 AUTO 分工草案。所有注册由 `ctx.effect` 清理。
@@ -22,9 +22,9 @@
 |---|---|---|---|
 | `/api/model-manager` | GET、PUT | PUT: `{revision, config}`（v2） | `{revision, config, models, verifications}`；冲突 409，非法配置 400 |
 | `/api/model-manager/verify` | POST | `{providerId, modelId, kind}` | `{verification}`；无效模型 400 |
-| `/api/model-manager/probe` | POST | `{providerId, modelId}` | `{verifications, suggestions, cancelled, elevated, restoreFailed, notes}`；固定发一次真实图片探测；声明为「不支持」的模型先临时提权宿主 input 声明实测、测完恢复原值，提权失败跳过探测；建议只依据行为证据，网络错误与取消不产生建议 |
+| `/api/model-manager/probe` | POST | `{providerId, modelId}` | `{verifications, suggestions, cancelled, elevated, restoreFailed, notes, nativeRevision}`；固定发一次真实图片探测；声明为「不支持」的模型先临时提权宿主 input 声明实测、测完恢复原值，提权失败跳过探测；建议只依据行为证据，网络错误与取消不产生建议；`nativeRevision` 是探测结束时的最新 `llm-pi-ai` revision，调用方必须用它发起后续宿主声明写入 |
 | `/api/model-manager/refresh` | POST | 无 | 最新宿主已加载模型目录与配置快照 |
-| `/api/model-manager/native` | POST | `{providerId, modelId, image?, contextWindow?, maxTokens?, revision}` | `{revision}`；冲突 409 |
+| `/api/model-manager/native` | POST | `{providerId, modelId, image?, contextWindow?, maxTokens?, revision}` | `{revision}`；冲突 409（按宿主 `SETTINGS_CONFLICT` 判定，并在桥接内先按最新 revision 自动重试） |
 | `/api/model-manager/logs` | GET | 无 | `{events}` |
 | `/api/model-manager/recommend` | POST | 无 | `{main?, roles?, notes}`：AI 推荐的 AUTO 分工草案（目标限定当前目录，目录外模型剔除并写入 notes）；未配置主模型且无宿主默认模型时 400 |
 | `/api/model-manager/overrides` | GET、PUT | GET: `?sessionId=…`；PUT: `{sessionId, scope, selection?}` | `{session, nextTurn}` |

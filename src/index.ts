@@ -13,7 +13,7 @@ import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_CONFIG, LONG_CONTEXT_ALIAS, managedId, migrateConfig, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Role, type RoleSettings, type Selection, type Verification } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
-import { HostModelBridge, ModelManagerService, resolveDataDir, type ModelInputBridge } from './service.js'
+import { HostModelBridge, ModelManagerService, isSettingsConflict, resolveDataDir, type ModelInputBridge } from './service.js'
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
 import { registerManagerTools } from './tools.js'
 import { probePng } from './probe-image.js'
@@ -48,7 +48,8 @@ async function body(req: IncomingMessage): Promise<unknown> {
 
 function error(res: ServerResponse, failure: unknown): void {
   const message = failure instanceof Error ? failure.message : String(failure)
-  json(res, /CONFLICT/.test(message) ? 409 : 400, { error: message })
+  // 冲突可能是配置版本（service.update 抛字面量）或宿主 settings 的 SETTINGS_CONFLICT：两者都要走 409，否则前端只能用消息文本猜。
+  json(res, /CONFLICT/.test(message) || isSettingsConflict(failure) ? 409 : 400, { error: message })
 }
 
 export async function verify(llm: LlmRuntime, attachments: AttachmentStore, service: ModelManagerService, ref: ModelRef, kind: Verification['kind'], signal: AbortSignal): Promise<Verification> {
@@ -97,6 +98,11 @@ export interface ProbeResult {
   /** 探测后恢复宿主原声明失败；面板中该模型的「宿主原生图片」可能停留在「支持」。 */
   restoreFailed: boolean
   notes: string[]
+  /**
+   * 探测结束时 `llm-pi-ai` 的最新 revision：探测期间可能提权/还原各写一次，
+   * 调用方必须用这个 token 发起后续宿主声明写入，否则会带着过期 revision 撞上 SETTINGS_CONFLICT。
+   */
+  nativeRevision?: number
 }
 
 /**
@@ -140,7 +146,7 @@ export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, 
       await service.refresh().catch(() => {})
     }
   }
-  return { verifications, suggestions: probeSuggestions(verifications), cancelled: signal.aborted, elevated, restoreFailed, notes }
+  return { verifications, suggestions: probeSuggestions(verifications), cancelled: signal.aborted, elevated, restoreFailed, notes, nativeRevision: inputBridge.currentRevision() }
 }
 
 export const ROLES: Role[] = ['search', 'coding', 'review', 'strong', 'vision']

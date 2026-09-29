@@ -10,6 +10,38 @@ vi.mock('@deepseek-ai/dsh-tools', () => ({ defineTool: (options: unknown) => opt
 let temporary: string | undefined
 afterEach(async () => { if (temporary) await rm(temporary, { recursive: true, force: true }); temporary = undefined; delete process.env.DSH_HOME })
 
+/** 真实宿主的冲突错误形状（dsh-settings 的 SettingsConflictError）。 */
+function settingsConflict(expected: number, actual: number): Error {
+  return Object.assign(new Error(`settings namespace "llm-pi-ai" changed since it was read (expected revision ${expected}, now ${actual})`), { code: 'SETTINGS_CONFLICT', name: 'SettingsConflictError' })
+}
+
+/** 装配一个可写 llm-pi-ai 的宿主壳：只用于 /native 与 /probe 路由的写入行为验证。 */
+function writableHost(mutate: (ns: string, ops: unknown, expected: number) => Promise<void>, revision = 25) {
+  const routes: { path: string; handler: Function }[] = []
+  const model = { providerId: 'p', modelId: 'm', name: 'm', inputModalities: ['text', 'image'], reasoningEfforts: [], source: 'host', loaded: true }
+  const fake = {
+    settings: {
+      register: () => ({ watch: () => () => {} }),
+      get: (ns: string) => ns === 'dsh-model-manager' ? structuredClone(DEFAULT_CONFIG) : undefined,
+      describe: () => [{ ns: 'dsh-model-manager', revision: 0 }, { ns: 'llm-pi-ai', revision }],
+      mutate,
+    },
+    llm: {
+      listProviders: () => [{ id: 'p' }], listConfigurableProviders: () => [{ provider: 'p', settingsNs: 'llm-pi-ai' }],
+      listModels: async () => [{ id: 'm', name: 'm' }], resolveModelInfo: async () => model, registerAdapter: () => () => {},
+      stream: () => (async function* () { yield { type: 'finish', reason: { kind: 'stop' } } })(),
+    },
+    tools: { register: () => () => {} },
+    subagents: {}, attachments: { saveImage: async () => ({ id: 'probe-image' }) },
+    systemPrompt: { section: () => () => {} },
+    webServer: { register: (route: { path: string; handler: Function }) => { routes.push(route); return () => {} } },
+    on: () => () => {},
+    effect: (register: () => () => void) => { register() },
+    logger: { error: () => {} },
+  }
+  return { fake, routes }
+}
+
 function fakeRequest(payload: unknown) {
   const text = JSON.stringify(payload)
   return {
@@ -100,7 +132,7 @@ describe('宿主装配', () => {
       settings: {
         register: () => ({ watch: () => () => {} }),
         get: (ns: string) => ns === 'dsh-model-manager' ? structuredClone(DEFAULT_CONFIG) : undefined,
-        describe: () => [{ ns: 'dsh-model-manager', revision: 0 }],
+        describe: () => [{ ns: 'dsh-model-manager', revision: 0 }, { ns: 'llm-pi-ai', revision: 23 }],
       },
       llm: {
         listProviders: () => [{ id: 'p' }],
@@ -128,11 +160,13 @@ describe('宿主装配', () => {
     const probe = routes.find(route => route.path === '/api/model-manager/probe')!
     const { res, result } = fakeResponse()
     await probe.handler(fakeRequest({ providerId: 'p', modelId: 'm' }), res)
-    const payload = JSON.parse(result.body) as { verifications: { kind: string; status: string; behavior?: string }[]; suggestions: { field: string; value: string; confidence: string }[] }
+    const payload = JSON.parse(result.body) as { verifications: { kind: string; status: string; behavior?: string }[]; suggestions: { field: string; value: string; confidence: string }[]; nativeRevision?: number }
     expect(result.status).toBe(200)
     expect(asked).toEqual(['image'])
     expect(payload.verifications[0]).toMatchObject({ kind: 'image', status: 'accepted', behavior: 'observed' })
     expect(payload.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high', 'pluginImage:yes:high'])
+    // 探测后的最新 revision 必须回传：调用方随后写宿主声明时用它，才不会带过期 token。
+    expect(payload.nativeRevision).toBe(23)
   })
   it('探测路由拒绝未加载的模型', async () => {
     temporary = await mkdtemp(join(tmpdir(), 'dmm-probe-bad-'))
@@ -358,5 +392,33 @@ describe('宿主装配', () => {
     expect(payload.roles?.coding?.target).toBeUndefined()
     expect(payload.roles?.vision?.target).toEqual({ providerId: 'p', modelId: 'm' })
     expect(payload.notes.join()).toContain('coding')
+  })
+  it('宿主声明写入遇到版本冲突时自动改用最新 revision 重试并成功', async () => {
+    temporary = await mkdtemp(join(tmpdir(), 'dmm-native-retry-'))
+    process.env.DSH_HOME = temporary
+    const mutate = vi.fn().mockRejectedValueOnce(settingsConflict(23, 25)).mockResolvedValueOnce(undefined)
+    const { fake, routes } = writableHost(mutate, 25)
+    apply(fake as never)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const native = routes.find(route => route.path === '/api/model-manager/native')!
+    const { res, result } = fakeResponse()
+    await native.handler(fakeRequest({ providerId: 'p', modelId: 'm', revision: 23, image: true }), res)
+    expect(result.status).toBe(200)
+    expect(JSON.parse(result.body)).toEqual({ revision: 25 })
+    expect(mutate.mock.calls.map(call => call[2])).toEqual([23, 25])
+  })
+  it('写入冲突重试耗尽时以 409 上报，不再被降级成 400', async () => {
+    temporary = await mkdtemp(join(tmpdir(), 'dmm-native-conflict-'))
+    process.env.DSH_HOME = temporary
+    const mutate = vi.fn(async () => { throw settingsConflict(23, 25) })
+    const { fake, routes } = writableHost(mutate, 25)
+    apply(fake as never)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const native = routes.find(route => route.path === '/api/model-manager/native')!
+    const { res, result } = fakeResponse()
+    await native.handler(fakeRequest({ providerId: 'p', modelId: 'm', revision: 23, image: true }), res)
+    expect(result.status).toBe(409)
+    expect(JSON.parse(result.body).error).toContain('changed since it was read')
+    expect(mutate).toHaveBeenCalledTimes(3)
   })
 })
