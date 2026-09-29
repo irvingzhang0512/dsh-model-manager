@@ -11,7 +11,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CONFIG, LONG_CONTEXT_ALIAS, managedId, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Role, type RoleSettings, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, LONG_CONTEXT_ALIAS, managedId, migrateConfig, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Role, type RoleSettings, type Selection, type Verification } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import { HostModelBridge, ModelManagerService, resolveDataDir, type ModelInputBridge } from './service.js'
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
@@ -219,7 +219,7 @@ ${JSON.stringify(catalog)}
 export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void {
   const baseConfig: ManagerConfig = { ...structuredClone(DEFAULT_CONFIG), ...entryConfig }
   validateConfig(baseConfig)
-  const scope = ctx.settings.register(name, Config, { base: baseConfig, applies: 'live', validate: validateConfig })
+  const scope = ctx.settings.register(name, Config, { base: baseConfig, applies: 'live', validate: value => validateConfig(migrateConfig(value)) })
   const bridge = new HostModelBridge(ctx.llm, ctx.settings)
   const service = new ModelManagerService(bridge, resolveDataDir(), ctx.settings)
   const vision = new VisionRegistry()
