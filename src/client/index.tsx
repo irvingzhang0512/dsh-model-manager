@@ -24,6 +24,19 @@ const tiers: Tier[] = ['auto', 'fast', 'balanced', 'deep', 'max']
 const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明' }
 type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
 type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[] }
+/** 探测结果弹出框：有建议时渲染勾选列表，无建议/失败/批量总结时渲染证据与说明——探测结论一律走弹出框，不走右下角通知。 */
+type ProbeDialog = {
+  title: string
+  model?: ModelRecord
+  suggestions: ProbeSuggestion[]
+  checked: boolean[]
+  elevated?: boolean
+  restoreFailed?: boolean
+  notes?: string[]
+  verifications?: Verification[]
+  failure?: string
+  applied?: { hostApplied: number; pluginCount: number; skipped: number }
+}
 type Support = 'yes' | 'no' | 'unknown'
 const supportLabels: Record<Support, string> = { yes: '支持', no: '不支持', unknown: '未知' }
 /** 归一化所有快照响应：models/verifications 缺失兜底为空数组，避免渲染时 TypeError 白屏；config 缺失说明服务端异常，抛错走失败路径。 */
@@ -196,7 +209,7 @@ function ManagerSection() {
   const [refreshing, setRefreshing] = useState(false)
   const [probing, setProbing] = useState('')
   const [probeProgress, setProbeProgress] = useState('')
-  const [preview, setPreview] = useState<{ model: ModelRecord; suggestions: ProbeSuggestion[]; checked: boolean[]; elevated?: boolean; restoreFailed?: boolean; notes?: string[] } | null>(null)
+  const [preview, setPreview] = useState<ProbeDialog | null>(null)
   const [notices, setNotices] = useState<Notice[]>([])
   const [aliasName, setAliasName] = useState('')
   const [verifyTarget, setVerifyTarget] = useState<ModelRef | string>()
@@ -280,14 +293,13 @@ function ManagerSection() {
       const result = await request('/probe', { method: 'POST', body: JSON.stringify({ providerId: model.providerId, modelId: model.modelId, items: ['image', 'tools'] }) }) as ProbeResponse
       const next = await refreshDirectory(true)
       const fresh = next?.models.find(item => item.providerId === model.providerId && item.modelId === model.modelId) ?? model
-      if (result.restoreFailed) notify('error', `「${model.name}」探测后恢复宿主声明失败，请到模型卡片核对「宿主原生图片」是否被留在「支持」。`)
-      for (const note of result.notes ?? []) notify('info', note)
+      const shared = { model: fresh, elevated: result.elevated, restoreFailed: result.restoreFailed, notes: result.notes }
       if (!result.suggestions.length) {
-        notify('info', `「${model.name}」探测完成但没有可写入的结论（${result.verifications.map(item => `${item.kind}=${item.status}${item.behavior ? `/${item.behavior}` : ''}`).join('、')}）。证据已记录，可在「验证」标签查看。`)
+        setPreview({ title: `探测结果：${fresh.name}`, ...shared, suggestions: [], checked: [], verifications: result.verifications })
         return
       }
-      setPreview({ model: fresh, suggestions: result.suggestions, checked: result.suggestions.map(item => item.confidence === 'high'), elevated: result.elevated, restoreFailed: result.restoreFailed, notes: result.notes })
-    } catch (error) { notify('error', `探测失败：${String(error)}`) }
+      setPreview({ title: `探测建议：${fresh.name}`, ...shared, suggestions: result.suggestions, checked: result.suggestions.map(item => item.confidence === 'high') })
+    } catch (error) { setPreview({ title: `探测失败：${model.name}`, model, suggestions: [], checked: [], failure: String(error) }) }
     finally { setProbing('') }
   }
   const probeBatch = async () => {
@@ -297,14 +309,16 @@ function ManagerSection() {
     if (!window.confirm(`将对当前筛选的 ${models.length} 个模型逐个发出真实图片探测请求（会消耗 token）。只写入高置信结论（宿主声明与插件声明）。是否继续？`)) return
     setBusy(true)
     let revision = snapshot.nativeRevision
-    let done = 0, hostApplied = 0, inconclusive = 0, restoreFailedCount = 0
+    let done = 0, hostApplied = 0, inconclusive = 0
     const pluginEdits: { model: ModelRecord; field: ProbeField; value: Support }[] = []
+    const restoreFailedModels: string[] = []
+    const failures: string[] = []
     try {
       for (const model of models) {
         setProbeProgress(`探测中 ${done + 1}/${models.length}：${model.name}`)
         try {
           const result = await request('/probe', { method: 'POST', body: JSON.stringify({ providerId: model.providerId, modelId: model.modelId, items: ['image', 'tools'] }) }) as ProbeResponse
-          if (result.restoreFailed) { restoreFailedCount++; notify('error', `「${model.name}」探测后恢复宿主声明失败，请到模型卡片核对「宿主原生图片」。`) }
+          if (result.restoreFailed) restoreFailedModels.push(model.name)
           const high = result.suggestions.filter(item => item.confidence === 'high')
           if (!high.length) inconclusive++
           for (const item of high) {
@@ -315,7 +329,7 @@ function ManagerSection() {
               }
             } else pluginEdits.push({ model, field: item.field, value: item.value })
           }
-        } catch (error) { setProbeProgress(`「${model.name}」探测失败：${String(error)}`) }
+        } catch (error) { failures.push(`「${model.name}」探测失败：${String(error)}`) }
         const next = asSnapshot(await request('/refresh', { method: 'POST' }))
         setSnapshot(next); revision = next.nativeRevision
         done++
@@ -328,12 +342,20 @@ function ManagerSection() {
           if (item.field === 'pluginImage') next.models[key].capability!.image = item.value
         }
       })
-      notify('success', `批量探测完成：${done}/${models.length} 个模型；写宿主 ${hostApplied} 项、插件声明 ${pluginEdits.length} 项、无结论 ${inconclusive} 个。${pluginEdits.length ? '插件声明需再点页面底部「保存设置」落盘。' : ''}${restoreFailedCount ? ` ${restoreFailedCount} 个模型恢复宿主声明失败，请逐一核对。` : ''}`)
-    } catch (error) { notify('error', `批量探测中断：${String(error)}`) }
+      setPreview({
+        title: '批量探测结果',
+        suggestions: [], checked: [],
+        notes: [
+          `已完成 ${done}/${models.length} 个模型的探测：写入宿主声明 ${hostApplied} 项，插件声明改动 ${pluginEdits.length} 项${pluginEdits.length ? '（需再点页面底部「保存设置」落盘）' : ''}，无高置信结论 ${inconclusive} 个。`,
+          ...restoreFailedModels.length ? [`以下模型探测后恢复宿主声明失败，请到模型卡片逐一核对「宿主原生图片」：${restoreFailedModels.join('、')}`] : [],
+          ...failures,
+        ],
+      })
+    } catch (error) { setPreview({ title: '批量探测中断', suggestions: [], checked: [], failure: String(error) }) }
     finally { setProbeProgress(''); setBusy(false) }
   }
   const applyProbe = async () => {
-    if (!preview || !snapshot) return
+    if (!preview || !snapshot || !preview.model) return
     const chosen = preview.suggestions.filter((_, index) => preview.checked[index])
     if (!chosen.length) { notify('info', '没有勾选任何结论。'); return }
     setBusy(true)
@@ -348,16 +370,15 @@ function ManagerSection() {
         } else skipped++
       }
       if (pluginChosen.length) edit(next => {
-        const key = JSON.stringify([preview.model.providerId, preview.model.modelId])
+        const key = JSON.stringify([preview.model!.providerId, preview.model!.modelId])
         next.models[key] ??= {}
         next.models[key].capability ??= {}
         for (const item of pluginChosen) {
           if (item.field === 'pluginImage') next.models[key].capability!.image = item.value
         }
       })
-      setPreview(null)
-      notify('success', `已应用探测结论：宿主声明 ${hostApplied} 项、插件声明 ${pluginChosen.length} 项${skipped ? `，${skipped} 项因宿主不可写被跳过` : ''}。${pluginChosen.length ? '插件声明需再点「保存设置」落盘。' : ''}`)
-    } catch (error) { notify('error', String(error)) }
+      setPreview({ ...preview, title: '已应用探测结论', suggestions: [], checked: [], applied: { hostApplied, pluginCount: pluginChosen.length, skipped } })
+    } catch (error) { setPreview(current => current && { ...current, failure: String(error) }) }
     finally { setBusy(false) }
   }
   if (!draft || !snapshot) return <div className="dmm-root">{fatal || '正在加载模型管理…'}</div>
@@ -474,20 +495,27 @@ function ManagerSection() {
     </div>
     <div className="dmm-toasts">{notices.map(item => <div key={item.id} className={`dmm-toast dmm-toast-${item.kind}`} role="status"><span>{item.text}</span><button aria-label="关闭提示" onClick={() => dismiss(item.id)}>×</button></div>)}</div>
     {preview && <div className="dmm-modal-mask" onClick={() => { if (!busy) setPreview(null) }} role="presentation">
-      <div className="dmm-modal" role="dialog" aria-modal="true" aria-label={`探测建议：${preview.model.name}`} onClick={event => event.stopPropagation()}>
-        <h3>探测建议：{preview.model.name}</h3>
-        <p className="dmm-muted">以下是真实探测请求得出的结论，高置信项已默认勾选。勾选后点「应用选中项」：「宿主原生图片声明」立即写入宿主，「插件声明」需再点页面底部「保存设置」。</p>
+      <div className="dmm-modal" role="dialog" aria-modal="true" aria-label={preview.title} onClick={event => event.stopPropagation()}>
+        <h3>{preview.title}</h3>
+        {preview.failure && <p className="dmm-error">{preview.failure}</p>}
+        {preview.applied && <p className="dmm-note">已应用：宿主声明 {preview.applied.hostApplied} 项、插件声明 {preview.applied.pluginCount} 项{preview.applied.skipped ? `，${preview.applied.skipped} 项因宿主不可写被跳过` : ''}。{preview.applied.pluginCount ? '插件声明需再点页面底部「保存设置」落盘。' : ''}</p>}
+        {!preview.failure && !preview.applied && preview.suggestions.length > 0 && <p className="dmm-muted">以下是真实探测请求得出的结论，高置信项已默认勾选。勾选后点「应用选中项」：「宿主原生图片声明」立即写入宿主，「插件声明」需再点页面底部「保存设置」。</p>}
+        {!preview.failure && !preview.applied && preview.suggestions.length === 0 && (preview.verifications?.length || 0) > 0 && <p className="dmm-muted">本次探测没有产生可直接写入的结论，以下是原始验证证据：</p>}
         {preview.elevated && <p className="dmm-note">该模型宿主声明为「不支持」，宿主会把图片替换成文字占位，因此探测期间已临时把声明提为「支持」实测，测完已恢复原声明——此处的「支持」结论来自图片真实到达模型的实测。</p>}
         {preview.restoreFailed && <p className="dmm-note">探测后未能恢复宿主原声明，请到模型卡片核对「宿主原生图片」的当前值。</p>}
         {(preview.notes ?? []).map((note, index) => <p className="dmm-note" key={index}>{note}</p>)}
-        {preview.suggestions.map((item, index) => {
-          const blocked = item.field === 'hostImage' && !preview.model.nativeEditable
+        {preview.model && preview.suggestions.map((item, index) => {
+          const blocked = item.field === 'hostImage' && !preview.model!.nativeEditable
           return <div className="dmm-row" key={`${item.field}-${index}`}>
-            <label><input type="checkbox" disabled={blocked} checked={preview.checked[index] && !blocked} onChange={event => setPreview(current => current && { ...current, checked: current.checked.map((value, at) => at === index ? event.target.checked : value) })} />{probeLabels[item.field]}：{supportLabels[currentSupport(preview.model, item.field)]} → <strong>{supportLabels[item.value]}</strong></label>
-            <span className="dmm-muted">{item.confidence === 'high' ? '高置信' : '低置信'} · {item.reason}{blocked ? ` · 无法写入宿主：${preview.model.nativeEditReason ?? '该 Provider 未公开可写模型字段'}` : ''}</span>
+            <label><input type="checkbox" disabled={blocked} checked={preview.checked[index] && !blocked} onChange={event => setPreview(current => current && { ...current, checked: current.checked.map((value, at) => at === index ? event.target.checked : value) })} />{probeLabels[item.field]}：{supportLabels[currentSupport(preview.model!, item.field)]} → <strong>{supportLabels[item.value]}</strong></label>
+            <span className="dmm-muted">{item.confidence === 'high' ? '高置信' : '低置信'} · {item.reason}{blocked ? ` · 无法写入宿主：${preview.model!.nativeEditReason ?? '该 Provider 未公开可写模型字段'}` : ''}</span>
           </div>
         })}
-        <div className="dmm-row"><button className="dmm-primary" disabled={busy} onClick={() => void applyProbe()}>应用选中项</button><button disabled={busy} onClick={() => setPreview(null)}>关闭</button></div>
+        {(preview.verifications ?? []).map((item, index) => <p className="dmm-muted" key={index}>{`${item.kind}: ${item.status}${item.behavior ? ` / ${item.behavior}` : ''}${item.detail ? ` — ${item.detail}` : ''}`}</p>)}
+        <div className="dmm-row">
+          {preview.suggestions.length > 0 && !preview.applied && <button className="dmm-primary" disabled={busy} onClick={() => void applyProbe()}>应用选中项</button>}
+          <button disabled={busy} onClick={() => setPreview(null)}>关闭</button>
+        </div>
       </div>
     </div>}
   </div>
