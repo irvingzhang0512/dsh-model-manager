@@ -2,12 +2,12 @@ import { LlmAdapter, type ContentBlock, type GenerateOptions, type LlmModelInfo,
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createHash, randomUUID } from 'node:crypto'
-import { classifyFailure, fromManagedId, managedId, mergeSelection, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRecord, type ModelRef } from './domain.js'
+import { classifyFailure, fromManagedId, LONG_CONTEXT_ALIAS, managedId, mergeSelection, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRecord, type ModelRef, type Selection } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
 
 export const MANAGED_PROVIDER = 'dsh-model-manager'
-/** 选择器里的 AUTO 条目：按 Manual/Auto 方案走，没配目标时回退到宿主默认模型。 */
+/** 选择器里的 AUTO 条目：托管模式，按 auto.main 决定主模型，没配目标时回退到宿主默认模型。 */
 export const AUTO_MODEL_ID = 'auto'
 
 export class VisionRegistry {
@@ -24,16 +24,29 @@ export class VisionRegistry {
 
 /**
  * 解析一次受管理请求的目标候选。
- * `auto` 表示选择器里的 AUTO 条目：先看当前模式（Manual/Auto）配置的目标，没配就用宿主默认模型。
+ * `auto` 表示选择器里的 AUTO 条目：按托管配置 auto.main 解析主模型，没配就用宿主默认模型；
+ * `alias:x` 是固定模型的按序兜底；其余为受管理 ID 直达具体模型。
  */
 function requestedModel(id: string, config: ManagerConfig, fallback?: ModelRef): ModelRef[] {
   if (id === AUTO_MODEL_ID) {
-    const target = (config.mode === 'manual' ? config.manual : config.auto).target
+    const target = config.auto.main.target
     if (target) return resolveSelection(config, target)
     return fallback ? [fallback] : []
   }
   if (id.startsWith('alias:')) return resolveSelection(config, `@${id.slice(6)}`)
   return [fromManagedId(id)]
+}
+
+/** 解析一次请求生效的兜底策略：别名条目用别名覆盖叠在全局默认上，其余用全局默认。 */
+function effectiveReliability(config: ManagerConfig, id: string): ManagerConfig['reliability'] {
+  const base = { ...config.reliability }
+  if (id.startsWith('alias:')) return { ...base, ...config.aliases[id.slice(6)]?.reliability }
+  return base
+}
+
+/** 受管理条目参数基线：AUTO 用 auto.main，其余条目是固定模型、不带全局基线。 */
+function baseSelection(config: ManagerConfig, id: string): Selection {
+  return id === AUTO_MODEL_ID ? config.auto.main : {}
 }
 
 export class ManagedAdapter extends LlmAdapter {
@@ -57,7 +70,7 @@ export class ManagedAdapter extends LlmAdapter {
   async resolveModel(_provider: string, id: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     const config = this.service.snapshot().config
     const candidate = requestedModel(id, config, this.service.hostDefault())[0]
-    if (!candidate) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请配置 Manual/Auto 目标模型，或设置宿主默认模型' : '未配置可用模型')
+    if (!candidate) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 分工」配置主模型，或设置宿主默认模型' : '未配置可用模型')
     const info = await this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, signal)
     return { ...info, provider: MANAGED_PROVIDER, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
   }
@@ -65,15 +78,15 @@ export class ManagedAdapter extends LlmAdapter {
   async prepareCall(provider: string, id: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
     const snapshot = this.service.snapshot()
     const candidates = requestedModel(id, snapshot.config, this.service.hostDefault())
-    if (!candidates.length) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请配置 Manual/Auto 目标模型，或设置宿主默认模型' : '未配置可用模型')
+    if (!candidates.length) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 分工」配置主模型，或设置宿主默认模型' : '未配置可用模型')
     const info = await this.llm.resolveModelInfo(candidates[0].providerId, candidates[0].modelId, signal)
     const model: LlmResolvedModelInfo = { ...info, provider, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
     return { model, stream: (options: GenerateOptions) => {
       const session = options.sessionId as string || 'one-shot'
       const delegated = this.service.isDelegatedSession(session)
       const override = delegated ? undefined : this.service.activeSelection(session)
-      const selection = delegated ? {} : mergeSelection(snapshot.config.mode === 'manual' ? snapshot.config.manual : snapshot.config.auto, override)
-      return this.streamWithSnapshot(options, snapshot.config, snapshot.models, candidates, selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
+      const selection = delegated ? {} : mergeSelection(baseSelection(snapshot.config, id), override)
+      return this.streamWithSnapshot(options, snapshot.config, snapshot.models, candidates, selection, effectiveReliability(snapshot.config, id), !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
     } }
   }
 
@@ -83,11 +96,11 @@ export class ManagedAdapter extends LlmAdapter {
     const session = options.sessionId as string || 'one-shot'
     const delegated = this.service.isDelegatedSession(session)
     const override = delegated ? undefined : this.service.activeSelection(session)
-    const selection = delegated ? {} : mergeSelection(config.mode === 'manual' ? config.manual : config.auto, override)
-    yield* this.streamWithSnapshot(options, config, snapshot.models, requestedModel(options.model, config), selection, !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
+    const selection = delegated ? {} : mergeSelection(baseSelection(config, options.model), override)
+    yield* this.streamWithSnapshot(options, config, snapshot.models, requestedModel(options.model, config), selection, effectiveReliability(config, options.model), !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
   }
 
-  private async *streamWithSnapshot(options: GenerateOptions, config: ManagerConfig, models: ModelRecord[], candidates: ModelRef[], selection: ReturnType<ModelManagerService['activeSelection']>, lockedParams: boolean): AsyncIterable<StreamChunk> {
+  private async *streamWithSnapshot(options: GenerateOptions, config: ManagerConfig, models: ModelRecord[], candidates: ModelRef[], selection: ReturnType<ModelManagerService['activeSelection']>, reliability: ManagerConfig['reliability'], lockedParams: boolean): AsyncIterable<StreamChunk> {
     const session = options.sessionId as string || 'one-shot'
     const managedRequestId = randomUUID()
     const turn = this.service.activeTurn(session)
@@ -101,10 +114,10 @@ export class ManagedAdapter extends LlmAdapter {
     let previousProvider: string | undefined
     let contextOnly = false
     const queue = selection?.target ? resolveSelection(config, selection.target) : [...candidates]
-    const longContextCandidates = config.reliability.longContextCandidates ?? []
+    const longContextCandidates = config.aliases[LONG_CONTEXT_ALIAS]?.candidates ?? []
     const tried = new Set<string>()
     for (const candidate of queue) {
-      if (attempt >= config.reliability.maxAttempts) break
+      if (attempt >= reliability.maxAttempts) break
       if (tried.has(modelKey(candidate))) continue
       if (contextOnly && !longContextCandidates.some(ref => modelKey(ref) === modelKey(candidate))) continue
       if ((this.cooldown.get(modelKey(candidate)) ?? 0) > Date.now()) continue
@@ -168,7 +181,7 @@ export class ManagedAdapter extends LlmAdapter {
           model: candidate.modelId, attempt, route, effort: request.reasoningEffort, durationMs: Date.now() - started, status: failedReason?.kind ?? 'success',
           failureCode: failureInfo?.code, httpStatus: failureInfo?.status, requestId: failureInfo?.requestId, usage })
         if (!failure) return
-        if (visible || failedReason?.kind === 'aborted' || attempt >= config.reliability.maxAttempts) { yield failure; return }
+        if (visible || failedReason?.kind === 'aborted' || attempt >= reliability.maxAttempts) { yield failure; return }
         const classification = classifyFailure(failureInfo?.status, failureInfo?.code)
         if (classification === 'cooldown') this.cooldown.set(modelKey(candidate), Date.now() + 30000)
         if (classification === 'auth') previousProvider = candidate.providerId
@@ -177,11 +190,11 @@ export class ManagedAdapter extends LlmAdapter {
           contextOnly = true
           for (const ref of longContextCandidates) if (!queue.some(item => modelKey(item) === modelKey(ref))) queue.push(ref)
         }
-        if (classification === 'parameter' && config.reliability.parameterDowngrade && !lockedParams && !downgraded && request.reasoningEffort && /reasoning|effort|thinking/i.test(failureInfo?.message ?? '') && attempt < config.reliability.maxAttempts) {
+        if (classification === 'parameter' && reliability.parameterDowngrade && !lockedParams && !downgraded && request.reasoningEffort && /reasoning|effort|thinking/i.test(failureInfo?.message ?? '') && attempt < reliability.maxAttempts) {
           request.reasoningEffort = undefined
           downgraded = true
           retryThis = true
-        } else if (classification === 'retry' && config.reliability.retryTransient && !retried && attempt < config.reliability.maxAttempts) { retryThis = true; retried = true }
+        } else if (classification === 'retry' && reliability.retryTransient && !retried && attempt < reliability.maxAttempts) { retryThis = true; retried = true }
         else if (!['cooldown', 'auth', 'retry', 'context'].includes(classification)) { yield failure; return }
       } while (retryThis)
     }

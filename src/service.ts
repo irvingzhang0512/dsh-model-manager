@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
-import { DEFAULT_CONFIG, mergeSelection, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, mergeSelection, migrateConfig, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
 
 export interface ModelBridge {
   catalog(): Promise<ModelRecord[]>
@@ -150,7 +150,11 @@ export class ModelManagerService {
   async init(): Promise<void> {
     await mkdir(this.dataDir, { recursive: true })
     const stored = this.settings?.get('dsh-model-manager') as ManagerConfig | undefined
-    if (stored) { validateConfig(stored); this.config = structuredClone(stored) }
+    if (stored) {
+      const migrated = migrateConfig(stored)
+      validateConfig(migrated)
+      this.config = structuredClone(migrated)
+    }
     this.revision = this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.revision ?? 0
     this.models = await this.bridge.catalog()
     const records = await readJsonWithBackup<Verification[]>(join(this.dataDir, 'verification.json'))
@@ -183,8 +187,9 @@ export class ModelManagerService {
   }
 
   onSettingsChanged(next: ManagerConfig): void {
-    validateConfig(next)
-    this.config = structuredClone(next)
+    const migrated = migrateConfig(next)
+    validateConfig(migrated)
+    this.config = structuredClone(migrated)
     this.revision = this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.revision ?? this.revision + 1
   }
 
@@ -212,8 +217,8 @@ export class ModelManagerService {
     }
     const value = this.overrides.get(session) ?? {}
     const preview = { ...value, [scope]: selection }
-    const global = this.config.mode === 'manual' ? this.config.manual : this.config.auto
-    const effective = mergeSelection(mergeSelection(global, preview.session), preview.nextTurn)
+    // v2：非 AUTO 的原生请求没有全局配置行，覆盖只叠加在空基线上。
+    const effective = mergeSelection(mergeSelection({}, preview.session), preview.nextTurn)
     if (effective.thinking === 'off' && effective.tier && !['auto', 'inherit'].includes(effective.tier)) throw new Error('关闭思考不能同时选择非关闭推理档位')
     if (effective.maxOutputTokens !== undefined && (!Number.isInteger(effective.maxOutputTokens) || effective.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
     if (selection) value[scope] = structuredClone(selection)
@@ -235,7 +240,7 @@ export class ModelManagerService {
       value.active = { turn, selection: mergeSelection(value.session ?? {}, value.nextTurn) }
       this.overrides.set(session, value)
     }
-    const global = this.config.mode === 'manual' ? this.config.manual : this.config.auto
+    const global = {}
     return structuredClone(mergeSelection(global, value.active.selection))
   }
 
@@ -254,7 +259,7 @@ export class ModelManagerService {
   signature(ref: ModelRef, kind?: Verification['kind']): string {
     const model = this.model(ref)
     const settings = this.config.models[modelKey(ref)]
-    const reasoningSelection = kind === 'reasoning' ? this.config.manual : undefined
+    const reasoningSelection = kind === 'reasoning' ? this.config.auto.main : undefined
     return createHash('sha256').update(JSON.stringify({ model, settings, reasoningSelection, providerAdapterVersion: 1 })).digest('hex')
   }
 

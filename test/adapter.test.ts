@@ -26,10 +26,10 @@ function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: s
 describe('受管理请求', () => {
   it('准备后修改别名不影响已捕获的请求', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
-    config.aliases.fast = [{ providerId: 'provider-a', modelId: 'text' }]
+    config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }] }
     const { adapter, calls } = harness(config)
     const prepared = await adapter.prepareCall('dsh-model-manager', 'alias:fast')
-    config.aliases.fast = [{ providerId: 'new-provider', modelId: 'new-model' }]
+    config.aliases.fast = { candidates: [{ providerId: 'new-provider', modelId: 'new-model' }] }
     const output = []
     for await (const chunk of prepared.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk)
     expect(calls[0].provider).toBe('provider-a')
@@ -87,7 +87,7 @@ describe('受管理请求', () => {
   })
   it('已有输出后失败不换模型重播', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
-    config.aliases.fast = [{ providerId: 'provider-a', modelId: 'text' }, { providerId: 'provider-b', modelId: 'text' }]
+    config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }, { providerId: 'provider-b', modelId: 'text' }] }
     const { adapter, calls } = harness(config, () => (async function* () {
       yield { type: 'text-delta', index: 0, text: '半段' }
       yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', status: 503, message: 'failed' } } }
@@ -99,7 +99,7 @@ describe('受管理请求', () => {
   })
   it('无输出的临时失败只重试一次，再按别名顺序切换', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
-    config.aliases.fast = [{ providerId: 'provider-a', modelId: 'text' }, { providerId: 'provider-b', modelId: 'text' }]
+    config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }, { providerId: 'provider-b', modelId: 'text' }] }
     const { adapter, calls } = harness(config, provider => (async function* () {
       if (provider === 'provider-a') yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', status: 503, message: 'failed' } } }
       else yield { type: 'finish', reason: { kind: 'stop' } }
@@ -141,11 +141,11 @@ describe('受管理请求', () => {
     for await (const _ of stream) { /* drain */ }
     expect(calls[0].maxTokens).toBe(128)
   })
-  it('Manual 目标优先于宿主当前受管理入口，子任务仍使用角色绑定模型', async () => {
+  it('AUTO 目标优先于宿主当前受管理入口，子任务仍使用角色绑定模型', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
-    config.manual.target = { providerId: 'provider-b', modelId: 'text' }
+    config.auto.main.target = { providerId: 'provider-b', modelId: 'text' }
     const { adapter, calls, service } = harness(config)
-    for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), sessionId: 'main' as never, messages: [] })) { /* drain */ }
+    for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: 'auto', sessionId: 'main' as never, messages: [] })) { /* drain */ }
     expect(calls[0].provider).toBe('provider-b')
     service.isDelegatedSession = () => true
     for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), sessionId: 'child' as never, messages: [] })) { /* drain */ }
@@ -164,10 +164,10 @@ describe('受管理请求', () => {
     expect(calls[1].messages[0].content[0].text).toContain('视觉辅助已关闭')
     expect(calls[1].messages[1].content[0].text).toBe('继续')
   })
-  it('上下文溢出只切到明确配置的长上下文候选', async () => {
+  it('上下文溢出只切到内置长上下文别名的候选', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
-    config.aliases.fast = [{ providerId: 'provider-a', modelId: 'text' }]
-    config.reliability.longContextCandidates = [{ providerId: 'provider-b', modelId: 'text' }]
+    config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }] }
+    config.aliases['long-context'] = { candidates: [{ providerId: 'provider-b', modelId: 'text' }] }
     const { adapter, calls } = harness(config, provider => (async function* () {
       if (provider === 'provider-a') yield { type: 'finish', reason: { kind: 'error', failure: { code: 'context_length_exceeded', status: 400, message: 'too long' } } }
       else yield { type: 'finish', reason: { kind: 'stop' } }
@@ -177,16 +177,28 @@ describe('受管理请求', () => {
     expect(calls.map(call => call.provider)).toEqual(['provider-a', 'provider-b'])
     expect(output.at(-1).reason.kind).toBe('stop')
   })
+  it('别名级兜底覆盖生效：放宽尝试次数', async () => {
+    const config = structuredClone(DEFAULT_CONFIG)
+    config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }, { providerId: 'provider-b', modelId: 'text' }], reliability: { maxAttempts: 3 } }
+    const { adapter, calls } = harness(config, () => (async function* () {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', status: 503, message: 'failed' } } }
+    })())
+    const output = []
+    for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk)
+    expect(calls).toHaveLength(3)
+    expect(output.at(-1).reason.kind).toBe('error')
+  })
   it('参数拒绝仅在允许时去掉推理参数并重试', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
-    config.manual.tier = 'fast'
+    config.auto.main.target = { providerId: 'provider-a', modelId: 'text' }
+    config.auto.main.tier = 'fast'
     config.models['["provider-a","text"]'] = { tiers: { fast: 'low' } }
     config.reliability.parameterDowngrade = true
     const { adapter, calls } = harness(config, (_provider, request) => (async function* () {
       yield request.reasoningEffort ? { type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_REQUEST', status: 400, message: 'reasoning effort rejected' } } } : { type: 'finish', reason: { kind: 'stop' } }
     })())
     const output = []
-    for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), messages: [] })) output.push(chunk)
+    for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: 'auto', messages: [] })) output.push(chunk)
     expect(calls.map(call => call.reasoningEffort)).toEqual(['low', undefined])
     expect(output.at(-1).reason.kind).toBe('stop')
   })
@@ -205,10 +217,10 @@ describe('受管理请求', () => {
     expect(output[1].block.name).toBe('invalid.tool')
     expect(service.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'tool-name-mapping', names: ['invalid.tool'] }))
   })
-  it('托管子任务保留角色推理档位，不继承主 Agent 的 Manual 参数', async () => {
+  it('托管子任务保留角色推理档位，不继承主 Agent 的 AUTO 参数', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
-    config.manual.maxOutputTokens = 512
-    config.manual.tier = 'fast'
+    config.auto.main.maxOutputTokens = 512
+    config.auto.main.tier = 'fast'
     config.models['["provider-a","text"]'] = { tiers: { fast: 'low' } }
     const { adapter, calls, service } = harness(config)
     service.isDelegatedSession = () => true

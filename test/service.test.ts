@@ -52,10 +52,10 @@ describe('宿主桥接与版本控制', () => {
   it('配置冲突拒绝过期版本且不覆盖已保存值', async () => {
     const bridge = { catalog: async () => [] }
     const service = new ModelManagerService(bridge, 'unused-test-path')
-    const newer = structuredClone(DEFAULT_CONFIG); newer.mode = 'auto'
+    const newer = structuredClone(DEFAULT_CONFIG); newer.auto.main.tier = 'deep'
     await service.update(newer, 0)
     await expect(service.update(DEFAULT_CONFIG, 0)).rejects.toThrow('SETTINGS_CONFLICT')
-    expect(service.snapshot().config.mode).toBe('auto')
+    expect(service.snapshot().config.auto.main.tier).toBe('deep')
   })
   it('视觉缓存重启后可复用并按键隔离', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dmm-cache-'))
@@ -109,7 +109,7 @@ describe('宿主桥接与版本控制', () => {
       await service.saveVerification({ model, kind: 'reasoning', status: 'accepted', checkedAt: '2026-01-01', signature: service.signature(model, 'reasoning'), requestCount: 1 })
       await service.saveVerification({ model, kind: 'text', status: 'accepted', checkedAt: '2026-01-01', signature: service.signature(model, 'text'), requestCount: 1 })
       const config = structuredClone(DEFAULT_CONFIG)
-      config.manual.thinking = 'off'
+      config.auto.main.thinking = 'off'
       await service.update(config, 0)
       expect(service.getVerification(model, 'reasoning')?.stale).toBe(true)
       expect(service.getVerification(model, 'text')?.stale).toBe(false)
@@ -140,6 +140,19 @@ describe('宿主桥接与版本控制', () => {
       expect((await stat(path)).size).toBeLessThanOrEqual(50 * 1024 * 1024)
       expect((await service.logs(1))[0]?.status).toBe('new')
     } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+  it('读取到 v1 配置时自动迁移成 v2', async () => {
+    const stored = { version: 1, aliases: { fast: [{ providerId: 'p', modelId: 'a' }] }, models: {}, mode: 'manual', manual: {}, auto: { tier: 'balanced' },
+      roles: { coding: { target: { providerId: 'p', modelId: 'c' } } }, vision: { enabled: false, policy: 'native-first' }, reliability: { maxAttempts: 2, retryTransient: true, parameterDowngrade: false, longContextCandidates: [{ providerId: 'p', modelId: 'big' }] } }
+    const settings = { get: (ns: string) => ns === 'dsh-model-manager' ? stored : undefined, describe: () => [{ ns: 'dsh-model-manager', revision: 4 }] }
+    const service = new ModelManagerService({ catalog: async () => [] }, 'unused-migrate-path', settings as never)
+    await service.init()
+    const config = service.snapshot().config
+    expect(config.version).toBe(2)
+    expect(config.aliases.fast).toEqual({ candidates: [{ providerId: 'p', modelId: 'a' }] })
+    expect(config.aliases['long-context']!.candidates).toEqual([{ providerId: 'p', modelId: 'big' }])
+    expect(config.auto.main.tier).toBe('balanced')
+    expect(config.reliability.maxAttempts).toBe(2)
   })
   it('同名模型验证与并发会话覆盖互不串用', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dmm-isolation-'))

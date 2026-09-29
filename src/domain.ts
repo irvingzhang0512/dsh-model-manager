@@ -1,7 +1,7 @@
 export type Support = 'yes' | 'no' | 'unknown'
 export type Tier = 'auto' | 'fast' | 'balanced' | 'deep' | 'max'
 export type VisionPolicy = 'native-first' | 'sidecar-first' | 'native-only' | 'sidecar-only'
-export type Role = 'main' | 'search' | 'coding' | 'review' | 'strong' | 'vision'
+export type Role = 'search' | 'coding' | 'review' | 'strong' | 'vision'
 
 export interface ModelRef { providerId: string; modelId: string }
 export interface CapabilityOverride {
@@ -13,6 +13,7 @@ export interface CapabilityOverride {
 }
 export interface ModelSettings {
   capability?: CapabilityOverride
+  /** 档位映射：取值为该模型支持的实际档位 id；缺省或 'auto' 表示按模型公开档位自动推断。 */
   tiers?: Partial<Record<Exclude<Tier, 'auto'>, string>>
 }
 export interface Selection {
@@ -21,18 +22,21 @@ export interface Selection {
   tier?: Tier | 'inherit'
   maxOutputTokens?: number
 }
-/** 子 Agent 角色绑定：是否参与分发由模式（auto = 托管）总控，这里只负责绑模型与推理参数。 */
+/** 子 Agent 角色绑定：是否可委派由「角色是否绑定了有效模型」决定，这里只负责绑模型与推理参数。 */
 export interface RoleSettings extends Selection { }
+/** 别名级兜底覆盖：未填写的字段使用全局默认兜底策略。 */
+export interface AliasReliability { maxAttempts?: number; retryTransient?: boolean; parameterDowngrade?: boolean }
+/** 别名 = 一串按顺序兜底的具体模型候选 + 可选的兜底策略覆盖。 */
+export interface AliasConfig { candidates: ModelRef[]; reliability?: AliasReliability }
 export interface ManagerConfig {
-  version: 1
-  aliases: Record<string, ModelRef[]>
+  version: 2
+  aliases: Record<string, AliasConfig>
   models: Record<string, ModelSettings>
-  mode: 'manual' | 'auto'
-  manual: Selection
-  auto: Selection
-  roles: Record<Role, RoleSettings>
+  /** AUTO（托管）配置：主 Agent 目标与子 Agent 角色分工。非 AUTO 的选择就是固定模型，无需配置。 */
+  auto: { main: Selection; roles: Record<Role, RoleSettings> }
   vision: { enabled: boolean; policy: VisionPolicy; target?: ModelRef | string }
-  reliability: { maxAttempts: number; retryTransient: boolean; parameterDowngrade: boolean; longContextCandidates?: ModelRef[] }
+  /** 全局默认兜底策略；别名可用 reliability 覆盖个别字段。 */
+  reliability: { maxAttempts: number; retryTransient: boolean; parameterDowngrade: boolean }
 }
 export interface ModelRecord extends ModelRef {
   name: string
@@ -56,6 +60,9 @@ export interface Verification {
   behavior?: 'observed' | 'not-observed' | 'unknown'
   detail?: string
 }
+
+/** 上下文溢出兜底使用的内置保留别名。 */
+export const LONG_CONTEXT_ALIAS = 'long-context'
 
 /** 探测可写入的配置位置：宿主声明（写 llm-pi-ai）或插件声明（写本插件配置）。 */
 export type ProbeField = 'hostImage' | 'pluginImage'
@@ -90,17 +97,19 @@ export function probeSuggestions(verifications: Verification[]): ProbeSuggestion
 }
 
 export const DEFAULT_CONFIG: ManagerConfig = {
-  version: 1, aliases: {}, models: {}, mode: 'manual', manual: {}, auto: {},
-  roles: {
-    main: { tier: 'balanced' },
-    search: { tier: 'fast' },
-    coding: { tier: 'balanced' },
-    review: { tier: 'deep' },
-    strong: { tier: 'deep' },
-    vision: { tier: 'auto' },
+  version: 2, aliases: {}, models: {},
+  auto: {
+    main: {},
+    roles: {
+      search: { tier: 'fast' },
+      coding: { tier: 'balanced' },
+      review: { tier: 'deep' },
+      strong: { tier: 'deep' },
+      vision: { tier: 'auto' },
+    },
   },
   vision: { enabled: false, policy: 'native-first' },
-  reliability: { maxAttempts: 3, retryTransient: true, parameterDowngrade: false, longContextCandidates: [] },
+  reliability: { maxAttempts: 3, retryTransient: true, parameterDowngrade: false },
 }
 
 export function modelKey(ref: ModelRef): string {
@@ -117,21 +126,53 @@ export function fromManagedId(id: string): ModelRef {
   return { providerId: raw[0], modelId: raw[1] }
 }
 
+export function aliasCandidates(config: ManagerConfig, name: string): ModelRef[] {
+  return config.aliases[name]?.candidates ?? []
+}
+
 export function resolveSelection(config: ManagerConfig, target?: ModelRef | string): ModelRef[] {
   if (!target) return []
   if (typeof target !== 'string') return [target]
   if (!/^@[a-z][a-z0-9_-]*$/.test(target)) throw new Error(`无效别名：${target}`)
-  const candidates = config.aliases[target.slice(1)]
-  if (!candidates?.length) throw new Error(`别名未绑定：${target}`)
+  const candidates = aliasCandidates(config, target.slice(1))
+  if (!candidates.length) throw new Error(`别名未绑定：${target}`)
   return candidates.map(ref => ({ ...ref }))
+}
+
+const EFFORT_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+/**
+ * 按模型公开的实际档位推断 fast/balanced/deep/max 的默认映射：
+ * fast → 最弱档、max → 最强档、deep → 次强档、balanced → 中间档。
+ * 只能作为零配置默认值；推断错时用户仍可逐模型显式覆盖。
+ */
+export function inferTierMapping(record: ModelRecord): Partial<Record<Exclude<Tier, 'auto'>, string>> {
+  const efforts = [...record.reasoningEfforts.filter(e => e.id !== 'off')]
+    .sort((a, b) => {
+      const ia = EFFORT_ORDER.indexOf(a.id); const ib = EFFORT_ORDER.indexOf(b.id)
+      if (ia >= 0 && ib >= 0) return ia - ib
+      if (ia >= 0) return -1
+      if (ib >= 0) return 1
+      return a.id.localeCompare(b.id)
+    })
+  const n = efforts.length
+  if (!n) return {}
+  return {
+    fast: efforts[0].id,
+    balanced: efforts[Math.floor((n - 1) / 2)].id,
+    deep: n >= 3 ? efforts[n - 2].id : efforts[n - 1].id,
+    max: efforts[n - 1].id,
+  }
 }
 
 export function mapEffort(record: ModelRecord, settings: ModelSettings | undefined, tier: Tier | 'inherit' | undefined): string | undefined {
   if (!tier || tier === 'inherit' || tier === 'auto') return undefined
   const mapped = settings?.tiers?.[tier]
-  if (!mapped) throw new Error(`${record.name} 未配置 ${tier} 档位`)
-  if (!record.reasoningEfforts.some(e => e.id === mapped)) throw new Error(`${record.name} 不支持推理档位 ${mapped}`)
-  return mapped
+  const inferred = inferTierMapping(record)[tier]
+  const effective = mapped && mapped !== 'auto' ? mapped : inferred
+  if (!effective) throw new Error(`${record.name} 未配置 ${tier} 档位`)
+  if (!record.reasoningEfforts.some(e => e.id === effective)) throw new Error(`${record.name} 不支持推理档位 ${effective}`)
+  return effective
 }
 
 export function mapSelectionEffort(record: ModelRecord, settings: ModelSettings | undefined, selection: Selection): string | undefined {
@@ -155,26 +196,50 @@ export function mergeSelection(base: Selection, overlay?: Selection): Selection 
   }
 }
 
-export function validateConfig(config: ManagerConfig): void {
-  if (config.version !== 1) throw new Error('不支持的配置版本')
-  if (!['manual', 'auto'].includes(config.mode)) throw new Error('无效模式')
-  if (!Number.isInteger(config.reliability.maxAttempts) || config.reliability.maxAttempts < 1 || config.reliability.maxAttempts > 3) throw new Error('尝试次数必须为 1–3')
-  if (config.reliability.longContextCandidates !== undefined && (!Array.isArray(config.reliability.longContextCandidates) || config.reliability.longContextCandidates.some(ref => !ref || typeof ref.providerId !== 'string' || typeof ref.modelId !== 'string' || !ref.providerId || !ref.modelId))) throw new Error('长上下文候选只能填写具体模型')
-  for (const [name, refs] of Object.entries(config.aliases)) {
-    if (!/^[a-z][a-z0-9_-]*$/.test(name) || !Array.isArray(refs) || !refs.length) throw new Error(`无效别名：${name}`)
-    for (const ref of refs) if (!ref || typeof ref.providerId !== 'string' || typeof ref.modelId !== 'string' || !ref.providerId || !ref.modelId) throw new Error(`别名 ${name} 只能引用具体模型`)
+/** 把 v1 配置迁移成 v2：别名数组包成 AliasConfig，长上下文候选转成内置别名，丢弃 mode/manual 行。 */
+export function migrateConfig(input: unknown): ManagerConfig {
+  const raw = input as { version?: number; aliases?: Record<string, ModelRef[] | AliasConfig>; models?: Record<string, ModelSettings>; mode?: unknown; manual?: Selection; auto?: Selection; roles?: Record<string, RoleSettings>; vision?: ManagerConfig['vision']; reliability?: { maxAttempts?: number; retryTransient?: boolean; parameterDowngrade?: boolean; longContextCandidates?: ModelRef[] } }
+  if (raw?.version === 2) return raw as unknown as ManagerConfig
+  if (raw?.version !== 1) throw new Error('不支持的配置版本')
+  const aliases: Record<string, AliasConfig> = {}
+  for (const [name, value] of Object.entries(raw.aliases ?? {})) {
+    if (Array.isArray(value)) aliases[name] = { candidates: value }
+    else if (value && Array.isArray((value as AliasConfig).candidates)) aliases[name] = value as AliasConfig
   }
-  for (const selection of [config.manual, config.auto]) {
-    if (selection.target) resolveSelection(config, selection.target)
+  const reliability = { maxAttempts: raw.reliability?.maxAttempts ?? 3, retryTransient: raw.reliability?.retryTransient ?? true, parameterDowngrade: raw.reliability?.parameterDowngrade ?? false }
+  const longContext = raw.reliability?.longContextCandidates ?? []
+  if (longContext.length && !aliases[LONG_CONTEXT_ALIAS]) aliases[LONG_CONTEXT_ALIAS] = { candidates: structuredClone(longContext) }
+  const roles: Record<Role, RoleSettings> = { ...structuredClone(DEFAULT_CONFIG.auto.roles) }
+  for (const role of Object.keys(roles) as Role[]) if (raw.roles?.[role]) roles[role] = structuredClone(raw.roles[role])
+  return {
+    version: 2, aliases, models: raw.models ?? {},
+    auto: { main: raw.auto ?? {}, roles },
+    vision: raw.vision ?? { enabled: false, policy: 'native-first' },
+    reliability,
+  }
+}
+
+function isValidRef(ref: unknown): ref is ModelRef {
+  return !!ref && typeof (ref as ModelRef).providerId === 'string' && typeof (ref as ModelRef).modelId === 'string' && !!(ref as ModelRef).providerId && !!(ref as ModelRef).modelId
+}
+
+export function validateConfig(config: ManagerConfig): void {
+  if (config.version !== 2) throw new Error('不支持的配置版本')
+  if (!Number.isInteger(config.reliability.maxAttempts) || config.reliability.maxAttempts < 1 || config.reliability.maxAttempts > 3) throw new Error('尝试次数必须为 1–3')
+  for (const [name, alias] of Object.entries(config.aliases ?? {})) {
+    if (!/^[a-z][a-z0-9_-]*$/.test(name) || !alias || !Array.isArray(alias.candidates) || !alias.candidates.length) throw new Error(`无效别名：${name}`)
+    for (const ref of alias.candidates) if (!isValidRef(ref)) throw new Error(`别名 ${name} 只能引用具体模型`)
+    const override = alias.reliability
+    if (override !== undefined && (typeof override !== 'object' || override === null)) throw new Error(`别名 ${name} 的兜底覆盖无效`)
+    if (override?.maxAttempts !== undefined && (!Number.isInteger(override.maxAttempts) || override.maxAttempts < 1 || override.maxAttempts > 3)) throw new Error(`别名 ${name} 的尝试次数必须为 1–3`)
+  }
+  if (config.auto?.main?.target) resolveSelection(config, config.auto.main.target)
+  for (const selection of [config.auto?.main, ...Object.values(config.auto?.roles ?? {})]) {
+    if (!selection) continue
     if (selection.maxOutputTokens !== undefined && (!Number.isInteger(selection.maxOutputTokens) || selection.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
     if (selection.thinking === 'off' && selection.tier && !['inherit', 'auto'].includes(selection.tier)) throw new Error('关闭思考不能同时选择非关闭推理档位')
   }
-  // 角色只在自动（托管）模式下参与分发，其目标在使用时校验（未绑定的别名按「角色不可用」处理，
-  // 而不是拒绝整份配置——避免手动模式下无关的角色绑定把保存/加载卡死）。
-  for (const role of Object.values(config.roles)) {
-    if (role.maxOutputTokens !== undefined && (!Number.isInteger(role.maxOutputTokens) || role.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
-    if (role.thinking === 'off' && role.tier && !['inherit', 'auto'].includes(role.tier)) throw new Error('关闭思考不能同时选择非关闭推理档位')
-  }
+  // 角色目标在使用时校验（未绑定的别名按「角色不可用」处理，而不是拒绝整份配置）。
   if (config.vision.enabled && config.vision.target) resolveSelection(config, config.vision.target)
 }
 

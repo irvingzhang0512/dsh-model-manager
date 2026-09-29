@@ -46,11 +46,10 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
     execute: async (args, exec) => {
       if (!exec.agent) throw new Error('缺少父 Agent')
       const config = deps.service.snapshot().config
-      if (config.mode !== 'auto') throw new Error('子 Agent 分发只在自动（托管）模式下可用：到「模型管理 → Manual/Auto」把模式切到「自动」')
       const role = args.role as Role
-      const roleConfig = config.roles[role]
+      const roleConfig = config.auto.roles[role]
       if (!roleConfig) throw new Error(`角色 ${role} 不存在`)
-      if (!roleConfig.target) throw new Error(`角色 ${role} 未绑定模型：到「模型管理 → Manual/Auto」的角色卡里绑定`)
+      if (!roleConfig.target) throw new Error(`角色 ${role} 未绑定模型：到「模型管理 → AUTO 分工」的角色卡里绑定`)
       let model: ReturnType<typeof resolveSelection>[number]
       try { model = resolveSelection(config, roleConfig.target)[0] } catch (error) { throw new Error(`角色 ${role} 绑定的目标不可用：${error instanceof Error ? error.message : String(error)}`) }
       if (!model || !deps.service.model(model)) throw new Error(`角色 ${role} 未绑定有效模型`)
@@ -101,7 +100,7 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
       if (!ref) throw new Error('附件不属于当前会话或引用已过期')
       const config = deps.service.snapshot().config
       if (!config.vision.enabled) throw new Error('视觉辅助未启用')
-      const target = resolveSelection(config, config.vision.target ?? config.roles.vision.target)[0]
+      const target = resolveSelection(config, config.vision.target ?? config.auto.roles.vision.target)[0]
       if (!target) throw new Error('尚未绑定视觉模型')
       const info = await deps.llm.resolveModelInfo(target.providerId, target.modelId, exec.signal)
       if (!info.inputModalities?.includes('image')) throw new Error('视觉模型未声明原生图片能力')

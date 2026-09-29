@@ -1,16 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import type { ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Role, Tier, Verification } from '../domain.js'
+import type { AliasReliability, ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Role, RoleSettings, Selection, Tier, Verification } from '../domain.js'
 
 export const inject = ['slots']
 type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] }
-type Tab = '模型' | '别名与推理配置' | 'Manual/Auto' | '视觉' | '可靠性' | '验证' | '日志'
-const tabs: Tab[] = ['模型', '别名与推理配置', 'Manual/Auto', '视觉', '可靠性', '验证', '日志']
-const roles: Role[] = ['main', 'search', 'coding', 'review', 'strong', 'vision']
+type Tab = '模型' | '别名与兜底' | 'AUTO 分工' | '视觉' | '日志'
+const tabs: Tab[] = ['模型', '别名与兜底', 'AUTO 分工', '视觉', '日志']
+const roles: Role[] = ['search', 'coding', 'review', 'strong', 'vision']
+const roleLabels: Record<Role, string> = { search: 'Search · 检索与探索', coding: 'Coding · 实现和修复', review: 'Review · 审查结果及风险', strong: 'Strong · 复杂分析与调试', vision: 'Vision · 图片理解' }
 const tiers: Tier[] = ['auto', 'fast', 'balanced', 'deep', 'max']
 const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明' }
 type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
 type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[] }
-/** 探测结果弹出框：有建议时渲染勾选列表，无建议/失败/批量总结时渲染证据与说明——探测结论一律走弹出框，不走右下角通知。 */
+/** 探测/验证结果弹出框：有建议时渲染勾选列表，无建议/失败/批量总结时渲染证据与说明。 */
 type ProbeDialog = {
   title: string
   model?: ModelRecord
@@ -23,6 +24,8 @@ type ProbeDialog = {
   failure?: string
   applied?: { hostApplied: number; pluginCount: number; skipped: number }
 }
+/** AI 推荐分工弹出框：展示可编辑草案，确认后写入草稿。 */
+type RecommendDialog = { main?: Selection; roles?: Partial<Record<Role, RoleSettings>>; notes: string[]; failure?: string }
 type Support = 'yes' | 'no' | 'unknown'
 const supportLabels: Record<Support, string> = { yes: '支持', no: '不支持', unknown: '未知' }
 /** 归一化所有快照响应：models/verifications 缺失兜底为空数组，避免渲染时 TypeError 白屏；config 缺失说明服务端异常，抛错走失败路径。 */
@@ -41,6 +44,11 @@ const style = `
 .dmm-tabs button[aria-selected=true],.dmm-root button.dmm-primary{background:var(--dsw-alias-brand-primary,#356dde);color:#fff;border-color:transparent}
 .dmm-root button:disabled{cursor:not-allowed;opacity:.5}
 .dmm-card{border:1px solid var(--dsw-alias-border-primary,#ddd);border-radius:10px;padding:14px;margin:10px 0;background:var(--dsw-alias-fill-surface,#fff)}
+.dmm-group{border:1px solid var(--dsw-alias-border-primary,#ddd);border-radius:10px;margin:10px 0;background:var(--dsw-alias-fill-surface,#fff)}
+.dmm-group-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:10px 14px;cursor:pointer;user-select:none}
+.dmm-group-body{border-top:1px solid var(--dsw-alias-border-primary,#eee);padding:4px 14px 10px}
+.dmm-badge{font-size:12px;border-radius:6px;padding:2px 7px;background:var(--dsw-alias-fill-canvas,#f0f2f5)}
+.dmm-badge-warn{color:#b42318;background:rgba(180,35,24,.08)}
 .dmm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.dmm-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:8px 0}
 .dmm-root input,.dmm-root select,.dmm-root textarea{font:inherit;background:var(--dsw-alias-fill-canvas,#fff);color:inherit;border:1px solid var(--dsw-alias-border-primary,#bbb);border-radius:6px;padding:6px;min-width:110px}
 .dmm-root textarea{width:100%;min-height:100px}.dmm-root label{font-size:13px}.dmm-error{color:#b42318}.dmm-composer{border:0;background:transparent;color:inherit;cursor:pointer;font-size:12px}
@@ -85,7 +93,7 @@ function parseRef(value: string): ModelRef | string | undefined {
 function sameConfig(a: ManagerConfig, b: ManagerConfig): boolean { return JSON.stringify(a) === JSON.stringify(b) }
 function supportsOff(target: ModelRef | string | undefined, config: ManagerConfig, models: ModelRecord[]): boolean {
   if (!target) return false
-  const refs = typeof target === 'string' ? config.aliases[target.slice(1)] ?? [] : [target]
+  const refs = typeof target === 'string' ? config.aliases[target.slice(1)]?.candidates ?? [] : [target]
   return refs.length > 0 && refs.every(ref => models.some(model => model.providerId === ref.providerId && model.modelId === ref.modelId && model.reasoningEfforts.some(e => e.id === 'off')))
 }
 function ThinkingSelect({ value, offAvailable, disabled, onChange }: { value?: 'inherit' | 'auto' | 'off'; offAvailable: boolean; disabled?: boolean; onChange: (value: 'inherit' | 'auto' | 'off') => void }) {
@@ -93,7 +101,7 @@ function ThinkingSelect({ value, offAvailable, disabled, onChange }: { value?: '
 }
 function SelectModel({ value, models, aliases, disabled, onChange }: { value?: ModelRef | string; models: ModelRecord[]; aliases: string[]; disabled?: boolean; onChange: (next?: ModelRef | string) => void }) {
   return <select disabled={disabled} value={refValue(value)} onChange={event => onChange(parseRef(event.target.value))}>
-    <option value="">跟随宿主／未设置</option>
+    <option value="">未设置</option>
     {aliases.map(alias => <option key={alias} value={`@${alias}`}>@{alias}</option>)}
     {models.map(model => <option key={`${model.providerId}:${model.modelId}`} value={JSON.stringify([model.providerId, model.modelId])}>{model.name} · {model.providerId}</option>)}
   </select>
@@ -173,7 +181,7 @@ function VisionSection({ draft, models, aliases, edit }: { draft: ManagerConfig;
       <div className="dmm-row"><label>策略 <select value={draft.vision.policy} onChange={event => edit(next => { next.vision.policy = event.target.value as ManagerConfig['vision']['policy'] })}><option value="native-first">原生优先（推荐）</option><option value="sidecar-first">看图工具优先</option><option value="native-only">仅原生直读</option><option value="sidecar-only">仅看图工具</option></select></label><span className="dmm-muted">决定「当前模型直接看图」与「交给视觉模型代看」如何取舍。</span></div>
       <div className="dmm-hint">{policyHelp[draft.vision.policy]}</div>
       <div className="dmm-row"><label>视觉模型 <SelectModel value={draft.vision.target} models={models.filter(m => m.nativeImage === 'yes')} aliases={aliases} onChange={value => edit(next => { next.vision.target = value })} /></label></div>
-      <div className="dmm-hint"><strong>什么时候会用到：</strong>对话模型自己看不了图时，插件把原图发给它、拿回文字结论，对话模型全程只处理文字。下拉列表已只显示声明支持图片的模型，建议挑一个视觉能力够用、价格便宜、速度快的型号。<br /><strong>留空会怎样：</strong>自动回退到「Manual/Auto」页 Auto 子 Agent 角色里 vision 角色绑定的模型；两处都为空且对话模型不支持图片时，带图片的请求将报错。<br /><strong>什么时候可以留空：</strong>对话模型全部原生支持看图、策略又是「原生优先」时，它永远不会被用到。</div>
+      <div className="dmm-hint"><strong>什么时候会用到：</strong>对话模型自己看不了图时，插件把原图发给它、拿回文字结论，对话模型全程只处理文字。下拉列表已只显示声明支持图片的模型，建议挑一个视觉能力够用、价格便宜、速度快的型号。<br /><strong>留空会怎样：</strong>自动回退到「AUTO 分工」页 vision 角色绑定的模型；两处都为空且对话模型不支持图片时，带图片的请求将报错。<br /><strong>什么时候可以留空：</strong>对话模型全部原生支持看图、策略又是「原生优先」时，它永远不会被用到。</div>
     </div>
     <div className="dmm-guide">
       <strong>看图工具的工作方式</strong>
@@ -186,6 +194,87 @@ function VisionSection({ draft, models, aliases, edit }: { draft: ManagerConfig;
   </>
 }
 
+/** 客户端复刻的档位自动推断展示：与 domain inferTierMapping 同规则，只用于提示默认行为。 */
+function inferTierHint(model: ModelRecord): Record<string, string | undefined> {
+  const order = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  const efforts = [...model.reasoningEfforts.filter(e => e.id !== 'off')].sort((a, b) => {
+    const ia = order.indexOf(a.id); const ib = order.indexOf(b.id)
+    if (ia >= 0 && ib >= 0) return ia - ib
+    if (ia >= 0) return -1
+    if (ib >= 0) return 1
+    return a.id.localeCompare(b.id)
+  })
+  const n = efforts.length
+  if (!n) return {}
+  return { fast: efforts[0].id, balanced: efforts[Math.floor((n - 1) / 2)].id, deep: n >= 3 ? efforts[n - 2].id : efforts[n - 1].id, max: efforts[n - 1].id }
+}
+
+function TierMapping({ models, draft, edit }: { models: ModelRecord[]; draft: ManagerConfig; edit: (fn: (next: ManagerConfig) => void) => void }) {
+  const tierModels = models.filter(model => model.reasoningEfforts.length)
+  if (!tierModels.length) return null
+  return <div>
+    <strong>推理档位映射</strong>
+    <p className="dmm-muted">留空 = 按该模型公开档位自动推断（fast→最弱、max→最强、deep→次强、balanced→中间）；也可显式指定实际档位。只列出本别名候选引用到的模型。</p>
+    {tierModels.map(model => {
+      const key = JSON.stringify([model.providerId, model.modelId])
+      const hint = inferTierHint(model)
+      return <div className="dmm-row" key={key}>
+        <span>{model.name} · {model.providerId}</span>
+        {(['fast', 'balanced', 'deep', 'max'] as const).map(tier => {
+          const current = draft.models[key]?.tiers?.[tier]
+          return <label key={tier}>{tier}
+            <select value={current ?? ''} title={current ? undefined : `默认推断：${hint[tier] ?? '无可用档位'}`}
+              onChange={event => edit(next => { next.models[key] ??= {}; next.models[key].tiers ??= {}; if (event.target.value) next.models[key].tiers![tier] = event.target.value; else delete next.models[key].tiers![tier] })}>
+              <option value="">自动推断{hint[tier] ? `（${hint[tier]}）` : '（无档位）'}</option>
+              {model.reasoningEfforts.map(e => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}
+            </select>
+          </label>
+        })}
+      </div>
+    })}
+  </div>
+}
+
+/** 别名卡：候选顺序兜底 + 可选的别名级兜底覆盖 + 候选模型的档位映射。 */
+function AliasCard({ name, draft, models, edit, notify, removeAlias }: {
+  name: string; draft: ManagerConfig; models: ModelRecord[]; edit: (fn: (next: ManagerConfig) => void) => void
+  notify: (kind: Notice['kind'], text: string) => void; removeAlias: (name: string) => void
+}) {
+  const alias = draft.aliases[name]
+  const isLongContext = name === 'long-context'
+  const rel = alias.reliability ?? {}
+  const setRel = (fn: (next: AliasReliability) => void) => edit(next => {
+    const target = next.aliases[name] ?? { candidates: [] }
+    const value: AliasReliability = { ...(target.reliability ?? {}) }
+    fn(value)
+    for (const key of ['maxAttempts', 'retryTransient', 'parameterDowngrade'] as const) if (value[key] === undefined) delete value[key]
+    target.reliability = Object.keys(value).length ? value : undefined
+  })
+  const referenced = [...new Map(alias.candidates.map(ref => [JSON.stringify([ref.providerId, ref.modelId]), models.find(model => model.providerId === ref.providerId && model.modelId === ref.modelId)] as const).values()).values()].filter((item): item is ModelRecord => !!item)
+  return <div className="dmm-card">
+    <div className="dmm-row">
+      <strong>@{name}</strong>
+      {isLongContext && <span className="dmm-badge">内置：上下文溢出兜底</span>}
+      <button onClick={() => removeAlias(name)}>删除</button>
+    </div>
+    {isLongContext && <p className="dmm-muted">请求报「上下文溢出」时改用这里的候选重试，平时不参与；删除后溢出将直接失败。修改候选顺序与普通别名相同。</p>}
+    {alias.candidates.map((ref, index) => <div className="dmm-row" key={index}>
+      <span>{index + 1}.</span>
+      <SelectModel value={ref} models={models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.aliases[name].candidates[index] = value })} />
+      <button onClick={() => edit(next => { next.aliases[name].candidates.splice(index, 1) })}>移除</button>
+    </div>)}
+    <button onClick={() => edit(next => { if (models[0]) next.aliases[name].candidates.push({ providerId: models[0].providerId, modelId: models[0].modelId }) })}>添加候选</button>
+    {!alias.candidates.length && <p className="dmm-note">每个别名至少要有一个具体模型才能保存。</p>}
+    <div className="dmm-row">
+      <label>最多尝试 <input type="number" min="1" max="3" placeholder="全局默认" value={rel.maxAttempts ?? ''} onChange={event => setRel(next => { next.maxAttempts = event.target.value ? Number(event.target.value) : undefined })} /></label>
+      <label>网络失败重试 <select value={rel.retryTransient === undefined ? '' : String(rel.retryTransient)} onChange={event => setRel(next => { next.retryTransient = event.target.value === '' ? undefined : event.target.value === 'true' })}><option value="">跟随全局</option><option value="true">开</option><option value="false">关</option></select></label>
+      <label>参数降级 <select value={rel.parameterDowngrade === undefined ? '' : String(rel.parameterDowngrade)} onChange={event => setRel(next => { next.parameterDowngrade = event.target.value === '' ? undefined : event.target.value === 'true' })}><option value="">跟随全局</option><option value="true">允许</option><option value="false">不允许</option></select></label>
+    </div>
+    <TierMapping models={referenced} draft={draft} edit={edit} />
+    {!referenced.some(model => model.reasoningEfforts.length) && <p className="dmm-muted">候选模型都没有公开推理档位，无需映射。</p>}
+  </div>
+}
+
 function ManagerSection() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [draft, setDraft] = useState<ManagerConfig | null>(null)
@@ -196,14 +285,16 @@ function ManagerSection() {
   const [probing, setProbing] = useState('')
   const [probeProgress, setProbeProgress] = useState('')
   const [preview, setPreview] = useState<ProbeDialog | null>(null)
+  const [recommend, setRecommend] = useState<RecommendDialog | null>(null)
   const [notices, setNotices] = useState<Notice[]>([])
   const [aliasName, setAliasName] = useState('')
-  const [verifyTarget, setVerifyTarget] = useState<ModelRef | string>()
-  const [verifyKind, setVerifyKind] = useState<Verification['kind']>('text')
-  const [verifyResult, setVerifyResult] = useState<Verification | null>(null)
   const [logs, setLogs] = useState<Record<string, unknown>[]>([])
   const [modelFilter, setModelFilter] = useState('')
   const [providerFilter, setProviderFilter] = useState('')
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [verifyTarget, setVerifyTarget] = useState<ModelRef | string>()
+  const [verifyKind, setVerifyKind] = useState<Verification['kind']>('text')
+  const [verifyResult, setVerifyResult] = useState<Verification | null>(null)
   const verifyAbort = useRef<AbortController | null>(null)
   const noticeSeq = useRef(0)
   const timers = useRef<number[]>([])
@@ -247,30 +338,45 @@ function ManagerSection() {
     if (dirty && !window.confirm('「重新加载」会放弃所有未保存的修改，改为读取已保存的配置。确定继续？')) return
     try { await load(); notify('info', '已重新加载当前已保存的配置。') } catch (error) { notify('error', String(error)) }
   }
-  const verifyOne = async (ref: ModelRef, kind: Verification['kind'], signal?: AbortSignal) => {
-    const result = await request('/verify', { method: 'POST', body: JSON.stringify({ ...ref, kind }), signal })
+  /** 验证一个模型（文字/图片/工具/推理档位）；图片验证通过时直接给出可一键写入的声明建议。 */
+  const verifyOne = async (ref: ModelRef, kind: Verification['kind']) => {
+    const result = await request('/verify', { method: 'POST', body: JSON.stringify({ ...ref, kind }) }) as { verification: Verification }
     setVerifyResult(result.verification)
     const fresh = asSnapshot(await request(''))
     setSnapshot(fresh)
+    const suggestions = kind === 'image' ? imageSuggestions([result.verification]) : []
+    if (suggestions.length) {
+      const model = fresh.models.find(item => item.providerId === ref.providerId && item.modelId === ref.modelId)
+      setPreview({ title: `验证建议：${model?.name ?? ref.modelId}`, model, suggestions, checked: suggestions.map(item => item.confidence === 'high'), verifications: [result.verification] })
+    } else notify('success', `验证完成：${kind} ${result.verification.status}${result.verification.behavior ? ` / ${result.verification.behavior}` : ''}。`)
   }
-  const verifyBatch = async (models: ModelRecord[], kind: Verification['kind']) => {
-    if (!models.length || !window.confirm(`将串行发送 ${models.length} 次 ${kind} 模型验证请求。是否开始？`)) return
-    const controller = new AbortController()
-    verifyAbort.current = controller
-    setBusy(true)
-    let completed = 0
-    try {
-      for (const model of models) {
-        if (controller.signal.aborted) break
-        await verifyOne(model, kind, controller.signal)
-        completed++
-        setProbeProgress(`已验证 ${completed}/${models.length} 个模型`)
+  const imageSuggestions = (verifications: Verification[]): ProbeSuggestion[] => {
+    const result: ProbeSuggestion[] = []
+    for (const item of verifications) {
+      if (item.kind !== 'image') continue
+      if (item.status === 'accepted' && item.behavior === 'observed') {
+        result.push({ field: 'hostImage', value: 'yes', confidence: 'high', reason: '图片验证通过：模型正确识别了探测图的颜色' })
+        result.push({ field: 'pluginImage', value: 'yes', confidence: 'high', reason: '图片验证通过：模型正确识别了探测图的颜色' })
+      } else if (item.status === 'accepted' && item.behavior === 'not-observed') {
+        result.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片验证未通过：${item.detail ?? '模型未识别出探测图颜色'}` })
+      } else if (item.status === 'rejected') {
+        result.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片请求被拒绝：${item.detail ?? '宿主或模型拒绝了图片参数'}` })
       }
-    } catch (error) { if (!controller.signal.aborted) notify('error', String(error)) }
-    finally {
-      notify(controller.signal.aborted ? 'info' : 'success', `批量验证结束：${completed}/${models.length} 次请求${controller.signal.aborted ? '，已取消' : ''}。`)
-      setProbeProgress(''); setBusy(false); verifyAbort.current = null
     }
+    return result
+  }
+  const runRecommend = async () => {
+    setBusy(true)
+    try {
+      const result = await request('/recommend', { method: 'POST', body: '{}' }) as { main?: Selection; roles?: Partial<Record<Role, RoleSettings>>; notes?: string[] }
+      setRecommend({ main: result.main, roles: result.roles, notes: result.notes ?? [] })
+    } catch (error) { setRecommend({ notes: [], failure: String(error) }) }
+    finally { setBusy(false) }
+  }
+  const applyRecommend = (main: Selection, roles: Record<Role, RoleSettings>) => {
+    edit(next => { next.auto.main = { ...next.auto.main, ...main }; for (const role of Object.keys(roles) as Role[]) next.auto.roles[role] = { ...next.auto.roles[role], ...roles[role] } })
+    setRecommend(null)
+    notify('info', '推荐分工已写入表单，检查无误后点底部「保存设置」生效。')
   }
   const probeOne = async (model: ModelRecord) => {
     const key = `${model.providerId}:${model.modelId}`
@@ -363,7 +469,7 @@ function ManagerSection() {
           if (item.field === 'pluginImage') next.models[key].capability!.image = item.value
         }
       })
-      setPreview({ ...preview, title: '已应用探测结论', suggestions: [], checked: [], applied: { hostApplied, pluginCount: pluginChosen.length, skipped } })
+      setPreview({ ...preview, title: '已应用结论', suggestions: [], checked: [], applied: { hostApplied, pluginCount: pluginChosen.length, skipped } })
     } catch (error) { setPreview(current => current && { ...current, failure: String(error) }) }
     finally { setBusy(false) }
   }
@@ -374,18 +480,26 @@ function ManagerSection() {
   const keyword = modelFilter.trim().toLowerCase()
   const filtered = snapshot.models.filter(model => (!providerFilter || model.providerId === providerFilter) && `${model.providerId} ${model.modelId} ${model.name}`.toLowerCase().includes(keyword))
   const resetFilter = () => { setModelFilter(''); setProviderFilter('') }
+  const filtering = !!(keyword || providerFilter)
   const currentSupport = (model: ModelRecord, field: ProbeField): Support => {
     if (field === 'hostImage') return model.nativeImage
     return draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'
   }
+  /** 按 Provider 分组；默认只展开「有异常证据」的组，其余收起；筛选生效时只显示匹配的组并全部展开。 */
+  const attention = (group: ModelRecord[]) => group.some(model => snapshot.verifications.some(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId && (item.stale || item.status === 'rejected' || item.status === 'network-error')))
+  const verifiedCount = (group: ModelRecord[]) => group.filter(model => snapshot.verifications.some(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId && item.status === 'accepted' && !item.stale)).length
+  const groups = providers.map(id => ({ id, models: filtered.filter(model => model.providerId === id) })).filter(group => group.models.length)
+  const groupOpen = (id: string) => filtering ? true : expanded.has(id)
+  const initialExpand = () => setExpanded(new Set(groups.filter(group => attention(group.models)).map(group => group.id)))
+  useEffect(() => { if (snapshot) initialExpand() }, [snapshot.models.length, snapshot.verifications.length])
   return <div className="dmm-root">
     <h2>模型管理</h2>
     <div className="dmm-guide">
       <strong>这个插件是干什么的？</strong>
-      <p>模型已经能在 DSH 里调用之后，用它统一管理四件事：① 补模型能力声明（能否收图、上下文多大）；② 建别名与推理档位映射；③ 决定会话实际用哪个模型（Manual/Auto）与失败兜底（可靠性）；④ 让不支持图片的模型也能看图（视觉辅助）。它不导入模型、也不管 API Key。</p>
+      <p>模型已经能在 DSH 里调用之后，用它统一管理四件事：① 核对模型能力声明（能否收图、上下文多大）并实测验证；② 建 @别名 与推理档位映射（别名本身就是按序兜底）；③ 配置 AUTO（托管）的主模型与子 Agent 分工；④ 让不支持图片的模型也能看图（视觉辅助）。它不导入模型、也不管 API Key。</p>
       <ul className="dmm-steps">
-        <li><strong>推荐配置顺序</strong>：「模型」核对声明 → 「别名与推理配置」建 @别名与档位映射 → 「Manual/Auto」选方案 → 需要看图再配「视觉」→ 点底部「保存设置」。每个标签页顶部都有「这一页是干什么的」说明卡。</li>
-        <li><strong>配好后聊天界面会看到</strong>：DSH 模型选择器多出「模型管理」Provider（含具体模型与 @别名）；输入框左下角出现「模型管理 · 手动/自动」折叠控件——那里可以按会话临时覆盖这里的全局设置。</li>
+        <li><strong>推荐配置顺序</strong>：「模型」核对/验证声明 → 「别名与兜底」建 @别名与档位映射 → 「AUTO 分工」配置托管（可用 AI 推荐）→ 需要看图再配「视觉」→ 点底部「保存设置」。每个标签页顶部都有说明卡。</li>
+        <li><strong>不用 AUTO 时</strong>：直接在模型选择器里选具体模型或 @别名即可，它们就是固定模型，不需要任何额外配置；只有选择器里的 AUTO 条目才走托管分工。</li>
         <li><strong>看不到刚导入的模型</strong>：目录只代表宿主已加载的模型，点「刷新目录」即可，不必重启 DSH。</li>
       </ul>
     </div>
@@ -393,85 +507,97 @@ function ManagerSection() {
     {tab === '模型' && <>
       <div className="dmm-guide">
         <strong>这一页是干什么的？</strong>
-        <p>列出宿主已加载的模型，核对并修正每个模型的能力声明——声明准不准，直接决定聊天里的行为：</p>
+        <p>按 Provider 分组列出宿主已加载的模型，核对并修正能力声明、实测验证。模型多时组默认收起——有异常证据的组会自动展开，也可以搜索或点组头展开：</p>
         <ul className="dmm-steps">
-          <li><strong>原生图片声明</strong>：声明「不支持」但实际支持 → 聊天里贴图会被宿主拦成文字占位，模型看不到图；声明「支持」但实际不支持 → 带图请求可能报错。不确定就点「AI 探测能力」实测（发一次真实请求、消耗少量 token）。</li>
-          <li><strong>「保存到宿主」才真正生效</strong>：修正后的声明要写进 DSH（llm-pi-ai），聊天里贴图才会按图片处理；「插件图片声明」只影响本插件的视觉路由判断，不改宿主。</li>
-          <li>卡片里的灰色证据行来自「验证」页的结果；配置改动后旧证据会标「已过期」。</li>
+          <li><strong>原生图片声明</strong>：声明「不支持」但实际支持 → 聊天里贴图会被宿主拦成文字占位，模型看不到图；声明「支持」但实际不支持 → 带图请求可能报错。不确定就点「验证图片」或「AI 探测能力」实测（发一次真实请求、消耗少量 token）。</li>
+          <li><strong>验证会写回配置</strong>：图片验证通过时，会直接弹出「写入宿主声明 + 插件声明」的建议，勾选即可一键配置。</li>
+          <li><strong>「保存到宿主」才真正生效</strong>：修正后的声明要写进 DSH（llm-pi-ai）；「插件图片声明」只影响本插件的视觉路由判断。</li>
         </ul>
       </div>
       <FilterBar text={modelFilter} onText={setModelFilter} provider={providerFilter} onProvider={setProviderFilter} providers={providers} matched={filtered.length} total={snapshot.models.length} onReset={resetFilter}>
         <button disabled={refreshing} onClick={() => { setRefreshing(true); void refreshDirectory().catch(error => notify('error', `刷新目录失败：${String(error)}`)).finally(() => setRefreshing(false)) }}>{refreshing ? '刷新中…' : '刷新目录'}</button>
         <button disabled={busy || probing !== '' || !filtered.length} onClick={() => void probeBatch()}>AI 探测当前筛选（{filtered.length} 个）</button>
+        {!filtering && <>
+          <button onClick={() => setExpanded(new Set(groups.map(group => group.id)))}>展开全部</button>
+          <button onClick={() => setExpanded(new Set())}>收起全部</button>
+        </>}
         {probeProgress && <span className="dmm-muted">{probeProgress}</span>}
       </FilterBar>
-      {filtered.length === 0 && <div className="dmm-card dmm-empty dmm-muted">没有匹配的模型。调整筛选条件，或点「清除筛选」查看全部 {snapshot.models.length} 个模型。</div>}
-      {filtered.map(model => <div className="dmm-card" key={`${model.providerId}:${model.modelId}`}>
-        <strong>{model.name}</strong> <span className="dmm-muted">{model.providerId} / {model.modelId}</span>
-        <div className="dmm-row">原生图片：{model.nativeImage}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}</div>
-        <div className="dmm-muted">{snapshot.verifications.filter(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId).map(item => `${item.kind}: ${item.status} / ${item.behavior ?? '未知'}${item.stale ? '（已过期）' : ''}`).join('；') || '尚无验证证据'}</div>
-        <NativeEditor model={model} revision={snapshot.nativeRevision} refresh={async () => { await refreshDirectory(true) }} notify={notify} />
-        <div className="dmm-row">
-          <button disabled={busy || probing !== ''} onClick={() => void probeOne(model)}>{probing === `${model.providerId}:${model.modelId}` ? '探测中…' : 'AI 探测能力'}</button>
-          <span className="dmm-muted">发一次真实图片探测请求，按结果给出可直接写入的结论</span>
+      {groups.map(group => {
+        const open = groupOpen(group.id)
+        const warn = attention(group.models)
+        return <div className="dmm-group" key={group.id}>
+          <div className="dmm-group-head" role="button" aria-expanded={open} onClick={() => setExpanded(current => { const next = new Set(current); if (next.has(group.id)) next.delete(group.id); else next.add(group.id); return next })}>
+            <strong>{open ? '▾' : '▸'} {group.id}</strong>
+            <span className="dmm-badge">{group.models.length} 个模型</span>
+            <span className="dmm-badge">已验证 {verifiedCount(group.models)}</span>
+            {warn && <span className="dmm-badge dmm-badge-warn">有异常证据</span>}
+          </div>
+          {open && <div className="dmm-group-body">
+            {group.models.map(model => <div className="dmm-card" key={`${model.providerId}:${model.modelId}`}>
+              <strong>{model.name}</strong> <span className="dmm-muted">{model.providerId} / {model.modelId}</span>
+              <div className="dmm-row">原生图片：{model.nativeImage}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}</div>
+              <div className="dmm-muted">{snapshot.verifications.filter(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId).map(item => `${item.kind}: ${item.status} / ${item.behavior ?? '未知'}${item.stale ? '（已过期）' : ''}`).join('；') || '尚无验证证据'}</div>
+              <NativeEditor model={model} revision={snapshot.nativeRevision} refresh={async () => { await refreshDirectory(true) }} notify={notify} />
+              <div className="dmm-row">
+                <button disabled={busy || probing !== ''} onClick={() => void probeOne(model)}>{probing === `${model.providerId}:${model.modelId}` ? '探测中…' : 'AI 探测能力'}</button>
+                <button disabled={busy} onClick={() => { setBusy(true); void verifyOne({ providerId: model.providerId, modelId: model.modelId }, 'text').catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证文字</button>
+                <button disabled={busy} onClick={() => { setBusy(true); void verifyOne({ providerId: model.providerId, modelId: model.modelId }, 'image').catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证图片</button>
+                <button disabled={busy} onClick={() => { setBusy(true); void verifyOne({ providerId: model.providerId, modelId: model.modelId }, 'tools').catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证工具</button>
+              </div>
+              <div className="dmm-row"><label>插件图片声明 <select value={draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'} onChange={event => edit(next => { const key = JSON.stringify([model.providerId, model.modelId]); next.models[key] ??= {}; next.models[key].capability ??= {}; next.models[key].capability!.image = event.target.value as 'yes' | 'no' | 'unknown' })}><option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option></select></label></div>
+            </div>)}
+          </div>}
         </div>
-        <div className="dmm-row"><label>插件图片声明 <select value={draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'} onChange={event => edit(next => { const key = JSON.stringify([model.providerId, model.modelId]); next.models[key] ??= {}; next.models[key].capability ??= {}; next.models[key].capability!.image = event.target.value as 'yes' | 'no' | 'unknown' })}><option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option></select></label></div>
-      </div>)}
+      })}
+      {!groups.length && <div className="dmm-card dmm-empty dmm-muted">没有匹配的模型。调整筛选条件，或点「清除筛选」查看全部 {snapshot.models.length} 个模型。</div>}
+      {verifyResult && !preview && <details className="dmm-card"><summary className="dmm-composer">查看最近一次验证的原始证据</summary><pre>{JSON.stringify(verifyResult, null, 2)}</pre></details>}
     </>}
-    {tab === '别名与推理配置' && <>
+    {tab === '别名与兜底' && <>
       <div className="dmm-guide">
         <strong>这一页是干什么的？</strong>
-        <p style={{ margin: '6px 0', fontSize: 13 }}>两件事：给一组模型起<strong>好记的名字（别名）</strong>，以及把插件统一的推理档位<strong>翻译</strong>成每个模型支持的实际参数。两者都在别的页面被引用：</p>
+        <p style={{ margin: '6px 0', fontSize: 13 }}>别名 = 好记的名字 + 一串按顺序兜底的具体模型 + 可选的兜底策略覆盖：</p>
         <ul className="dmm-steps">
-          <li><strong>别名 @名字</strong>：绑定一串具体模型，按顺序当兜底——第 1 个请求失败自动换第 2 个。配好后，「Manual/Auto」页的目标模型、视觉模型、输入框的「模型管理」控件里都能直接选 @名字；DSH 原生模型选择器的「模型管理」下也会出现它。以后想换后端模型，只改这里的候选顺序，引用处不用动。</li>
-          <li><strong>推理档位映射</strong>：fast / balanced / deep / max 是插件统一的四档语义；输入框控件或「Manual/Auto」页选了其中一档，发请求时按这里的映射换成该模型在宿主声明的实际档位。没映射的档位等于「不可选」，强行使用会报「未配置 X 档位」。</li>
+          <li><strong>候选顺序即兜底顺序</strong>：第 1 个请求失败自动换第 2 个；配好后模型选择器、AUTO 分工、视觉模型处都能直接选 @名字。以后想换后端模型只改这里，引用处不用动。</li>
+          <li><strong>推理档位映射</strong>：fast / balanced / deep / max 是插件统一的四档语义，发请求时按映射换成该模型支持的实际档位。留空 = 自动推断（fast→最弱档、balanced→中间、deep→次强、max→最强），推断不合意再显式指定。只有被别名引用到的模型才需要配置。</li>
+          <li><strong>兜底策略</strong>：全局默认（最多尝试 1–3 次、网络失败重试、参数降级）在本页底部；单个别名可覆盖个别字段，例如给关键别名放宽尝试次数。</li>
+          <li><strong>内置别名 @long-context</strong>：只在请求报「上下文溢出」时启用的专用候选，把上下文最大的模型放进去即可。</li>
         </ul>
-        <p className="dmm-muted">也就是说：先在这一页建好 @别名 与档位映射，「Manual/Auto」页与输入框控件里才有内容可选、才能按预期生效。</p>
       </div>
-      <div className="dmm-card"><div className="dmm-row"><input placeholder="别名，如 fast" value={aliasName} onChange={event => setAliasName(event.target.value)} /><button onClick={() => { if (!/^[a-z][a-z0-9_-]*$/.test(aliasName) || draft.aliases[aliasName]) return; edit(next => { next.aliases[aliasName] = [] }); setAliasName('') }}>添加别名</button></div><p className="dmm-muted">候选按顺序尝试；每个别名至少添加一个具体模型后才能保存。</p></div>
-      {aliases.map(alias => <div className="dmm-card" key={alias}><div className="dmm-row"><strong>@{alias}</strong><button onClick={() => edit(next => { delete next.aliases[alias] })}>删除</button></div>{draft.aliases[alias].map((ref, index) => <div className="dmm-row" key={index}><span>{index + 1}.</span><SelectModel value={ref} models={snapshot.models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.aliases[alias][index] = value })} /><button onClick={() => edit(next => { next.aliases[alias].splice(index, 1) })}>移除</button></div>)}<button onClick={() => edit(next => { if (snapshot.models[0]) next.aliases[alias].push({ providerId: snapshot.models[0].providerId, modelId: snapshot.models[0].modelId }) })}>添加候选</button></div>)}
-      <div className="dmm-card"><strong>推理档位映射</strong><p className="dmm-muted">只有宿主声明的实际档位才能使用。配置按 Provider 和模型隔离。</p>{snapshot.models.filter(m => m.reasoningEfforts.length).map(model => <div className="dmm-row" key={`${model.providerId}:${model.modelId}`}><span>{model.name} · {model.providerId}</span>{(['fast', 'balanced', 'deep', 'max'] as const).map(tier => <label key={tier}>{tier}<select value={draft.models[JSON.stringify([model.providerId, model.modelId])]?.tiers?.[tier] ?? ''} onChange={event => edit(next => { const key = JSON.stringify([model.providerId, model.modelId]); next.models[key] ??= {}; next.models[key].tiers ??= {}; next.models[key].tiers![tier] = event.target.value || undefined })}><option value="">不可选</option>{model.reasoningEfforts.map(e => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}</select></label>)}</div>)}</div>
+      <div className="dmm-card"><div className="dmm-row"><input placeholder="别名，如 fast" value={aliasName} onChange={event => setAliasName(event.target.value)} /><button onClick={() => { if (!/^[a-z][a-z0-9_-]*$/.test(aliasName) || draft.aliases[aliasName]) return; edit(next => { next.aliases[aliasName] = { candidates: [] } }); setAliasName('') }}>添加别名</button></div><p className="dmm-muted">候选按顺序尝试；每个别名至少添加一个具体模型后才能保存。</p></div>
+      {aliases.map(alias => <AliasCard key={alias} name={alias} draft={draft} models={snapshot.models} edit={edit} notify={notify} removeAlias={name => edit(next => { delete next.aliases[name] })} />)}
+      <div className="dmm-card">
+        <strong>全局默认兜底策略</strong>
+        <p className="dmm-muted">对走「模型管理」入口的所有请求生效；别名可用上面的覆盖项单独调整。聊天里的表现通常是「卡一下换了个模型继续答」；实际用了哪个模型可去「日志」页核对。</p>
+        <div className="dmm-row">
+          <label>最多实际尝试（1–3） <input type="number" min="1" max="3" value={draft.reliability.maxAttempts} onChange={event => edit(next => { next.reliability.maxAttempts = Number(event.target.value) })} /></label>
+          <label><input type="checkbox" checked={draft.reliability.retryTransient} onChange={event => edit(next => { next.reliability.retryTransient = event.target.checked })} />网络失败重试一次</label>
+          <label><input type="checkbox" checked={draft.reliability.parameterDowngrade} onChange={event => edit(next => { next.reliability.parameterDowngrade = event.target.checked })} />允许推理参数被拒时降级</label>
+        </div>
+        <p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却；本轮明确指定的参数不会被静默降级。上下文溢出只尝试内置别名 @long-context 的候选。</p>
+      </div>
     </>}
-    {tab === 'Manual/Auto' && <>
+    {tab === 'AUTO 分工' && <>
       <div className="dmm-guide">
-        <strong>Manual/Auto 是干什么的？</strong>
-        <p style={{ margin: '6px 0', fontSize: 13 }}>决定<strong>走「模型管理」入口的会话</strong>实际用哪个模型、怎么推理。什么时候会走这个入口：DSH 模型选择器里选了「模型管理」下的 AUTO 或 @别名条目、或开启了视觉辅助。选原生 Provider 模型时不经过这里。</p>
+        <strong>AUTO 分工是干什么的？</strong>
+        <p style={{ margin: '6px 0', fontSize: 13 }}>只有当你在 DSH 模型选择器里选中「模型管理 → AUTO」条目时，会话才进入托管模式：主对话按下方「主 Agent」执行，主 Agent 可把任务按角色委派给绑定了模型的子 Agent。选择具体模型或 @别名时就是普通固定模型，不经过本页配置。</p>
         <ul className="dmm-steps">
-          <li><strong>模式 手动 / 自动</strong>：手动 = 主模型跟随你在原生选择器里选的那个，插件最多用 @别名 引用；自动 = 托管模式，插件按 Auto 行决定主模型，并把任务按下方角色分发给子 Agent。</li>
-          <li><strong>目标模型</strong>：留空 = 跟随原生选择器（手动模式下的默认行为）；选 @别名 = 按候选顺序兜底；选具体模型 = 固定用它。</li>
-          <li><strong>思考与推理档位</strong>：档位需要先在「别名与推理配置」页完成映射；「关闭思考」只有模型公开 off 档位时可选，且不能与非关闭档位同时选。</li>
-          <li><strong>子 Agent 角色（委派分工）</strong>：只在自动（托管）模式下生效——绑定模型后，主 Agent 可把搜索 / 编码 / 审查 / 强分析 / 看图任务委派给对应模型。</li>
-          <li><strong>优先级</strong>：本页全局设置 &lt; 会话临时覆盖（接口能力保留，当前无界面）。</li>
+          <li><strong>主 Agent</strong>：留空目标 = 回退宿主默认模型；也可以选 @别名获得主模型兜底。思考与推理档位按「别名与兜底」页的映射生效。</li>
+          <li><strong>子 Agent 角色</strong>：绑定模型后角色才对主 Agent 可见可用；留空的角色不参与委派。委派上限：总并发 3、同工作区编码任务 1。</li>
+          <li><strong>AI 推荐分工</strong>：点按钮后，插件用主模型（或宿主默认模型）读一遍当前模型目录，给出主模型与各角色的分工草案；你在弹窗里核对、修改后确认，才会写入表单（仍需「保存设置」落盘）。会消耗一次模型请求。</li>
         </ul>
       </div>
-      <div className="dmm-card"><div className="dmm-row"><label>模式 <select value={draft.mode} onChange={event => edit(next => { next.mode = event.target.value as 'manual' | 'auto' })}><option value="manual">手动（跟随原生选择，不托管）</option><option value="auto">自动（托管：按 Auto 行决定主模型，并启用子 Agent 分发）</option></select></label></div><p className="dmm-muted">模式是插件的总开关：手动 = 不托管；自动 = 托管，同时启用下方角色的委派分发。保存后立即生效。</p></div>
-      {(['manual', 'auto'] as const).map(mode => <div className="dmm-card" key={mode}><strong>{mode === 'manual' ? 'Manual 行' : 'Auto 行'}</strong><p className="dmm-muted">当前模式是 {mode === 'manual' ? 'Manual' : 'Auto'} 时，主对话按这一行执行。</p><div className="dmm-row"><label>目标模型 <SelectModel value={draft[mode].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next[mode].target = value })} /></label></div><div className="dmm-row"><label>思考 <ThinkingSelect value={draft[mode].thinking} offAvailable={supportsOff(draft[mode].target, draft, snapshot.models)} onChange={value => edit(next => { next[mode].thinking = value; if (value === 'off') next[mode].tier = 'auto' })} /></label><label>推理档位 <select aria-label={`${mode} 推理档位`} value={draft[mode].tier ?? 'inherit'} onChange={event => edit(next => { next[mode].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft[mode].thinking === 'off' && !['auto'].includes(t)}>{t}</option>)}</select></label><label>输出上限 <input type="number" min="1" placeholder="不限" value={draft[mode].maxOutputTokens ?? ''} onChange={event => edit(next => { next[mode].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></label></div></div>)}<div className="dmm-card"><strong>子 Agent 角色（委派分工）</strong><p className="dmm-muted">在「自动（托管）」模式下，主 Agent 可把对应工作委派给绑定了模型的子 Agent；手动模式下不启用分发。绑定留空的角色不参与委派。</p>{roles.map(role => <div className="dmm-row" key={role}><strong>{role}</strong>{role === 'main' && <span className="dmm-muted">主对话模型由上方模式与 Auto 行决定，此处不参与委派</span>}<label>目标 <SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} disabled={role === 'main'} onChange={value => edit(next => { next.roles[role].target = value })} /></label><label>思考 <ThinkingSelect value={draft.roles[role].thinking} offAvailable={supportsOff(draft.roles[role].target, draft, snapshot.models)} disabled={role === 'main'} onChange={value => edit(next => { next.roles[role].thinking = value; if (value === 'off') next.roles[role].tier = 'auto' })} /></label><label>档位 <select value={draft.roles[role].tier ?? 'auto'} disabled={role === 'main'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t} disabled={draft.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></label></div>)}</div>
+      <div className="dmm-card"><button className="dmm-primary" disabled={busy || !snapshot.models.length} onClick={() => void runRecommend()}>{busy ? '推荐中…' : 'AI 推荐分工'}</button><span className="dmm-muted">根据当前模型目录自动生成主模型与角色分工草案，确认后才写入。</span></div>
+      <div className="dmm-card"><strong>主 Agent</strong><div className="dmm-row"><label>目标模型 <SelectModel value={draft.auto.main.target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next.auto.main.target = value })} /></label></div><div className="dmm-row"><label>思考 <ThinkingSelect value={draft.auto.main.thinking} offAvailable={supportsOff(draft.auto.main.target, draft, snapshot.models)} onChange={value => edit(next => { next.auto.main.thinking = value; if (value === 'off') next.auto.main.tier = 'auto' })} /></label><label>推理档位 <select aria-label="主 Agent 推理档位" value={draft.auto.main.tier ?? 'inherit'} onChange={event => edit(next => { next.auto.main.tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft.auto.main.thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></label><label>输出上限 <input type="number" min="1" placeholder="不限" value={draft.auto.main.maxOutputTokens ?? ''} onChange={event => edit(next => { next.auto.main.maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></label></div><p className="dmm-muted">留空目标时 AUTO 回退到宿主默认模型。</p></div>
+      <div className="dmm-card"><strong>子 Agent 角色（委派分工）</strong><p className="dmm-muted">绑定留空的角色不参与委派；「关闭思考」只有模型公开 off 档位时可选。</p>{roles.map(role => <div className="dmm-row" key={role}>
+        <strong>{roleLabels[role]}</strong>
+        <label>目标 <SelectModel value={draft.auto.roles[role].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next.auto.roles[role].target = value })} /></label>
+        <label>思考 <ThinkingSelect value={draft.auto.roles[role].thinking} offAvailable={supportsOff(draft.auto.roles[role].target, draft, snapshot.models)} onChange={value => edit(next => { next.auto.roles[role].thinking = value; if (value === 'off') next.auto.roles[role].tier = 'auto' })} /></label>
+        <label>推理档位 <select aria-label={`${role} 推理档位`} value={draft.auto.roles[role].tier ?? 'inherit'} onChange={event => edit(next => { next.auto.roles[role].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft.auto.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></label>
+        <label>输出上限 <input type="number" min="1" placeholder="不限" value={draft.auto.roles[role].maxOutputTokens ?? ''} onChange={event => edit(next => { next.auto.roles[role].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></label>
+      </div>)}</div>
     </>}
     {tab === '视觉' && <VisionSection draft={draft} models={snapshot.models} aliases={aliases} edit={edit} />}
-    {tab === '可靠性' && <>
-      <div className="dmm-guide">
-        <strong>这一页是干什么的？</strong>
-        <p>只对走「模型管理」入口的请求生效，决定请求失败时怎么兜底。聊天里的表现通常是「卡一下换了个模型继续答」；实际用了哪个模型可去「日志」页核对。</p>
-        <ul className="dmm-steps">
-          <li><strong>最多实际尝试（1–3）</strong>：候选按顺序尝试的总次数上限；目标选了 @别名时，第 1 个失败自动换第 2 个。</li>
-          <li><strong>网络失败重试一次</strong>：同一模型立即再试一次；限流（429）会短暂冷却，认证错误会跳过同 Provider 的其它模型。</li>
-          <li><strong>允许参数被拒时降级</strong>：推理档位参数被模型拒绝时，去掉档位再试一次；你本轮明确指定的参数不会被静默降级。</li>
-          <li><strong>上下文溢出专用候选</strong>：只有报「上下文溢出」时才用这个列表重试，平时不参与；「添加长上下文候选」会自动挑当前上下文最大的模型。</li>
-        </ul>
-      </div>
-      <div className="dmm-card"><div className="dmm-row"><label>最多实际尝试 <input type="number" min="1" max="3" value={draft.reliability.maxAttempts} onChange={event => edit(next => { next.reliability.maxAttempts = Number(event.target.value) })} /></label><label><input type="checkbox" checked={draft.reliability.retryTransient} onChange={event => edit(next => { next.reliability.retryTransient = event.target.checked })} />网络失败重试一次</label><label><input type="checkbox" checked={draft.reliability.parameterDowngrade} onChange={event => edit(next => { next.reliability.parameterDowngrade = event.target.checked })} />允许推理参数被拒时降级</label></div><strong>上下文溢出专用候选</strong>{(draft.reliability.longContextCandidates ?? []).map((ref, index) => <div className="dmm-row" key={index}><SelectModel value={ref} models={snapshot.models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.reliability.longContextCandidates![index] = value })} /><button onClick={() => edit(next => { next.reliability.longContextCandidates?.splice(index, 1) })}>移除</button></div>)}<button onClick={() => edit(next => { const candidate = snapshot.models.filter(model => model.contextWindow).sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0))[0]; if (candidate) { next.reliability.longContextCandidates ??= []; next.reliability.longContextCandidates.push({ providerId: candidate.providerId, modelId: candidate.modelId }) } })}>添加长上下文候选</button><p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却。上下文溢出仅尝试此列表；本轮明确覆盖的参数不会静默降级。</p></div>
-    </>}
-    {tab === '验证' && <>
-      <div className="dmm-guide">
-        <strong>这一页是干什么的？</strong>
-        <p>给指定模型发一次真实请求，确认它可用、声明属实。会消耗 token；结果记录在案，并显示在「模型」页对应卡片的证据行：</p>
-        <ul className="dmm-steps">
-          <li><strong>文字</strong>＝Provider 可调用、基础参数正确；<strong>图片</strong>＝发内置小图问颜色并核对答案，证明真的看懂了图；<strong>工具</strong>＝真的会发起工具调用；<strong>推理档位</strong>＝档位参数被接受（不证明推理强度变化）。</li>
-          <li>「批量验证」按当前筛选串行发送，先弹确认，可中途取消。</li>
-        </ul>
-      </div>
-      <div className="dmm-card"><FilterBar text={modelFilter} onText={setModelFilter} provider={providerFilter} onProvider={setProviderFilter} providers={providers} matched={filtered.length} total={snapshot.models.length} onReset={resetFilter} /><div className="dmm-row"><SelectModel value={verifyTarget} models={snapshot.models} aliases={[]} onChange={setVerifyTarget} /><select value={verifyKind} onChange={event => setVerifyKind(event.target.value as Verification['kind'])}><option value="text">文字</option><option value="image">图片</option><option value="tools">工具</option><option value="reasoning">推理档位</option></select><button disabled={!verifyTarget || busy} onClick={() => { if (!verifyTarget || typeof verifyTarget === 'string') return; setBusy(true); void verifyOne(verifyTarget, verifyKind).then(() => notify('success', '验证已完成（1 次模型请求）。')).catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证一次</button><button disabled={busy || filtered.length === 0} onClick={() => void verifyBatch(filtered, verifyKind)}>批量验证当前筛选（{filtered.length} 次）</button>{busy && verifyAbort.current && <button onClick={() => verifyAbort.current?.abort()}>取消批量验证</button>}{probeProgress && <span className="dmm-muted">{probeProgress}</span>}</div>{verifyResult && <pre>{JSON.stringify(verifyResult, null, 2)}</pre>}</div>
-    </>}
     {tab === '日志' && <div className="dmm-card"><p className="dmm-muted">记录走「模型管理」入口的每次调用（主请求 / 子任务委派 / 看图），含实际使用的 Provider 与模型、路由、尝试次数、耗时与状态；最多约 200 条、保留 7 天。想在聊天里确认「刚才实际用了哪个模型」，来这里对。</p><button onClick={() => void request('/logs').then(result => setLogs(result.events)).catch(error => notify('error', String(error)))}>刷新日志</button><pre>{logs.map(event => JSON.stringify(event)).join('\n')}</pre></div>}
     <div className="dmm-actions">
       <button className="dmm-primary" disabled={busy || !dirty} onClick={() => void save()}>{busy ? '处理中…' : '保存设置'}</button>
@@ -480,13 +606,38 @@ function ManagerSection() {
       <span className="dmm-muted">「保存设置」把全部标签页的插件配置写入 DSH，下一次请求生效；模型卡片里的「保存到宿主」是另一件事：写宿主 llm-pi-ai 的模型声明。</span>
     </div>
     <div className="dmm-toasts">{notices.map(item => <div key={item.id} className={`dmm-toast dmm-toast-${item.kind}`} role="status"><span>{item.text}</span><button aria-label="关闭提示" onClick={() => dismiss(item.id)}>×</button></div>)}</div>
+    {recommend && <div className="dmm-modal-mask" onClick={() => { if (!busy) setRecommend(null) }} role="presentation">
+      <div className="dmm-modal" role="dialog" aria-modal="true" aria-label="AI 推荐分工" onClick={event => event.stopPropagation()}>
+        <h3>AI 推荐分工</h3>
+        {recommend.failure && <p className="dmm-error">{recommend.failure}</p>}
+        {recommend.main && <div className="dmm-row"><strong>主 Agent</strong><SelectModel value={recommend.main.target} models={snapshot.models} aliases={aliases} onChange={value => setRecommend(current => current && { ...current, main: { ...current.main, target: value } })} /><label>档位 <select value={recommend.main.tier ?? 'auto'} onChange={event => setRecommend(current => current && { ...current, main: { ...current.main!, tier: event.target.value as Tier } })}>{tiers.map(t => <option key={t} value={t}>{t}</option>)}</select></label></div>}
+        {roles.map(role => {
+          const entry = recommend.roles?.[role]
+          return <div className="dmm-row" key={role}>
+            <strong>{roleLabels[role]}</strong>
+            {entry
+              ? <>
+                <SelectModel value={entry.target} models={snapshot.models} aliases={aliases} onChange={value => setRecommend(current => current && { ...current, roles: { ...current.roles, [role]: { ...entry, target: value } } })} />
+                <label>档位 <select value={entry.tier ?? 'auto'} onChange={event => setRecommend(current => current && { ...current, roles: { ...current.roles, [role]: { ...entry, tier: event.target.value as Tier } } })}>{tiers.map(t => <option key={t} value={t}>{t}</option>)}</select></label>
+              </>
+              : <span className="dmm-muted">未获得推荐，保持未绑定。</span>}
+          </div>
+        })}
+        {recommend.notes.map((note, index) => <p className="dmm-note" key={index}>{note}</p>)}
+        <div className="dmm-row">
+          {recommend.main && <button className="dmm-primary" disabled={busy} onClick={() => applyRecommend(recommend.main!, (recommend.roles ?? {}) as Record<Role, RoleSettings>)}>应用推荐到表单</button>}
+          <button disabled={busy} onClick={() => setRecommend(null)}>关闭</button>
+        </div>
+        <p className="dmm-muted">应用后只写入下方表单（未保存）；请在「AUTO 分工」页核对，再点底部「保存设置」落盘。</p>
+      </div>
+    </div>}
     {preview && <div className="dmm-modal-mask" onClick={() => { if (!busy) setPreview(null) }} role="presentation">
       <div className="dmm-modal" role="dialog" aria-modal="true" aria-label={preview.title} onClick={event => event.stopPropagation()}>
         <h3>{preview.title}</h3>
         {preview.failure && <p className="dmm-error">{preview.failure}</p>}
         {preview.applied && <p className="dmm-note">已应用：宿主声明 {preview.applied.hostApplied} 项、插件声明 {preview.applied.pluginCount} 项{preview.applied.skipped ? `，${preview.applied.skipped} 项因宿主不可写被跳过` : ''}。{preview.applied.pluginCount ? '插件声明需再点页面底部「保存设置」落盘。' : ''}</p>}
-        {!preview.failure && !preview.applied && preview.suggestions.length > 0 && <p className="dmm-muted">以下是真实探测请求得出的结论，高置信项已默认勾选。勾选后点「应用选中项」：「宿主原生图片声明」立即写入宿主，「插件声明」需再点页面底部「保存设置」。</p>}
-        {!preview.failure && !preview.applied && preview.suggestions.length === 0 && (preview.verifications?.length || 0) > 0 && <p className="dmm-muted">本次探测没有产生可直接写入的结论，以下是原始验证证据：</p>}
+        {!preview.failure && !preview.applied && preview.suggestions.length > 0 && <p className="dmm-muted">以下是真实请求得出的结论，高置信项已默认勾选。勾选后点「应用选中项」：「宿主原生图片声明」立即写入宿主，「插件声明」需再点页面底部「保存设置」。</p>}
+        {!preview.failure && !preview.applied && preview.suggestions.length === 0 && (preview.verifications?.length || 0) > 0 && <p className="dmm-muted">本次请求没有产生可直接写入的结论，以下是原始验证证据：</p>}
         {preview.elevated && <p className="dmm-note">该模型宿主声明为「不支持」，宿主会把图片替换成文字占位，因此探测期间已临时把声明提为「支持」实测，测完已恢复原声明——此处的「支持」结论来自图片真实到达模型的实测。</p>}
         {preview.restoreFailed && <p className="dmm-note">探测后未能恢复宿主原声明，请到模型卡片核对「宿主原生图片」的当前值。</p>}
         {(preview.notes ?? []).map((note, index) => <p className="dmm-note" key={index}>{note}</p>)}
