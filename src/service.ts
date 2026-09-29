@@ -86,25 +86,35 @@ export class HostModelBridge implements ModelBridge {
     return profile?.modelOverrides?.[ref.modelId]?.input
   }
 
-  /** 精确设置或删除 input 模态声明；恢复探测前的原值时使用。 */
+  /** 精确设置或删除 input 模态声明；恢复探测前的原值时使用。宿主写入后 revision 可能被异步再推进（探测提权窗口内的常见竞态），这里对版本冲突做有限次自动重试。 */
   async setInput(ref: ModelRef, input: readonly string[] | undefined, revision: number): Promise<void> {
     const entry = this.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
     if (!entry || entry.settingsNs !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
     const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
     const profile = section?.providers?.[ref.providerId]
-    if (profile?.models?.length) {
-      const index = profile.models.findIndex(item => item.id === ref.modelId)
-      if (index < 0) throw new Error('模型不在该 Provider 的配置清单中')
-      const models = structuredClone(profile.models) as { id: string; input?: string[] }[]
-      if (input === undefined) delete models[index].input
-      else models[index] = { ...models[index], input: [...input] }
-      await this.settings.mutate('llm-pi-ai', [{ op: 'set', path: ['providers', ref.providerId, 'models'], value: models }], revision)
-    } else {
-      const ops = input === undefined
+    const ops = profile?.models?.length
+      ? (() => {
+        const index = profile.models.findIndex(item => item.id === ref.modelId)
+        if (index < 0) throw new Error('模型不在该 Provider 的配置清单中')
+        const models = structuredClone(profile.models) as { id: string; input?: string[] }[]
+        if (input === undefined) delete models[index].input
+        else models[index] = { ...models[index], input: [...input] }
+        return [{ op: 'set' as const, path: ['providers', ref.providerId, 'models'], value: models }]
+      })()
+      : input === undefined
         ? [{ op: 'unset' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, 'input'] }]
         : [{ op: 'set' as const, path: ['providers', ref.providerId, 'modelOverrides', ref.modelId, 'input'], value: [...input] }]
-      await this.settings.mutate('llm-pi-ai', ops, revision)
+    let lastError: unknown
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const expected = attempt === 0 ? revision : this.currentRevision()
+      if (expected === undefined) throw new Error('无法读取宿主设置版本')
+      try { await this.settings.mutate('llm-pi-ai', ops, expected); return }
+      catch (error) {
+        lastError = error
+        if (!/CONFLICT/i.test(String(error))) throw error
+      }
     }
+    throw lastError
   }
 
   currentRevision(): number | undefined {
