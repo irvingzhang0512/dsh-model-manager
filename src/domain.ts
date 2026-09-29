@@ -21,7 +21,8 @@ export interface Selection {
   tier?: Tier | 'inherit'
   maxOutputTokens?: number
 }
-export interface RoleSettings extends Selection { enabled: boolean }
+/** 子 Agent 角色绑定：是否参与分发由模式（auto = 托管）总控，这里只负责绑模型与推理参数。 */
+export interface RoleSettings extends Selection { }
 export interface ManagerConfig {
   version: 1
   aliases: Record<string, ModelRef[]>
@@ -91,12 +92,12 @@ export function probeSuggestions(verifications: Verification[]): ProbeSuggestion
 export const DEFAULT_CONFIG: ManagerConfig = {
   version: 1, aliases: {}, models: {}, mode: 'manual', manual: {}, auto: {},
   roles: {
-    main: { enabled: false, tier: 'balanced' },
-    search: { enabled: false, target: '@fast', tier: 'fast' },
-    coding: { enabled: false, target: '@coding', tier: 'balanced' },
-    review: { enabled: false, target: '@strong', tier: 'deep' },
-    strong: { enabled: false, target: '@strong', tier: 'deep' },
-    vision: { enabled: false, target: '@vision', tier: 'auto' },
+    main: { tier: 'balanced' },
+    search: { tier: 'fast' },
+    coding: { tier: 'balanced' },
+    review: { tier: 'deep' },
+    strong: { tier: 'deep' },
+    vision: { tier: 'auto' },
   },
   vision: { enabled: false, policy: 'native-first' },
   reliability: { maxAttempts: 3, retryTransient: true, parameterDowngrade: false, longContextCandidates: [] },
@@ -163,10 +164,16 @@ export function validateConfig(config: ManagerConfig): void {
     if (!/^[a-z][a-z0-9_-]*$/.test(name) || !Array.isArray(refs) || !refs.length) throw new Error(`无效别名：${name}`)
     for (const ref of refs) if (!ref || typeof ref.providerId !== 'string' || typeof ref.modelId !== 'string' || !ref.providerId || !ref.modelId) throw new Error(`别名 ${name} 只能引用具体模型`)
   }
-  for (const selection of [config.manual, config.auto, ...Object.values(config.roles).filter(role => role.enabled)]) {
+  for (const selection of [config.manual, config.auto]) {
     if (selection.target) resolveSelection(config, selection.target)
     if (selection.maxOutputTokens !== undefined && (!Number.isInteger(selection.maxOutputTokens) || selection.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
     if (selection.thinking === 'off' && selection.tier && !['inherit', 'auto'].includes(selection.tier)) throw new Error('关闭思考不能同时选择非关闭推理档位')
+  }
+  // 角色只在自动（托管）模式下参与分发，其目标在使用时校验（未绑定的别名按「角色不可用」处理，
+  // 而不是拒绝整份配置——避免手动模式下无关的角色绑定把保存/加载卡死）。
+  for (const role of Object.values(config.roles)) {
+    if (role.maxOutputTokens !== undefined && (!Number.isInteger(role.maxOutputTokens) || role.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
+    if (role.thinking === 'off' && role.tier && !['inherit', 'auto'].includes(role.tier)) throw new Error('关闭思考不能同时选择非关闭推理档位')
   }
   if (config.vision.enabled && config.vision.target) resolveSelection(config, config.vision.target)
 }

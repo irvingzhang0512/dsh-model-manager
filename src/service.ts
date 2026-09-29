@@ -190,6 +190,16 @@ export class ModelManagerService {
 
   model(ref: ModelRef): ModelRecord | undefined { return this.models.find(m => m.providerId === ref.providerId && m.modelId === ref.modelId) }
 
+  /**
+   * 宿主默认模型（`agent-default-model` 设置）。选择器里的 AUTO 条目在没有配置
+   * Manual/Auto 目标时回退到它，避免 AUTO 落到「没有任何候选」的失败上。
+   */
+  hostDefault(): ModelRef | undefined {
+    const value = this.settings?.get('agent-default-model') as { provider?: unknown; model?: unknown } | undefined
+    if (typeof value?.provider !== 'string' || typeof value?.model !== 'string' || !value.provider || !value.model) return undefined
+    return { providerId: value.provider, modelId: value.model }
+  }
+
   getOverride(session: string): { session?: Selection; nextTurn?: Selection } {
     const value = this.overrides.get(session)
     return { session: value?.session && structuredClone(value.session), nextTurn: value?.nextTurn && structuredClone(value.nextTurn) }

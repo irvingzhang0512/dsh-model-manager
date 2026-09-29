@@ -1,21 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Role, Tier, Verification } from '../domain.js'
 
-export const inject = ['slots', 'modelDirectories']
-type ModelDirectory = { store: { getSnapshot(): { current: { provider: string; model: string } | null }; subscribe(listener: () => void): () => void }; load(): Promise<{ current: { provider: string; model: string } | null }>; select(selection: { provider: string; model: string }): Promise<void> }
-type ModelDirectories = { directoryFor(sessionId: string): ModelDirectory }
-const managedProvider = 'dsh-model-manager'
-function managedModel(target: ModelRef | string): string {
-  if (typeof target === 'string') return `alias:${target.slice(1)}`
-  const bytes = new TextEncoder().encode(JSON.stringify([target.providerId, target.modelId]))
-  return btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-async function selectManaged(directory: ModelDirectory, target?: ModelRef | string, force = false): Promise<void> {
-  const current = (await directory.load()).current
-  if (!target && (!force || !current || current.provider === managedProvider)) return
-  const model = target ? managedModel(target) : managedModel({ providerId: current!.provider, modelId: current!.model })
-  if (current?.provider !== managedProvider || current.model !== model) await directory.select({ provider: managedProvider, model })
-}
+export const inject = ['slots']
 type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] }
 type Tab = '模型' | '别名与推理配置' | 'Manual/Auto' | '视觉' | '可靠性' | '验证' | '日志'
 const tabs: Tab[] = ['模型', '别名与推理配置', 'Manual/Auto', '视觉', '可靠性', '验证', '日志']
@@ -449,17 +435,17 @@ function ManagerSection() {
     {tab === 'Manual/Auto' && <>
       <div className="dmm-guide">
         <strong>Manual/Auto 是干什么的？</strong>
-        <p style={{ margin: '6px 0', fontSize: 13 }}>决定<strong>走「模型管理」入口的会话</strong>实际用哪个模型、怎么推理。什么时候会走这个入口：DSH 模型选择器里选了「模型管理」下的条目、输入框「模型管理」控件点过「应用」、或开启了视觉辅助（会自动切换）。没走这个入口时本页不生效。</p>
+        <p style={{ margin: '6px 0', fontSize: 13 }}>决定<strong>走「模型管理」入口的会话</strong>实际用哪个模型、怎么推理。什么时候会走这个入口：DSH 模型选择器里选了「模型管理」下的 AUTO 或 @别名条目、或开启了视觉辅助。选原生 Provider 模型时不经过这里。</p>
         <ul className="dmm-steps">
-          <li><strong>模式 Manual / Auto</strong>：两套可以整套切换的方案——当前是 Manual 时主对话按 manual 行执行，是 Auto 时按 auto 行执行。两行字段相同：目标模型 / 思考 / 推理档位 / 输出上限。</li>
-          <li><strong>目标模型</strong>：留空 = 插件不指定，用你在 DSH 里选的模型；选 @别名 = 按候选顺序兜底；选具体模型 = 固定用它。</li>
+          <li><strong>模式 手动 / 自动</strong>：手动 = 主模型跟随你在原生选择器里选的那个，插件最多用 @别名 引用；自动 = 托管模式，插件按 Auto 行决定主模型，并把任务按下方角色分发给子 Agent。</li>
+          <li><strong>目标模型</strong>：留空 = 跟随原生选择器（手动模式下的默认行为）；选 @别名 = 按候选顺序兜底；选具体模型 = 固定用它。</li>
           <li><strong>思考与推理档位</strong>：档位需要先在「别名与推理配置」页完成映射；「关闭思考」只有模型公开 off 档位时可选，且不能与非关闭档位同时选。</li>
-          <li><strong>子 Agent 角色（委派分工）</strong>：勾选启用并绑定模型后，主 Agent 可把搜索 / 编码 / 审查 / 强分析 / 看图任务委派给对应模型；与当前 Manual/Auto 模式无关。main 行不参与委派——主对话模型由 manual/auto 行决定。</li>
-          <li><strong>优先级</strong>：输入框「模型管理」控件的会话临时覆盖高于这一页的全局设置。</li>
+          <li><strong>子 Agent 角色（委派分工）</strong>：只在自动（托管）模式下生效——绑定模型后，主 Agent 可把搜索 / 编码 / 审查 / 强分析 / 看图任务委派给对应模型。</li>
+          <li><strong>优先级</strong>：本页全局设置 &lt; 会话临时覆盖（接口能力保留，当前无界面）。</li>
         </ul>
       </div>
-      <div className="dmm-card"><div className="dmm-row"><label>模式 <select value={draft.mode} onChange={event => edit(next => { next.mode = event.target.value as 'manual' | 'auto' })}><option value="manual">Manual（用 manual 行）</option><option value="auto">Auto（用 auto 行）</option></select></label></div><p className="dmm-muted">切换模式 = 整套切换主对话方案；保存后对走「模型管理」入口的会话立即生效。</p></div>
-      {(['manual', 'auto'] as const).map(mode => <div className="dmm-card" key={mode}><strong>{mode === 'manual' ? 'Manual 行' : 'Auto 行'}</strong><p className="dmm-muted">当前模式是 {mode === 'manual' ? 'Manual' : 'Auto'} 时，主对话按这一行执行。</p><div className="dmm-row"><label>目标模型 <SelectModel value={draft[mode].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next[mode].target = value })} /></label></div><div className="dmm-row"><label>思考 <ThinkingSelect value={draft[mode].thinking} offAvailable={supportsOff(draft[mode].target, draft, snapshot.models)} onChange={value => edit(next => { next[mode].thinking = value; if (value === 'off') next[mode].tier = 'auto' })} /></label><label>推理档位 <select aria-label={`${mode} 推理档位`} value={draft[mode].tier ?? 'inherit'} onChange={event => edit(next => { next[mode].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft[mode].thinking === 'off' && !['auto'].includes(t)}>{t}</option>)}</select></label><label>输出上限 <input type="number" min="1" placeholder="不限" value={draft[mode].maxOutputTokens ?? ''} onChange={event => edit(next => { next[mode].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></label></div></div>)}<div className="dmm-card"><strong>子 Agent 角色（委派分工）</strong><p className="dmm-muted">勾选启用并绑定模型后，主 Agent 才能在任务里把对应工作委派出去；与当前 Manual/Auto 模式无关。</p>{roles.map(role => <div className="dmm-row" key={role}><label><input type="checkbox" disabled={role === 'main'} checked={draft.roles[role].enabled} onChange={event => edit(next => { next.roles[role].enabled = event.target.checked })} />{role}</label>{role === 'main' && <span className="dmm-muted">主对话模型由上方 manual/auto 行决定，此处不参与委派</span>}<label>目标 <SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} disabled={role === 'main'} onChange={value => edit(next => { next.roles[role].target = value })} /></label><label>思考 <ThinkingSelect value={draft.roles[role].thinking} offAvailable={supportsOff(draft.roles[role].target, draft, snapshot.models)} disabled={role === 'main'} onChange={value => edit(next => { next.roles[role].thinking = value; if (value === 'off') next.roles[role].tier = 'auto' })} /></label><label>档位 <select value={draft.roles[role].tier ?? 'auto'} disabled={role === 'main'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t} disabled={draft.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></label></div>)}</div>
+      <div className="dmm-card"><div className="dmm-row"><label>模式 <select value={draft.mode} onChange={event => edit(next => { next.mode = event.target.value as 'manual' | 'auto' })}><option value="manual">手动（跟随原生选择，不托管）</option><option value="auto">自动（托管：按 Auto 行决定主模型，并启用子 Agent 分发）</option></select></label></div><p className="dmm-muted">模式是插件的总开关：手动 = 不托管；自动 = 托管，同时启用下方角色的委派分发。保存后立即生效。</p></div>
+      {(['manual', 'auto'] as const).map(mode => <div className="dmm-card" key={mode}><strong>{mode === 'manual' ? 'Manual 行' : 'Auto 行'}</strong><p className="dmm-muted">当前模式是 {mode === 'manual' ? 'Manual' : 'Auto'} 时，主对话按这一行执行。</p><div className="dmm-row"><label>目标模型 <SelectModel value={draft[mode].target} models={snapshot.models} aliases={aliases} onChange={value => edit(next => { next[mode].target = value })} /></label></div><div className="dmm-row"><label>思考 <ThinkingSelect value={draft[mode].thinking} offAvailable={supportsOff(draft[mode].target, draft, snapshot.models)} onChange={value => edit(next => { next[mode].thinking = value; if (value === 'off') next[mode].tier = 'auto' })} /></label><label>推理档位 <select aria-label={`${mode} 推理档位`} value={draft[mode].tier ?? 'inherit'} onChange={event => edit(next => { next[mode].tier = event.target.value as Tier | 'inherit' })}><option value="inherit">继承上层设置</option>{tiers.map(t => <option key={t} disabled={draft[mode].thinking === 'off' && !['auto'].includes(t)}>{t}</option>)}</select></label><label>输出上限 <input type="number" min="1" placeholder="不限" value={draft[mode].maxOutputTokens ?? ''} onChange={event => edit(next => { next[mode].maxOutputTokens = event.target.value ? Number(event.target.value) : undefined })} /></label></div></div>)}<div className="dmm-card"><strong>子 Agent 角色（委派分工）</strong><p className="dmm-muted">在「自动（托管）」模式下，主 Agent 可把对应工作委派给绑定了模型的子 Agent；手动模式下不启用分发。绑定留空的角色不参与委派。</p>{roles.map(role => <div className="dmm-row" key={role}><strong>{role}</strong>{role === 'main' && <span className="dmm-muted">主对话模型由上方模式与 Auto 行决定，此处不参与委派</span>}<label>目标 <SelectModel value={draft.roles[role].target} models={snapshot.models} aliases={aliases} disabled={role === 'main'} onChange={value => edit(next => { next.roles[role].target = value })} /></label><label>思考 <ThinkingSelect value={draft.roles[role].thinking} offAvailable={supportsOff(draft.roles[role].target, draft, snapshot.models)} disabled={role === 'main'} onChange={value => edit(next => { next.roles[role].thinking = value; if (value === 'off') next.roles[role].tier = 'auto' })} /></label><label>档位 <select value={draft.roles[role].tier ?? 'auto'} disabled={role === 'main'} onChange={event => edit(next => { next.roles[role].tier = event.target.value as Tier })}>{tiers.map(t => <option key={t} disabled={draft.roles[role].thinking === 'off' && t !== 'auto'}>{t}</option>)}</select></label></div>)}</div>
     </>}
     {tab === '视觉' && <VisionSection draft={draft} models={snapshot.models} aliases={aliases} edit={edit} />}
     {tab === '可靠性' && <>
@@ -521,73 +507,6 @@ function ManagerSection() {
   </div>
 }
 
-function ComposerStatus({ sessionId, modelDirectories }: { sessionId?: string; modelDirectories: ModelDirectories }) {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
-  const [selection, setSelection] = useState<ModelRef | string>()
-  const [thinking, setThinking] = useState<'inherit' | 'auto' | 'off'>('inherit')
-  const [tier, setTier] = useState<Tier | 'inherit'>('inherit')
-  const [maxOutputTokens, setMaxOutputTokens] = useState('')
-  const [scope, setScope] = useState<'session' | 'nextTurn'>('nextTurn')
-  const [state, setState] = useState('')
-  useEffect(() => {
-    let active = true
-    let stopDirectory: (() => void) | undefined
-    let syncing = false
-    let configured: ModelRef | string | undefined
-    let visionEnabled = false
-    const synchronize = async (directory: ModelDirectory) => {
-      if (syncing || !active || !configured && !visionEnabled) return
-      syncing = true
-      try { await selectManaged(directory, configured, visionEnabled) }
-      finally { syncing = false }
-    }
-    const refresh = async () => {
-      const next = asSnapshot(await request(''))
-      if (!active) return
-      setSnapshot(next)
-      if (!sessionId) return
-      configured = next.config[next.config.mode].target
-      visionEnabled = next.config.vision.enabled
-      const directory = modelDirectories.directoryFor(sessionId)
-      if (!stopDirectory) stopDirectory = directory.store.subscribe(() => {
-        if (directory.store.getSnapshot().current?.provider !== managedProvider) void synchronize(directory).catch(error => { if (active) setState(String(error)) })
-      })
-      await synchronize(directory)
-    }
-    void refresh().catch(error => { if (active) setState(String(error)) })
-    const onConfig = () => { void refresh().catch(error => { if (active) setState(String(error)) }) }
-    window.addEventListener('dmm:config', onConfig)
-    return () => { active = false; stopDirectory?.(); window.removeEventListener('dmm:config', onConfig) }
-  }, [sessionId, modelDirectories])
-  if (!snapshot) return <span className="dmm-composer">模型管理…</span>
-  const aliases = Object.keys(snapshot.config.aliases)
-  const save = async (clear = false) => {
-    if (!sessionId) { setState('无法获取会话 ID'); return }
-    try {
-      await request('/overrides', { method: 'PUT', body: JSON.stringify({ sessionId, scope, ...(clear ? {} : { selection: { target: selection, thinking, tier, ...(maxOutputTokens ? { maxOutputTokens: Number(maxOutputTokens) } : {}) } }) }) })
-      if (!clear) await selectManaged(modelDirectories.directoryFor(sessionId), selection ?? snapshot.config[snapshot.config.mode].target, true)
-      setState(clear ? '已清除' : scope === 'nextTurn' ? '已设置（仅下一条消息）' : '已设置（本会话有效）')
-    } catch (error) { setState(String(error)) }
-  }
-  return <details className="dmm-composer">
-    <summary title="临时调整本会话的模型与推理参数，不改全局设置">模型管理 · {snapshot.config.mode === 'manual' ? '手动' : '自动'}{state ? ` · ${state}` : ''}</summary>
-    <div className="dmm-card dmm-popcard">
-      <p className="dmm-muted" style={{ margin: '2px 0 8px' }}>给<strong>当前会话</strong>临时换模型或推理参数，优先级高于「设置 → 模型管理 → Manual/Auto」的全局设置；想让所有会话都变，去那里改。</p>
-      <div className="dmm-row">
-        <label>模型 <SelectModel value={selection} models={snapshot.models} aliases={aliases} onChange={setSelection} /></label>
-        <ThinkingSelect value={thinking} offAvailable={supportsOff(selection, snapshot.config, snapshot.models)} onChange={value => { setThinking(value); if (value === 'off') setTier('auto') }} />
-        <select aria-label="本轮推理档位" value={tier} onChange={event => setTier(event.target.value as Tier | 'inherit')}><option value="inherit">档位继承全局</option>{tiers.map(item => <option key={item} disabled={thinking === 'off' && item !== 'auto'}>{item}</option>)}</select>
-        <input aria-label="本轮输出上限" type="number" min="1" placeholder="输出上限" value={maxOutputTokens} onChange={event => setMaxOutputTokens(event.target.value)} />
-      </div>
-      <div className="dmm-row">
-        <label>范围 <select value={scope} onChange={event => setScope(event.target.value as 'session' | 'nextTurn')}><option value="nextTurn">仅下一条消息</option><option value="session">本会话一直有效</option></select></label>
-        <button onClick={() => void save()}>应用</button>
-        <button onClick={() => void save(true)}>清除</button>
-      </div>
-    </div>
-  </details>
-}
-
 /** 面板错误边界：渲染异常时显示可重试的错误卡片，而不是让整个设置区白屏。 */
 class PanelBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null }
@@ -598,8 +517,7 @@ class PanelBoundary extends React.Component<{ children: React.ReactNode }, { err
   }
 }
 
-export function apply(ctx: { modelDirectories: ModelDirectories; slots: { inject(name: string, register: () => () => void): void; register(options: { name: string; id: string; order: number; label?: () => string; inject?: (sessionId: string) => { sessionId: string } }, component: (props: any) => React.ReactElement): () => void } }): void {
+export function apply(ctx: { slots: { inject(name: string, register: () => () => void): void; register(options: { name: string; id: string; order: number; label?: () => string }, component: (props: any) => React.ReactElement): () => void } }): void {
   injectStyle()
   ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'model-manager', order: 12, label: () => '模型管理' }, (props: any) => <PanelBoundary><ManagerSection {...props} /></PanelBoundary>))
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'model-manager-status', order: 60, label: () => '模型管理模式', inject: (sessionId: string) => ({ sessionId }) }, (props: { sessionId?: string }) => <PanelBoundary><ComposerStatus {...props} modelDirectories={ctx.modelDirectories} /></PanelBoundary>))
 }

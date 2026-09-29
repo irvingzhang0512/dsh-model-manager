@@ -22,11 +22,11 @@
 | `/api/model-manager/logs` | GET | 无 | `{events}` |
 | `/api/model-manager/overrides` | GET、PUT | GET: `?sessionId=…`；PUT: `{sessionId, scope, selection?}` | `{session, nextTurn}` |
 
-写操作只接受本机同源请求，拒绝 `Sec-Fetch-Site: cross-site`。不返回凭据。浏览器 bundle loader id 为 `dsh-model-manager`，在 `settings.section` 注册「模型管理」，在 `conversation.input.left` 显示管理入口状态。界面状态 `loading | ready | saving | error`。配置从 HTTP 读取并以 revision 提交；宿主对话仍经原 Session 输入通路。
+写操作只接受本机同源请求，拒绝 `Sec-Fetch-Site: cross-site`。不返回凭据。浏览器 bundle loader id 为 `dsh-model-manager`，只注册 `settings.section`「模型管理」；对话输入区不再挂控件。模型选择的唯一入口是宿主原生选择器：受管理 Provider 只列 `AUTO`（按模式方案解析主模型，无目标时回退宿主默认模型）与 `@别名`，不重复列出原生模型。模式是托管总开关：手动 = 跟随原生选择、不分发；自动 = 按 Auto 行决定主模型，并启用角色分发（委派工具与系统提示仅在自动模式生效）。界面状态 `loading | ready | saving | error`。配置从 HTTP 读取并以 revision 提交；宿主对话仍经原 Session 输入通路。
 
 ## 配置字段
 
-`version`、`aliases`、`models`、`mode`、`manual`、`auto`、`roles`、`vision`、`reliability`。`models` 中的能力覆盖只更改插件声明；原生能力修正另由宿主 `llm-pi-ai` 设置桥接精确保存。验证证据与日志独立于设置，存于 profile 隔离的数据目录。
+`version`、`aliases`、`models`、`mode`、`manual`、`auto`、`roles`、`vision`、`reliability`。`roles` 只负责绑定模型与推理参数（不再有逐角色启用开关，分发由模式总控）；角色目标在使用时校验（未绑定的别名按「角色不可用」处理，不阻塞配置保存）。`models` 中的能力覆盖只更改插件声明；原生能力修正另由宿主 `llm-pi-ai` 设置桥接精确保存。验证证据与日志独立于设置，存于 profile 隔离的数据目录。
 
 ## 验收边界
 

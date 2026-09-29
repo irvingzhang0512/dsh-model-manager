@@ -160,11 +160,11 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     text: () => {
       const config = service.snapshot().config
       const descriptions: Record<string, string> = { search: '检索与探索', coding: '实现和修复', review: '审查结果及风险', strong: '复杂分析与调试', vision: '图片理解' }
-      const available = Object.entries(descriptions).filter(([role]) => {
+      const available = config.mode === 'auto' ? Object.entries(descriptions).filter(([role]) => {
         const item = config.roles[role as keyof typeof config.roles]
-        if (!item?.enabled) return false
+        if (!item?.target) return false
         try { return resolveSelection(config, item.target).some(ref => !!service.model(ref)) } catch { return false }
-      })
+      }) : []
       const roleText = available.map(([role, description]) => `${role}：${description}`).join('；')
       return [roleText ? `需要独立完成的任务时，可调用 model_manager_delegate 委派给已配置角色。可用角色：${roleText}。普通任务直接完成；失败后可明确提高档位或选择更强角色，并传递已有结果与失败原因。` : '',
         config.vision.enabled ? '当消息中出现 [图片附件 ID] 时，使用 model_manager_inspect_image 针对具体问题查看原图；不要根据占位文字猜测图片内容。' : ''].filter(Boolean).join('\n')

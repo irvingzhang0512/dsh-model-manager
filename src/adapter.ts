@@ -7,6 +7,8 @@ import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
 
 export const MANAGED_PROVIDER = 'dsh-model-manager'
+/** 选择器里的 AUTO 条目：按 Manual/Auto 方案走，没配目标时回退到宿主默认模型。 */
+export const AUTO_MODEL_ID = 'auto'
 
 export class VisionRegistry {
   private bySession = new Map<string, Map<string, ImageAttachmentRef>>()
@@ -20,7 +22,16 @@ export class VisionRegistry {
   clear(session: string): void { this.bySession.delete(session) }
 }
 
-function requestedModel(id: string, config: ManagerConfig): ModelRef[] {
+/**
+ * 解析一次受管理请求的目标候选。
+ * `auto` 表示选择器里的 AUTO 条目：先看当前模式（Manual/Auto）配置的目标，没配就用宿主默认模型。
+ */
+function requestedModel(id: string, config: ManagerConfig, fallback?: ModelRef): ModelRef[] {
+  if (id === AUTO_MODEL_ID) {
+    const target = (config.mode === 'manual' ? config.manual : config.auto).target
+    if (target) return resolveSelection(config, target)
+    return fallback ? [fallback] : []
+  }
   if (id.startsWith('alias:')) return resolveSelection(config, `@${id.slice(6)}`)
   return [fromManagedId(id)]
 }
@@ -34,26 +45,29 @@ export class ManagedAdapter extends LlmAdapter {
   imageRequestPricing() { return undefined }
 
   async listModels(): Promise<readonly LlmModelInfo[]> {
-    const { config, models } = this.service.snapshot()
+    const { config } = this.service.snapshot()
+    // 只列 AUTO 与别名：逐个具体模型的条目与其余原生 Provider 完全重复，选择器里只会造成噪音。
+    // 具体模型仍可用受管理 ID 直接寻址（宿主路由改写、子任务委派都走这条路径）。
     return [
-      ...models.map(m => ({ provider: MANAGED_PROVIDER, id: managedId(m), name: `${m.name} · ${m.providerId}`, inputModalities: ['text', 'image'] as const })),
+      { provider: MANAGED_PROVIDER, id: AUTO_MODEL_ID, name: 'AUTO', inputModalities: ['text', 'image'] as const },
       ...Object.keys(config.aliases).map(name => ({ provider: MANAGED_PROVIDER, id: `alias:${name}`, name: `@${name}`, inputModalities: ['text', 'image'] as const })),
     ]
   }
 
   async resolveModel(_provider: string, id: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     const config = this.service.snapshot().config
-    const candidate = requestedModel(id, config)[0]
+    const candidate = requestedModel(id, config, this.service.hostDefault())[0]
+    if (!candidate) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请配置 Manual/Auto 目标模型，或设置宿主默认模型' : '未配置可用模型')
     const info = await this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, signal)
-    return { ...info, provider: MANAGED_PROVIDER, id, name: id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
+    return { ...info, provider: MANAGED_PROVIDER, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
   }
 
   async prepareCall(provider: string, id: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
     const snapshot = this.service.snapshot()
-    const candidates = requestedModel(id, snapshot.config)
-    if (!candidates.length) throw new Error('未配置可用模型')
+    const candidates = requestedModel(id, snapshot.config, this.service.hostDefault())
+    if (!candidates.length) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请配置 Manual/Auto 目标模型，或设置宿主默认模型' : '未配置可用模型')
     const info = await this.llm.resolveModelInfo(candidates[0].providerId, candidates[0].modelId, signal)
-    const model: LlmResolvedModelInfo = { ...info, provider, id, name: id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
+    const model: LlmResolvedModelInfo = { ...info, provider, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
     return { model, stream: (options: GenerateOptions) => {
       const session = options.sessionId as string || 'one-shot'
       const delegated = this.service.isDelegatedSession(session)

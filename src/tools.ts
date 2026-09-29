@@ -46,10 +46,13 @@ export function registerManagerTools(deps: { tools: ToolRuntime; subagents: Suba
     execute: async (args, exec) => {
       if (!exec.agent) throw new Error('缺少父 Agent')
       const config = deps.service.snapshot().config
+      if (config.mode !== 'auto') throw new Error('子 Agent 分发只在自动（托管）模式下可用：到「模型管理 → Manual/Auto」把模式切到「自动」')
       const role = args.role as Role
       const roleConfig = config.roles[role]
-      if (!roleConfig?.enabled) throw new Error(`角色 ${role} 未启用`)
-      const model = resolveSelection(config, roleConfig.target)[0]
+      if (!roleConfig) throw new Error(`角色 ${role} 不存在`)
+      if (!roleConfig.target) throw new Error(`角色 ${role} 未绑定模型：到「模型管理 → Manual/Auto」的角色卡里绑定`)
+      let model: ReturnType<typeof resolveSelection>[number]
+      try { model = resolveSelection(config, roleConfig.target)[0] } catch (error) { throw new Error(`角色 ${role} 绑定的目标不可用：${error instanceof Error ? error.message : String(error)}`) }
       if (!model || !deps.service.model(model)) throw new Error(`角色 ${role} 未绑定有效模型`)
       const workspace = exec.agent.session.header.cwd?.toLowerCase() ?? `session:${exec.agent.session.id}`
       if (running >= 3 || (role === 'coding' && (codingByWorkspace.get(workspace) ?? 0) >= 1)) throw new Error('并行子任务已达上限')

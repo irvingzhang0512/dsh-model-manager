@@ -13,6 +13,7 @@ function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: s
   const service = {
     snapshot: () => ({ config: structuredClone(config), models: structuredClone(records), revision: 1 }),
     model: (ref: any) => records.find(item => item.providerId === ref.providerId && item.modelId === ref.modelId),
+    hostDefault: () => undefined,
     activeSelection: () => undefined,
     activeTurn: () => 4,
     isDelegatedSession: () => false,
