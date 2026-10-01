@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { classifyFailure, fromManagedId, LONG_CONTEXT_ALIAS, managedId, mergeSelection, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRecord, type ModelRef, type Selection } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
+import { candidateForGrade, evaluateTask, type AutoDecision } from './auto-router.js'
 
 export const MANAGED_PROVIDER = 'dsh-model-manager'
 /** 选择器里的 AUTO 条目：托管模式，按 auto.main 决定主模型，没配目标时回退到宿主默认模型。 */
@@ -29,7 +30,7 @@ export class VisionRegistry {
  */
 function requestedModel(id: string, config: ManagerConfig, fallback?: ModelRef): ModelRef[] {
   if (id === AUTO_MODEL_ID) {
-    const target = config.auto.main.target
+    const target = config.auto.enabled ? config.auto.normal.target : config.auto.main.target
     if (target) return resolveSelection(config, target)
     return fallback ? [fallback] : []
   }
@@ -46,11 +47,12 @@ function effectiveReliability(config: ManagerConfig, id: string): ManagerConfig[
 
 /** 受管理条目参数基线：AUTO 用 auto.main，其余条目是固定模型、不带全局基线。 */
 function baseSelection(config: ManagerConfig, id: string): Selection {
-  return id === AUTO_MODEL_ID ? config.auto.main : {}
+  return id === AUTO_MODEL_ID && !config.auto.enabled ? config.auto.main : {}
 }
 
 export class ManagedAdapter extends LlmAdapter {
   private cooldown = new Map<string, number>()
+  private pendingAuto = new Map<string, Promise<AutoDecision>>()
   constructor(private readonly llm: LlmRuntime, private readonly service: ModelManagerService, private readonly vision: VisionRegistry) { super() }
 
   providerInfo(): LlmProviderInfo { return { id: MANAGED_PROVIDER, name: '模型管理' } }
@@ -70,7 +72,7 @@ export class ManagedAdapter extends LlmAdapter {
   async resolveModel(_provider: string, id: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     const config = this.service.snapshot().config
     const candidate = requestedModel(id, config, this.service.hostDefault())[0]
-    if (!candidate) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 分工」配置主模型，或设置宿主默认模型' : '未配置可用模型')
+    if (!candidate) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 自动选模型」配置执行模型，或设置宿主默认模型' : '未配置可用模型')
     const info = await this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, signal)
     return { ...info, provider: MANAGED_PROVIDER, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
   }
@@ -78,7 +80,7 @@ export class ManagedAdapter extends LlmAdapter {
   async prepareCall(provider: string, id: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
     const snapshot = this.service.snapshot()
     const candidates = requestedModel(id, snapshot.config, this.service.hostDefault())
-    if (!candidates.length) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 分工」配置主模型，或设置宿主默认模型' : '未配置可用模型')
+    if (!candidates.length) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 自动选模型」配置执行模型，或设置宿主默认模型' : '未配置可用模型')
     const info = await this.llm.resolveModelInfo(candidates[0].providerId, candidates[0].modelId, signal)
     const model: LlmResolvedModelInfo = { ...info, provider, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
     return { model, stream: (options: GenerateOptions) => {
@@ -113,7 +115,34 @@ export class ManagedAdapter extends LlmAdapter {
     let attempt = 0
     let previousProvider: string | undefined
     let contextOnly = false
-    const queue = selection?.target ? resolveSelection(config, selection.target) : [...candidates]
+    let auto = options.model === AUTO_MODEL_ID && !this.service.isDelegatedSession(session) && config.auto.enabled
+    let chosen = selection ?? {}
+    let queue = chosen.target ? resolveSelection(config, chosen.target) : [...candidates]
+    if (auto && !chosen.target) {
+      const key = `${session}:${turn ?? 'one-shot'}`
+      let decision = turn === undefined ? undefined : this.service.autoDecision(session, turn)
+      if (!decision) {
+        let pending = this.pendingAuto.get(key)
+        if (!pending) {
+          pending = (async () => {
+            const evaluated = await evaluateTask(this.llm, config, options)
+            const selected = candidateForGrade(config, models, evaluated.grade, options, ref => this.service.getVerification(ref, 'tools'))
+            if (!selected) throw new Error('AUTO 没有满足图片、档位和上下文要求的模型')
+            const value = { ...selected, reason: selected.fallback ? `${evaluated.reason}；该档无兼容模型，使用更高档` : evaluated.reason,
+              fallback: evaluated.fallback || selected.fallback }
+            await this.service.log({ action: 'auto-evaluation', session, turn, grade: value.grade, reason: value.reason,
+              provider: value.candidates[0].providerId, model: value.candidates[0].modelId, evaluator: config.auto.evaluator,
+              durationMs: evaluated.durationMs, status: evaluated.fallback ? 'fallback' : 'success' })
+            if (turn !== undefined) this.service.saveAutoDecision(session, turn, value)
+            return value
+          })().finally(() => this.pendingAuto.delete(key))
+          this.pendingAuto.set(key, pending)
+        }
+        decision = await pending
+      }
+      chosen = mergeSelection(decision.selection, chosen)
+      queue = [...decision.candidates]
+    }
     const longContextCandidates = config.aliases[LONG_CONTEXT_ALIAS]?.candidates ?? []
     const tried = new Set<string>()
     for (const candidate of queue) {
@@ -128,7 +157,8 @@ export class ManagedAdapter extends LlmAdapter {
       const nativeImage = config.models[modelKey(candidate)]?.capability?.image ?? model.nativeImage
       const route = allImages.length && config.vision.enabled ? visionRoute(config.vision.policy, nativeImage, !!config.vision.target) : nativeImage === 'yes' ? 'native' : allImages.length ? historicalOnly ? 'history' : 'error' : 'native'
       if (route === 'error') throw new Error('当前模型不支持图片，且视觉辅助不可用')
-      const effort = this.service.isDelegatedSession(session) ? options.reasoningEffort : genericProviderAdapter.reasoningEffort(model, config.models[modelKey(candidate)], selection ?? {})
+      const aliasEffort = typeof chosen.target === 'string' ? config.aliases[chosen.target.slice(1)]?.efforts?.[modelKey(candidate)] : undefined
+      const effort = this.service.isDelegatedSession(session) ? options.reasoningEffort : genericProviderAdapter.reasoningEffort(model, config.models[modelKey(candidate)], aliasEffort ? { ...chosen, reasoningEffort: aliasEffort } : chosen)
       const prepared = route === 'sidecar' || route === 'history' ? this.sidecarMessages(options.messages, route === 'history') : options.messages
       const toWire = new Map<string, string>()
       const fromWire = new Map<string, string>()
@@ -148,7 +178,7 @@ export class ManagedAdapter extends LlmAdapter {
       const request = { ...options, provider: candidate.providerId, model: candidate.modelId, messages: prepared,
         tools: options.tools?.map(tool => toWire.has(tool.name as string) ? { ...tool, name: toWire.get(tool.name as string)! as never, description: `宿主工具 ${tool.name}。${tool.description}` } : tool),
         reasoningEffort: effort as GenerateOptions['reasoningEffort'] ?? options.reasoningEffort,
-        maxTokens: selection?.maxOutputTokens ?? options.maxTokens }
+        maxTokens: chosen.maxOutputTokens ?? options.maxTokens }
       request.messages = remapMessages(request.messages)
       let retryThis = false
       let retried = false

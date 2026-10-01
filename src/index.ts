@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -11,12 +13,14 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CONFIG, LONG_CONTEXT_ALIAS, managedId, migrateConfig, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Role, type RoleSettings, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, LONG_CONTEXT_ALIAS, managedId, migrateConfig, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Selection, type Verification } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import { HostModelBridge, ModelManagerService, isSettingsConflict, resolveDataDir, type ModelInputBridge } from './service.js'
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
 import { registerManagerTools } from './tools.js'
 import { probePng } from './probe-image.js'
+import { OFFICIAL_SOURCES, fetchOfficial, officialDiffs, parseOfficialPages, type OfficialPreview, type SourceUrls } from './official-sync.js'
+import { recommendAuto } from './recommend-auto.js'
 
 export const name = 'dsh-model-manager'
 export const inject = ['llm', 'settings', 'tools', 'subagents', 'attachments', 'webServer', 'systemPrompt']
@@ -149,79 +153,6 @@ export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, 
   return { verifications, suggestions: probeSuggestions(verifications), cancelled: signal.aborted, elevated, restoreFailed, notes, nativeRevision: inputBridge.currentRevision() }
 }
 
-export const ROLES: Role[] = ['search', 'coding', 'review', 'strong', 'vision']
-const ROLE_DUTIES: Record<Role, string> = { search: '检索与探索', coding: '实现和修复', review: '审查结果及风险', strong: '复杂分析与调试', vision: '图片理解' }
-const TIER_VALUES = ['fast', 'balanced', 'deep', 'max', 'auto', 'inherit'] as const
-
-/**
- * 用当前模型目录让一个 LLM 产出 AUTO 分工草案（主模型 + 各角色绑定），交给用户确认后由前端写入草稿。
- * 推荐调用本身用 AUTO 主模型（未配置时回退宿主默认模型）；只输出建议，不直接改配置。
- */
-export async function recommendAssignment(llm: LlmRuntime, service: ModelManagerService, signal: AbortSignal): Promise<{ main?: Selection; roles?: Partial<Record<Role, RoleSettings>>; notes: string[] }> {
-  const notes: string[] = []
-  const { config, models } = service.snapshot()
-  let runner: ModelRef | undefined
-  try { runner = resolveSelection(config, config.auto.main.target)[0] } catch { /* 未配置主模型时回退 */ }
-  runner ??= service.hostDefault()
-  if (!runner || !service.model(runner)) throw new Error('请先在「AUTO 分工」配置主模型，或设置宿主默认模型，才能发起 AI 推荐')
-  const catalog = models.map(model => ({
-    id: `${model.providerId}/${model.modelId}`, name: model.name, image: model.nativeImage,
-    contextWindow: model.contextWindow ?? null, efforts: model.reasoningEfforts.map(e => e.id),
-    textVerified: service.getVerification(model, 'text')?.status ?? null,
-  }))
-  const prompt = `你在为 DSH 的模型管理插件规划 AUTO（托管）分工。可用模型目录（JSON 数组）：
-${JSON.stringify(catalog)}
-
-请按以下要求给出分工建议：
-- main：主对话模型，选综合能力最强、上下文够用、已通过验证（若有证据）的模型；
-- search：检索与探索，选快且便宜的模型；
-- coding：实现和修复，选代码能力强且支持工具调用的模型；
-- review：审查结果及风险，选推理深的模型；
-- strong：复杂分析与调试，选最强推理模型（可与 main 相同也可不同）；
-- vision：图片理解，必须从 image 字段为 "yes" 的模型中选。
-规则：只能引用目录中存在的 id；每个角色给 target（{providerId, modelId}）与 tier（fast/balanced/deep/max 之一，主模型可为 auto）；某角色确实无合适模型时给 null。
-只输出一个 JSON 对象，不要输出任何其他文字，形如：
-{"main":{"target":{"providerId":"...","modelId":"..."},"tier":"auto"},"roles":{"search":{"target":{...},"tier":"fast"},"coding":{...},"review":{...},"strong":{...},"vision":null}}`
-  const messages: GenerateOptions['messages'] = [{ id: randomUUID() as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: prompt }] }]
-  let text = ''
-  for await (const chunk of llm.stream({ provider: runner.providerId, model: runner.modelId, messages, signal })) {
-    if (chunk.type === 'text-delta') text += chunk.text
-    if (chunk.type === 'finish' && chunk.reason.kind !== 'stop') throw new Error(`推荐请求失败：${chunk.reason.kind}`)
-  }
-  const start = text.indexOf('{'); const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('推荐模型没有返回可解析的 JSON')
-  let parsed: { main?: { target?: unknown; tier?: unknown }; roles?: Record<string, { target?: unknown; tier?: unknown } | null> }
-  try { parsed = JSON.parse(text.slice(start, end + 1)) } catch { throw new Error('推荐模型返回的 JSON 无法解析，请重试') }
-  const find = (value: unknown): ModelRef | undefined => {
-    if (!value || typeof value !== 'object') return undefined
-    const target = value as { providerId?: unknown; modelId?: unknown; id?: unknown }
-    if (typeof target.providerId === 'string' && typeof target.modelId === 'string') {
-      const ref = { providerId: target.providerId, modelId: target.modelId }
-      return models.some(model => model.providerId === ref.providerId && model.modelId === ref.modelId) ? ref : undefined
-    }
-    if (typeof target.id === 'string') {
-      const [providerId, modelId] = target.id.split('/')
-      return find({ providerId, modelId })
-    }
-    return undefined
-  }
-  const tierOf = (value: unknown): Selection['tier'] => TIER_VALUES.includes(value as never) ? value as Selection['tier'] : undefined
-  let main: Selection | undefined
-  const mainRef = find(parsed.main?.target)
-  if (mainRef) main = { target: mainRef, ...(tierOf(parsed.main?.tier) ? { tier: tierOf(parsed.main!.tier) } : {}) }
-  else notes.push('推荐结果没有给出有效的主模型，请手动选择。')
-  const roles: Partial<Record<Role, RoleSettings>> = {}
-  for (const role of ROLES) {
-    const entry = parsed.roles?.[role]
-    if (!entry) { notes.push(`推荐结果缺少 ${ROLE_DUTIES[role]}（${role}）角色。`); continue }
-    const ref = find(entry.target)
-    if (!ref) { notes.push(`${role} 角色未获得有效推荐（模型不在目录或不支持图片），保持未绑定。`); continue }
-    roles[role] = { target: ref, ...(tierOf(entry.tier) ? { tier: tierOf(entry.tier) } : {}) }
-  }
-  if (!Object.keys(roles).length && !main) throw new Error('推荐结果没有任何有效分工，请重试或手动配置')
-  return { main, roles, notes }
-}
-
 export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void {
   const baseConfig: ManagerConfig = { ...structuredClone(DEFAULT_CONFIG), ...entryConfig }
   validateConfig(baseConfig)
@@ -231,21 +162,17 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
   const vision = new VisionRegistry()
   const adapter = new ManagedAdapter(ctx.llm, service, vision)
   let ready = false
+  let officialPreview: OfficialPreview | undefined
+  const officialBackup = join(resolveDataDir(), 'official-sync-backup.json')
   void service.init().then(() => { ready = true }).catch(err => ctx.logger?.error?.(`[dsh-model-manager] 初始化失败: ${String(err)}`))
   ctx.effect(() => scope.watch(next => service.onSettingsChanged(next)), 'dsh-model-manager: settings')
   ctx.effect(() => ctx.llm.registerAdapter([MANAGED_PROVIDER], adapter), 'dsh-model-manager: adapter')
-  ctx.effect(() => registerManagerTools({ tools: ctx.tools, subagents: ctx.subagents, llm: ctx.llm, attachments: ctx.attachments, service, vision }), 'dsh-model-manager: tools')
+  ctx.effect(() => registerManagerTools({ tools: ctx.tools, llm: ctx.llm, attachments: ctx.attachments, service, vision }), 'dsh-model-manager: tools')
   ctx.effect(() => ctx.systemPrompt.section({ name: 'dsh-model-manager', order: 350,
     text: () => {
       const config = service.snapshot().config
-      const descriptions: Record<string, string> = { search: '检索与探索', coding: '实现和修复', review: '审查结果及风险', strong: '复杂分析与调试', vision: '图片理解' }
-      const available = Object.entries(descriptions).filter(([role]) => {
-        const item = config.auto.roles[role as keyof typeof config.auto.roles]
-        if (!item?.target) return false
-        try { return resolveSelection(config, item.target).some(ref => !!service.model(ref)) } catch { return false }
-      })
-      const roleText = available.map(([role, description]) => `${role}：${description}`).join('；')
-      return [roleText ? `需要独立完成的任务时，可调用 model_manager_delegate 委派给已配置角色。可用角色：${roleText}。普通任务直接完成；失败后可明确提高档位或选择更强角色，并传递已有结果与失败原因。` : '',
+      const preferred = Object.entries(config.auto.preferences).filter(([, value]) => value.target).map(([duty, value]) => `${duty}：${typeof value.target === 'string' ? value.target : `${value.target!.providerId}/${value.target!.modelId}`}`)
+      return [preferred.length ? `使用 DSH 原生 subagent 执行独立任务时，可参考这些模型偏好（非强制）：${preferred.join('；')}。` : '',
         config.vision.enabled ? '当消息中出现 [图片附件 ID] 时，使用 model_manager_inspect_image 针对具体问题查看原图；不要根据占位文字猜测图片内容。' : ''].filter(Boolean).join('\n')
     },
   }), 'dsh-model-manager: prompt')
@@ -255,7 +182,14 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     if (!ready) return current
     const session = payload.agent.session.id as string
     if (payload.agent.session.header.parentSession) {
-      if (current.provider === MANAGED_PROVIDER) service.markDelegatedSession(session)
+      if (current.provider === MANAGED_PROVIDER) {
+        service.markDelegatedSession(session)
+        if (current.model === 'auto') {
+          const parent = service.latestAutoDecision(payload.agent.session.header.parentSession as string)
+          const selected = parent?.candidates[0]
+          if (selected) return { ...current, model: managedId(selected) }
+        }
+      }
       return current
     }
     const selection = service.effectiveSelection(session, payload.turn)
@@ -323,6 +257,123 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     catch (err) { error(res, err) }
   } }), 'dsh-model-manager: refresh route')
 
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/subagents', handler: async (req, res) => {
+    const namespace = 'subagent-model-selection'
+    const revision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision
+    if (req.method === 'GET') { json(res, 200, { revision, value: ctx.settings.get(namespace) ?? { enabled: false, allowedModels: [] } }); return }
+    if (req.method !== 'PUT') { res.setHeader('Allow', 'GET, PUT'); json(res, 405, { error: '方法不允许' }); return }
+    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
+    try {
+      const input = await body(req) as { revision: number; enabled: boolean; allowedModels: { provider: string; model: string }[] }
+      if (revision === undefined || input.revision !== revision) throw new Error('SETTINGS_CONFLICT')
+      if (typeof input.enabled !== 'boolean' || !Array.isArray(input.allowedModels) || input.enabled && !input.allowedModels.length) throw new Error('启用子 Agent 模型选择时至少选择一个模型')
+      const keys = new Set<string>()
+      for (const route of input.allowedModels) {
+        if (!service.model({ providerId: route.provider, modelId: route.model })) throw new Error(`子 Agent 模型尚未加载：${route.provider}/${route.model}`)
+        const key = `${route.provider}\0${route.model}`
+        if (keys.has(key)) throw new Error('子 Agent 模型重复')
+        keys.add(key)
+      }
+      await ctx.settings.mutate(namespace, [{ op: 'set', path: ['enabled'], value: input.enabled }, { op: 'set', path: ['allowedModels'], value: input.allowedModels }], revision)
+      json(res, 200, { revision: ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision, value: ctx.settings.get(namespace) })
+    } catch (err) { error(res, err) }
+  } }), 'dsh-model-manager: subagents route')
+
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/official-preview', handler: async (req, res) => {
+    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
+    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
+    try {
+      const input = await body(req) as { sources?: SourceUrls }
+      const sources = input.sources ?? OFFICIAL_SOURCES
+      if (!sources || Object.keys(OFFICIAL_SOURCES).some(key => typeof sources[key as keyof SourceUrls] !== 'string')) throw new Error('官方资料来源不完整')
+      const { pages, fetchedAt } = await fetchOfficial(sources)
+      const models = parseOfficialPages(pages)
+      const revision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
+      if (revision === undefined) throw new Error('DSH 未加载 DeepSeek 官方配置')
+      officialPreview = { token: randomUUID(), sources, fetchedAt, models, diffs: officialDiffs(service.snapshot().models, models, sources.models), notes: [], revision }
+      json(res, 200, officialPreview)
+    } catch (err) { error(res, err) }
+  } }), 'dsh-model-manager: official preview')
+
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/official-apply', handler: async (req, res) => {
+    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
+    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
+    try {
+      const input = await body(req) as { token: string; selected: string[] }
+      const preview = officialPreview
+      if (!preview || input.token !== preview.token || !Array.isArray(input.selected) || input.selected.some(id => !preview.diffs.some(diff => diff.id === id))) throw new Error('同步预览已失效，请重新刷新')
+      if (!input.selected.length || new Set(input.selected).size !== input.selected.length) throw new Error('请选择不重复的同步差异')
+      const revision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
+      if (revision !== preview.revision) throw new Error('SETTINGS_CONFLICT')
+      const section = ctx.settings.get('llm-deepseek') as { models?: { id: string; name?: string; contextWindow?: number; inputModalities?: string[]; [key: string]: unknown }[] } | undefined
+      if (!section?.models?.length) throw new Error('DeepSeek 官方模型清单不可编辑')
+      const original = structuredClone(section.models)
+      const updated = structuredClone(original)
+      for (const diff of preview.diffs.filter(item => input.selected.includes(item.id))) {
+        if (diff.field === 'id') continue
+        if (diff.field === 'addModel') {
+          const official = diff.after as (typeof preview.models)[number]
+          if (updated.some(item => item.id === official.id)) throw new Error(`模型已存在：${official.id}`)
+          updated.push({ id: official.id, name: official.name, contextWindow: official.contextWindow, inputModalities: official.image ? ['text', 'image'] : ['text'], ...(official.id === 'deepseek-flash' ? { systemPromptUpdate: 'in-history' } : {}) })
+          continue
+        }
+        const model = updated.find(item => item.id === diff.id.split(':')[0])
+        if (!model) throw new Error(`模型清单已变化：${diff.id}`)
+        if (diff.field === 'name') model.name = diff.after as string
+        if (diff.field === 'contextWindow') model.contextWindow = diff.after as number
+        if (diff.field === 'inputModalities') model.inputModalities = diff.after === 'yes' ? ['text', 'image'] : ['text']
+      }
+      if (input.selected.includes('deepseek-v4-flash:id') && !updated.some(item => item.id === 'deepseek-flash')) throw new Error('迁移旧 Flash 引用前须先添加新 Flash 模型')
+      const originalConfig = service.snapshot()
+      await mkdir(resolveDataDir(), { recursive: true })
+      const backup = { at: new Date().toISOString(), models: original, config: originalConfig.config, appliedOfficialRevision: undefined as number | undefined, appliedPluginRevision: undefined as number | undefined }
+      await writeFile(officialBackup, JSON.stringify(backup), { encoding: 'utf8', mode: 0o600 })
+      const changedHost = JSON.stringify(updated) !== JSON.stringify(original)
+      if (changedHost) await ctx.settings.mutate('llm-deepseek', [{ op: 'set', path: ['models'], value: updated }], revision)
+      try {
+        const next = structuredClone(originalConfig.config)
+        if (input.selected.includes('deepseek-v4-flash:id')) {
+          const change = (value: unknown): void => {
+            if (!value || typeof value !== 'object') return
+            if ('providerId' in value && 'modelId' in value && value.providerId === 'deepseek-official' && value.modelId === 'deepseek-v4-flash') value.modelId = 'deepseek-flash'
+            for (const item of Object.values(value)) change(item)
+          }
+          change(next)
+        }
+        next.official = { checkedAt: preview.fetchedAt, sources: preview.sources }
+        await service.update(next, originalConfig.revision)
+      } catch (failure) {
+        if (changedHost) {
+          const rollbackRevision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
+          if (rollbackRevision !== undefined) await ctx.settings.mutate('llm-deepseek', [{ op: 'set', path: ['models'], value: original }], rollbackRevision)
+        }
+        throw failure
+      }
+      await service.refresh()
+      backup.appliedOfficialRevision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
+      backup.appliedPluginRevision = service.snapshot().revision
+      await writeFile(officialBackup, JSON.stringify(backup), { encoding: 'utf8', mode: 0o600 })
+      officialPreview = undefined
+      json(res, 200, { applied: input.selected.length, backupAt: new Date().toISOString(), snapshot: service.snapshot() })
+    } catch (err) { error(res, err) }
+  } }), 'dsh-model-manager: official apply')
+
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/official-restore', handler: async (req, res) => {
+    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
+    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
+    try {
+      const backup = JSON.parse(await readFile(officialBackup, 'utf8')) as { models: unknown[]; config: ManagerConfig; appliedOfficialRevision?: number; appliedPluginRevision?: number; restored?: boolean }
+      const revision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
+      if (revision === undefined) throw new Error('DeepSeek 配置不可用')
+      if (backup.restored || backup.appliedOfficialRevision === undefined || backup.appliedPluginRevision === undefined || revision !== backup.appliedOfficialRevision || service.snapshot().revision !== backup.appliedPluginRevision) throw new Error('SETTINGS_CONFLICT：同步后配置已有变化，请手动核对备份')
+      await ctx.settings.mutate('llm-deepseek', [{ op: 'set', path: ['models'], value: backup.models }], revision)
+      await service.update(backup.config, service.snapshot().revision)
+      await service.refresh()
+      await writeFile(officialBackup, JSON.stringify({ ...backup, restored: true }), { encoding: 'utf8', mode: 0o600 })
+      json(res, 200, { restored: true, snapshot: service.snapshot() })
+    } catch (err) { error(res, err) }
+  } }), 'dsh-model-manager: official restore')
+
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/native', handler: async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
     if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
@@ -352,7 +403,8 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     const abort = new AbortController()
     res.on('close', () => { if (!res.writableEnded) abort.abort() })
     try {
-      const suggestion = await recommendAssignment(ctx.llm, service, abort.signal)
+      const input = await body(req) as { evaluator?: ModelRef }
+      const suggestion = await recommendAuto(ctx.llm, service, input.evaluator, abort.signal)
       json(res, 200, suggestion)
     } catch (err) { if (!res.writableEnded) error(res, err) }
   } }), 'dsh-model-manager: recommend route')

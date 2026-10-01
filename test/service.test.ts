@@ -183,14 +183,14 @@ describe('宿主桥接与版本控制', () => {
       expect((await service.logs(1))[0]?.status).toBe('new')
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
-  it('读取到 v1 配置时自动迁移成 v2', async () => {
+  it('读取到 v1 配置时自动迁移成 v3', async () => {
     const stored = { version: 1, aliases: { fast: [{ providerId: 'p', modelId: 'a' }] }, models: {}, mode: 'manual', manual: {}, auto: { tier: 'balanced' },
       roles: { coding: { target: { providerId: 'p', modelId: 'c' } } }, vision: { enabled: false, policy: 'native-first' }, reliability: { maxAttempts: 2, retryTransient: true, parameterDowngrade: false, longContextCandidates: [{ providerId: 'p', modelId: 'big' }] } }
     const settings = { get: (ns: string) => ns === 'dsh-model-manager' ? stored : undefined, describe: () => [{ ns: 'dsh-model-manager', revision: 4 }] }
     const service = new ModelManagerService({ catalog: async () => [] }, 'unused-migrate-path', settings as never)
     await service.init()
     const config = service.snapshot().config
-    expect(config.version).toBe(2)
+    expect(config.version).toBe(3)
     expect(config.aliases.fast).toEqual({ candidates: [{ providerId: 'p', modelId: 'a' }] })
     expect(config.aliases['long-context']!.candidates).toEqual([{ providerId: 'p', modelId: 'big' }])
     expect(config.auto.main.tier).toBe('balanced')

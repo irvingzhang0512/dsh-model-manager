@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { SettingsPathOp, SettingsProvider } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_CONFIG, mergeSelection, migrateConfig, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
+import type { AutoDecision } from './auto-router.js'
 
 /**
  * 宿主设置服务拒绝过期 revision 时抛出的冲突错误（`SettingsConflictError`，`code` 固定为 `SETTINGS_CONFLICT`）。
@@ -182,6 +183,7 @@ export class ModelManagerService {
   private verification = new Map<string, Verification>()
   private visionCache = new Map<string, { answer: string; at: number }>()
   private overrides = new Map<string, { session?: Selection; nextTurn?: Selection; active?: { turn: number; selection: Selection } }>()
+  private autoDecisions = new Map<string, { turn: number; value: AutoDecision }>()
   private delegatedSessions = new Set<string>()
   constructor(private readonly bridge: ModelBridge, private readonly dataDir: string, private readonly settings?: SettingsProvider) {}
 
@@ -194,7 +196,7 @@ export class ModelManagerService {
       this.config = structuredClone(migrated)
     }
     this.revision = this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.revision ?? 0
-    this.models = await this.bridge.catalog()
+    this.models = this.decorateModels(await this.bridge.catalog())
     const records = await readJsonWithBackup<Verification[]>(join(this.dataDir, 'verification.json'))
     if (Array.isArray(records)) for (const record of records) this.verification.set(this.verificationKey(record.model, record.kind), record)
     const savedOverrides = await readJsonWithBackup<Record<string, { session?: Selection; nextTurn?: Selection }>>(join(this.dataDir, 'overrides.json'))
@@ -209,8 +211,13 @@ export class ModelManagerService {
   }
 
   async refresh(): Promise<ModelRecord[]> {
-    this.models = await this.bridge.catalog()
+    this.models = this.decorateModels(await this.bridge.catalog())
     return structuredClone(this.models)
+  }
+  private decorateModels(models: ModelRecord[]): ModelRecord[] {
+    return models.map(model => ({ ...model,
+      capabilitySource: model.providerId === 'deepseek-official' && this.config.official ? this.config.official.sources.models : 'DSH 已加载模型目录',
+      capabilityCheckedAt: model.providerId === 'deepseek-official' ? this.config.official?.checkedAt : undefined }))
   }
 
   async update(next: ManagerConfig, revision: number): Promise<number> {
@@ -235,7 +242,7 @@ export class ModelManagerService {
 
   /**
    * 宿主默认模型（`agent-default-model` 设置）。选择器里的 AUTO 条目在没有配置
-   * Manual/Auto 目标时回退到它，避免 AUTO 落到「没有任何候选」的失败上。
+   * 旧固定主模型未配置时回退到宿主默认，避免 AUTO 落到「没有任何候选」。
    */
   hostDefault(): ModelRef | undefined {
     const value = this.settings?.get('agent-default-model') as { provider?: unknown; model?: unknown } | undefined
@@ -284,6 +291,9 @@ export class ModelManagerService {
 
   activeSelection(session: string): Selection | undefined { return this.overrides.get(session)?.active?.selection && structuredClone(this.overrides.get(session)!.active!.selection) }
   activeTurn(session: string): number | undefined { return this.overrides.get(session)?.active?.turn }
+  autoDecision(session: string, turn: number): AutoDecision | undefined { const entry = this.autoDecisions.get(session); return entry?.turn === turn ? structuredClone(entry.value) : undefined }
+  saveAutoDecision(session: string, turn: number, value: AutoDecision): void { this.autoDecisions.set(session, { turn, value: structuredClone(value) }) }
+  latestAutoDecision(session: string): AutoDecision | undefined { const entry = this.autoDecisions.get(session); return entry && structuredClone(entry.value) }
   markDelegatedSession(session: string): void { this.delegatedSessions.add(session) }
   isDelegatedSession(session: string): boolean { return this.delegatedSessions.has(session) }
 

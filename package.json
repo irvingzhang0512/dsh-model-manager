@@ -1,7 +1,7 @@
 {
   "name": "dsh-model-manager",
-  "version": "0.2.2",
-  "description": "DSH 模型能力、别名、视觉辅助与子 Agent 管理",
+  "version": "0.3.0",
+  "description": "DSH 模型能力、别名、AUTO 主模型选择与视觉辅助",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",

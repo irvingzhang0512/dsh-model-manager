@@ -113,11 +113,11 @@ describe('宿主装配', () => {
     apply(fake as never)
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(adapters).toEqual([['dsh-model-manager']])
-    expect(toolNames).toContain('model_manager_delegate')
+    expect(toolNames).not.toContain('model_manager_delegate')
     expect(toolNames).toContain('model_manager_inspect_image')
     expect(prompts).toContain('dsh-model-manager')
     expect(routes.map(route => route.path)).toEqual([
-      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/recommend', '/api/model-manager/overrides',
+      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/subagents', '/api/model-manager/official-preview', '/api/model-manager/official-apply', '/api/model-manager/official-restore', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/recommend', '/api/model-manager/overrides',
     ])
     expect(new Set(routes.map(route => route.path)).size).toBe(routes.length)
     for (const dispose of disposers.reverse()) dispose()
@@ -343,55 +343,29 @@ describe('宿主装配', () => {
     expect(Array.isArray(payload.models)).toBe(true)
     expect(Array.isArray(payload.verifications)).toBe(true)
   })
-  it('AI 推荐分工返回经目录校验的草案并忽略目录外模型', async () => {
+  it('AUTO recommendation accepts an independent runner and validates catalog IDs', async () => {
     temporary = await mkdtemp(join(tmpdir(), 'dmm-recommend-'))
     process.env.DSH_HOME = temporary
     const routes: { path: string; handler: Function }[] = []
-    const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'yes' as const, reasoningEfforts: [], source: 'host' as const, loaded: true }
-    let watchCb: ((next: unknown) => void) | undefined
+    const model = { providerId: 'p', modelId: 'm', name: 'm' }
     const fake = {
-      settings: {
-        register: () => ({ watch: (cb: (next: unknown) => void) => { watchCb = cb; return () => {} } }),
-        get: (ns: string) => ns === 'dsh-model-manager' ? structuredClone(DEFAULT_CONFIG) : undefined,
-        describe: () => [{ ns: 'dsh-model-manager', revision: 0 }],
-      },
-      llm: {
-        listProviders: () => [{ id: 'p' }], listConfigurableProviders: () => [], listModels: async () => [{ id: 'm', name: 'm' }],
-        resolveModelInfo: async () => model, registerAdapter: () => () => {},
-        stream: () => (async function* () {
-          yield { type: 'text-delta', text: '前言 {"main":{"target":{"providerId":"p","modelId":"m"},"tier":"auto"},"roles":{"coding":{"target":{"id":"p/ghost"},"tier":"fast"},"vision":{"target":{"id":"p/m"},"tier":"fast"}}} 后记' }
-          yield { type: 'finish', reason: { kind: 'stop' } }
-        })(),
-      },
-      tools: { register: () => () => {} },
-      subagents: {}, attachments: {},
-      systemPrompt: { section: () => () => {} },
-      webServer: { register: (route: { path: string; handler: Function }) => { routes.push(route); return () => {} } },
-      on: () => () => {},
-      effect: (register: () => () => void) => { register() },
-      logger: { error: () => {} },
+      settings: { register: () => ({ watch: () => () => {} }), get: (ns: string) => ns === 'dsh-model-manager' ? structuredClone(DEFAULT_CONFIG) : undefined, describe: () => [{ ns: 'dsh-model-manager', revision: 0 }] },
+      llm: { listProviders: () => [{ id: 'p' }], listConfigurableProviders: () => [], listModels: async () => [{ id: 'm', name: 'm' }], resolveModelInfo: async () => model, registerAdapter: () => () => {}, stream: () => (async function* () { yield { type: 'text-delta', text: '{"simple":{"providerId":"p","modelId":"m"},"normal":{"providerId":"p","modelId":"ghost"},"complex":{"providerId":"p","modelId":"m"}}' }; yield { type: 'finish', reason: { kind: 'stop' } } })() },
+      tools: { register: () => () => {} }, subagents: {}, attachments: {}, systemPrompt: { section: () => () => {} }, webServer: { register: (route: { path: string; handler: Function }) => { routes.push(route); return () => {} } }, on: () => () => {}, effect: (register: () => () => void) => { register() }, logger: { error: () => {} },
     }
     apply(fake as never)
     await new Promise(resolve => setTimeout(resolve, 20))
-    // 主模型未配置且无宿主默认模型时，推荐应给出明确错误
     const recommend = routes.find(route => route.path === '/api/model-manager/recommend')!
     const missing = fakeResponse()
     await recommend.handler(fakeRequest({}), missing.res)
     expect(missing.result.status).toBe(400)
-    expect(JSON.parse(missing.result.body).error).toContain('AUTO 分工')
-    // 配置主模型后推荐可解析，目录外模型被剔除并记录说明
-    const withMain = structuredClone(DEFAULT_CONFIG)
-    withMain.auto.main.target = { providerId: 'p', modelId: 'm' }
-    fake.settings.get = (ns: string) => ns === 'dsh-model-manager' ? structuredClone(withMain) : undefined
-    watchCb?.(withMain)
     const ok = fakeResponse()
-    await recommend.handler(fakeRequest({}), ok.res)
-    const payload = JSON.parse(ok.result.body) as { main?: { target?: { providerId: string; modelId: string } }; roles?: Record<string, { target?: { modelId: string } } | undefined>; notes: string[] }
+    await recommend.handler(fakeRequest({ evaluator: model }), ok.res)
+    const payload = JSON.parse(ok.result.body)
     expect(ok.result.status).toBe(200)
-    expect(payload.main?.target).toEqual({ providerId: 'p', modelId: 'm' })
-    expect(payload.roles?.coding?.target).toBeUndefined()
-    expect(payload.roles?.vision?.target).toEqual({ providerId: 'p', modelId: 'm' })
-    expect(payload.notes.join()).toContain('coding')
+    expect(payload.grades.simple.target).toEqual({ providerId: 'p', modelId: 'm' })
+    expect(payload.grades.normal).toBeUndefined()
+    expect(payload.notes.join()).toContain('normal')
   })
   it('宿主声明写入遇到版本冲突时自动改用最新 revision 重试并成功', async () => {
     temporary = await mkdtemp(join(tmpdir(), 'dmm-native-retry-'))

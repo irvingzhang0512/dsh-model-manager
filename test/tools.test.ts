@@ -78,34 +78,10 @@ describe('视觉工具', () => {
   })
 })
 
-describe('角色委派', () => {
-  it('显式升级使用角色模型档位，且同工作区同时只运行一个编码子任务', async () => {
-    const registered = new Map<string, any>()
-    const config = structuredClone(DEFAULT_CONFIG)
-    config.auto.roles.coding = { target: { providerId: 'p', modelId: 'code' }, tier: 'balanced' }
-    config.models['["p","code"]'] = { tiers: { balanced: 'medium', deep: 'high' } }
-    const model = { providerId: 'p', modelId: 'code', reasoningEfforts: [{ id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }] }
-    let finish!: (value: any) => void
-    const pending = new Promise<any>(resolve => { finish = resolve })
-    const start = vi.fn(async (_provider: string, _options: any) => ({ result: pending, dispose: async () => {} }))
-    const dispose = registerManagerTools({
-      tools: { register: (tool: any) => { registered.set(tool.name, tool); return () => registered.delete(tool.name) } },
-      subagents: { list: () => ['native'], getProvider: () => ({ capabilities: { agentOptions: true, toolFilter: true } }), start },
-      llm: {}, attachments: {},
-      service: { snapshot: () => ({ config }), model: () => model, log: async () => {} }, vision: new VisionRegistry(),
-    } as never)
-    const tool = registered.get('model_manager_delegate')
-    const args = { role: 'coding', task: '修复缺陷', expected_result: '说明结果', upgrade_tier: 'deep' }
-    const exec = { agent: { session: { id: 'parent', header: { cwd: 'F:/workspace' } } }, signal: new AbortController().signal }
-    const first = tool.execute(args, exec)
-    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1))
-    expect(start.mock.calls[0][1].agentOptions).toMatchObject({ provider: 'dsh-model-manager', reasoningEffort: 'high' })
-    await expect(tool.execute(args, exec)).rejects.toThrow('并行子任务已达上限')
-    const otherWorkspace = tool.execute(args, { ...exec, agent: { session: { id: 'other', header: { cwd: 'F:/other-workspace' } } } })
-    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2))
-    finish({ stopReason: 'completed', output: [{ type: 'text', text: '已修复' }] })
-    await expect(first).resolves.toBe('已修复')
-    await expect(otherWorkspace).resolves.toBe('已修复')
-    dispose()
+describe('native subagent boundary', () => {
+  it('registers only the image inspection tool', () => {
+    const registered: string[] = []
+    registerManagerTools({ tools: { register: (tool: { name: string }) => { registered.push(tool.name); return () => {} } }, llm: {}, attachments: {}, service: {}, vision: new VisionRegistry() } as never)
+    expect(registered).toEqual(['model_manager_inspect_image'])
   })
 })

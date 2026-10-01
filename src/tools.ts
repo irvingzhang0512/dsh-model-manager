@@ -3,15 +3,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import sharp from 'sharp'
 import type { GenerateOptions, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { managedId, modelKey, resolveSelection, type Role } from './domain.js'
-import { genericProviderAdapter } from './provider-adapter.js'
+import { modelKey, resolveSelection } from './domain.js'
 import type { ModelManagerService } from './service.js'
 import type { VisionRegistry } from './adapter.js'
-import { MANAGED_PROVIDER } from './adapter.js'
-
-const roles: Role[] = ['search', 'coding', 'review', 'strong', 'vision']
 
 async function cropImage(data: Uint8Array, region: string): Promise<Buffer> {
   const parts = region.split(',').map(value => Number(value.trim()))
@@ -28,62 +23,8 @@ async function cropImage(data: Uint8Array, region: string): Promise<Buffer> {
   return sharp(source).extract({ left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) }).png().toBuffer()
 }
 
-export function registerManagerTools(deps: { tools: ToolRuntime; subagents: SubagentRuntime; llm: LlmRuntime; attachments: AttachmentStore; service: ModelManagerService; vision: VisionRegistry }): () => void {
+export function registerManagerTools(deps: { tools: ToolRuntime; llm: LlmRuntime; attachments: AttachmentStore; service: ModelManagerService; vision: VisionRegistry }): () => void {
   const disposers: (() => void)[] = []
-  let running = 0
-  const codingByWorkspace = new Map<string, number>()
-
-  disposers.push(deps.tools.register(defineTool({
-    name: 'model_manager_delegate',
-    description: '按已配置的角色委派独立任务。Search 搜索，Coding 实现，Review 审查，Strong 深度分析，Vision 图像理解。仅在角色已绑定模型时可用。',
-    parameters: {
-      role: { type: 'string', required: true, enum: roles },
-      task: { type: 'string', required: true },
-      expected_result: { type: 'string', required: true },
-      upgrade_tier: { type: 'string', enum: ['fast', 'balanced', 'deep', 'max'] },
-    },
-    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    execute: async (args, exec) => {
-      if (!exec.agent) throw new Error('缺少父 Agent')
-      const config = deps.service.snapshot().config
-      const role = args.role as Role
-      const roleConfig = config.auto.roles[role]
-      if (!roleConfig) throw new Error(`角色 ${role} 不存在`)
-      if (!roleConfig.target) throw new Error(`角色 ${role} 未绑定模型：到「模型管理 → AUTO 分工」的角色卡里绑定`)
-      let model: ReturnType<typeof resolveSelection>[number]
-      try { model = resolveSelection(config, roleConfig.target)[0] } catch (error) { throw new Error(`角色 ${role} 绑定的目标不可用：${error instanceof Error ? error.message : String(error)}`) }
-      if (!model || !deps.service.model(model)) throw new Error(`角色 ${role} 未绑定有效模型`)
-      const workspace = exec.agent.session.header.cwd?.toLowerCase() ?? `session:${exec.agent.session.id}`
-      if (running >= 3 || (role === 'coding' && (codingByWorkspace.get(workspace) ?? 0) >= 1)) throw new Error('并行子任务已达上限')
-      const provider = deps.subagents.list().find(name => deps.subagents.getProvider(name)?.capabilities.agentOptions && deps.subagents.getProvider(name)?.capabilities.toolFilter)
-      if (!provider) throw new Error('当前宿主未提供支持模型选项和工具限制的子 Agent Provider')
-      running++
-      if (role === 'coding') codingByWorkspace.set(workspace, (codingByWorkspace.get(workspace) ?? 0) + 1)
-      try {
-        const record = deps.service.model(model)!
-        const effort = genericProviderAdapter.reasoningEffort(record, config.models[modelKey(model)], { ...roleConfig, tier: args.upgrade_tier as typeof roleConfig.tier ?? roleConfig.tier })
-        const run = await deps.subagents.start(provider, {
-          parent: exec.agent, signal: exec.signal, label: `${role}: ${args.task.slice(0, 40)}`,
-          prompt: [{ type: 'text', text: `职责：${role}\n任务：${args.task}\n结果要求：${args.expected_result}` }],
-          agentOptions: { provider: MANAGED_PROVIDER, model: managedId(model), ...(effort ? { reasoningEffort: effort as never } : {}) },
-          toolFilter: { deny: ['model_manager_delegate'] },
-        })
-        try {
-          const result = await run.result
-          await deps.service.log({ action: 'delegate', role, provider: model.providerId, model: model.modelId, status: result.stopReason, session: exec.agent.session.id })
-          const output = result.output.filter(b => b.type === 'text').map(b => b.text).join('\n')
-          return result.stopReason === 'completed' ? output || '子任务已完成，但没有文字结果。' : `子任务${result.stopReason}：${result.diagnostic ?? output}`
-        } finally { await run.dispose() }
-      } finally {
-        running--
-        if (role === 'coding') {
-          const remaining = (codingByWorkspace.get(workspace) ?? 1) - 1
-          if (remaining) codingByWorkspace.set(workspace, remaining)
-          else codingByWorkspace.delete(workspace)
-        }
-      }
-    },
-  })))
 
   disposers.push(deps.tools.register(defineTool({
     name: 'model_manager_inspect_image',

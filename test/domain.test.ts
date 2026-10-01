@@ -21,20 +21,20 @@ describe('模型配置', () => {
   })
   it('档位显式映射优先，未配置时按模型公开档位自动推断', () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const as const, reasoningEfforts: [{ id: 'medium', name: 'Medium' }], source: 'host' as const, loaded: true }
-    expect(mapEffort(model, { tiers: { balanced: 'medium' } }, 'balanced')).toBe('medium')
+    expect(mapEffort(model, { legacyTiers: { balanced: 'medium' } }, 'balanced')).toBe('medium')
     expect(mapEffort(model, undefined, 'balanced')).toBe('medium')
-    expect(inferTierMapping(model)).toMatchObject({ fast: 'medium', balanced: 'medium', deep: 'medium', max: 'medium' })
+    expect(inferTierMapping(model)).toEqual({ low: 'medium', high: 'medium', max: 'medium' })
     const empty = { ...model, reasoningEfforts: [] }
     expect(() => mapEffort(empty, undefined, 'balanced')).toThrow('未配置')
   })
-  it('推断按已知强度排序：fast 最弱、max 最强、deep 次强', () => {
+  it('按模型实际档位推断 low/high/max', () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const as const, reasoningEfforts: [{ id: 'high', name: 'High' }, { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'max', name: 'Max' }], source: 'host' as const, loaded: true }
-    expect(inferTierMapping(model)).toEqual({ fast: 'low', balanced: 'medium', deep: 'high', max: 'max' })
+    expect(inferTierMapping(model)).toEqual({ low: 'low', high: 'high', max: 'max' })
   })
-  it('关闭思考必须有实际 off 档位且不能和 Deep 同时使用', () => {
+  it('关闭思考必须有实际 off 档位', () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm', nativeImage: 'unknown' as const as const, reasoningEfforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], source: 'host' as const, loaded: true }
-    expect(mapSelectionEffort(model, { tiers: { deep: 'high' } }, { thinking: 'off', tier: 'auto' })).toBe('off')
-    expect(() => mapSelectionEffort(model, { tiers: { deep: 'high' } }, { thinking: 'off', tier: 'deep' })).toThrow()
+    expect(mapSelectionEffort(model, {}, { thinking: 'off', tier: 'auto' })).toBe('off')
+    expect(() => mapSelectionEffort({ ...model, reasoningEfforts: [{ id: 'high', name: 'High' }] }, {}, { reasoningEffort: 'off' })).toThrow()
     expect(mergeSelection({ tier: 'deep' }, { tier: 'inherit' }).tier).toBe('deep')
   })
   it('视觉四策略保留未知与否的区别', () => {
@@ -51,8 +51,8 @@ describe('模型配置', () => {
   })
 })
 
-describe('v1 配置迁移', () => {
-  it('v1 别名数组、长上下文候选与角色设置迁移成 v2，mode/manual 丢弃', () => {
+describe('v3 配置迁移', () => {
+  it('v1 别名、长上下文候选与角色偏好迁移成 v3，旧主模型保留', () => {
     const v1 = {
       version: 1,
       aliases: { fast: [{ providerId: 'p', modelId: 'a' }] },
@@ -64,19 +64,25 @@ describe('v1 配置迁移', () => {
       vision: { enabled: true, policy: 'native-first' as const },
       reliability: { maxAttempts: 2, retryTransient: false, parameterDowngrade: true, longContextCandidates: [{ providerId: 'p', modelId: 'big' }] },
     }
-    const v2 = migrateConfig(v1)
-    expect(v2.version).toBe(2)
-    expect(v2.aliases.fast).toEqual({ candidates: [{ providerId: 'p', modelId: 'a' }] })
-    expect(v2.aliases[LONG_CONTEXT_ALIAS]).toEqual({ candidates: [{ providerId: 'p', modelId: 'big' }] })
-    expect(v2.auto.main).toEqual({ target: { providerId: 'p', modelId: 'a' }, tier: 'balanced' })
-    expect(v2.auto.roles.coding).toEqual({ target: { providerId: 'p', modelId: 'c' } })
-    expect(v2.reliability).toEqual({ maxAttempts: 2, retryTransient: false, parameterDowngrade: true })
-    expect(() => validateConfig(v2)).not.toThrow()
-    expect((v2.auto.roles as Record<string, unknown>).main).toBeUndefined()
+    const v3 = migrateConfig(v1)
+    expect(v3.version).toBe(3)
+    expect(v3.aliases.fast).toEqual({ candidates: [{ providerId: 'p', modelId: 'a' }] })
+    expect(v3.aliases[LONG_CONTEXT_ALIAS]).toEqual({ candidates: [{ providerId: 'p', modelId: 'big' }] })
+    expect(v3.auto.main).toEqual({ target: { providerId: 'p', modelId: 'a' }, tier: 'balanced' })
+    expect(v3.auto.normal.target).toEqual(v3.auto.main.target)
+    expect(v3.auto.preferences.coding.target).toEqual({ providerId: 'p', modelId: 'c' })
+    expect(v3.reliability).toEqual({ maxAttempts: 2, retryTransient: false, parameterDowngrade: true })
+    expect(() => validateConfig(v3)).not.toThrow()
+    expect(migrateConfig(v3)).toEqual(v3)
   })
-  it('v2 配置原样通过，未知版本拒绝', () => {
-    expect(migrateConfig(structuredClone(DEFAULT_CONFIG)).version).toBe(2)
-    expect(() => migrateConfig({ version: 3 })).toThrow('不支持的配置版本')
+  it('v2 旧档位映射逐模型保留且重复迁移不丢失', () => {
+    const old = { version: 2, aliases: {}, models: { '["p","m"]': { tiers: { fast: 'low', balanced: 'medium', deep: 'high', max: 'max' } } }, auto: { main: { target: { providerId: 'p', modelId: 'm' }, tier: 'deep' }, roles: {} } }
+    const next = migrateConfig(old)
+    expect(next.models['["p","m"]'].legacyTiers).toEqual({ fast: 'low', balanced: 'medium', deep: 'high' })
+    expect(next.auto.main.tier).toBe('deep')
+    expect(migrateConfig(next)).toEqual(next)
+    expect(migrateConfig(structuredClone(DEFAULT_CONFIG)).version).toBe(3)
+    expect(() => migrateConfig({ version: 4 })).toThrow('不支持的配置版本')
   })
 })
 
