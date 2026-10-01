@@ -20,7 +20,8 @@ export function candidateForGrade(config: ManagerConfig, models: ModelRecord[], 
       if (hasImage && !config.vision.enabled && (config.models[modelKey(ref)]?.capability?.image ?? model.nativeImage) !== 'yes') return false
       const toolEvidence = options.tools?.length ? verification?.(ref) : undefined
       if (toolEvidence && !toolEvidence.stale && toolEvidence.status === 'rejected') return false
-      if (model.contextWindow && textLength + (selection.maxOutputTokens ?? model.defaultMaxTokens ?? 1024) > model.contextWindow) return false
+      const contextWindow = config.models[modelKey(ref)]?.capability?.contextWindow ?? model.contextWindow
+      if (contextWindow && textLength + (selection.maxOutputTokens ?? options.maxTokens ?? model.defaultMaxTokens ?? 1024) > contextWindow) return false
       if (selection.reasoningEffort && !model.reasoningEfforts.some(e => e.id === selection.reasoningEffort)) return false
       return true
     })
@@ -34,7 +35,8 @@ export async function evaluateTask(llm: LlmRuntime, config: ManagerConfig, optio
   const evaluator = config.auto.evaluator
   if (!evaluator) throw new Error('AUTO 尚未配置评估模型')
   const latest = [...options.messages].reverse().find(message => message.role === 'user')
-  const latestText = latest?.content.filter(block => block.type === 'text').map(block => block.text).join('\n').slice(0, 5000) ?? ''
+  const currentText = latest?.content.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
+  const latestText = currentText.length <= 5000 ? currentText : `${currentText.slice(0, 2500)}\n[中间内容已省略]\n${currentText.slice(-2500)}`
   const recent = options.messages.filter(message => message.role === 'user' || message.role === 'assistant').slice(-8)
     .map(message => `${message.role}: ${message.content.filter(block => block.type === 'text').map(block => block.text).join(' ').slice(0, 1200)}`).join('\n').slice(-7000)
   const imageUnknown = latest?.content.some(block => block.type === 'image') ?? false

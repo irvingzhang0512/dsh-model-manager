@@ -37,4 +37,11 @@ describe('AUTO 任务选择', () => {
     expect(candidateForGrade(config, [makeModel('short'), makeModel('text')], 'simple', options, ref => ref.modelId === 'short' ? evidence : undefined)?.grade).toBe('normal')
     expect(candidateForGrade(config, [makeModel('short'), makeModel('text')], 'simple', options, ref => ref.modelId === 'short' ? { ...evidence, stale: true } : undefined)?.grade).toBe('simple')
   })
+  it('上下文判断使用用户覆盖和本轮输出上限', () => {
+    const config = structuredClone(DEFAULT_CONFIG)
+    config.auto.simple.target = { providerId: 'p', modelId: 'short' }
+    config.auto.normal.target = { providerId: 'p', modelId: 'text' }
+    config.models['["p","short"]'] = { capability: { contextWindow: 1500 } }
+    expect(candidateForGrade(config, [makeModel('short'), makeModel('text')], 'simple', { messages: [message('x'.repeat(900))], maxTokens: 800 } as never)?.grade).toBe('normal')
+  })
 })
