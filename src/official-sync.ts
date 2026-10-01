@@ -56,10 +56,20 @@ export function officialDiffs(catalog: ModelRecord[], models: OfficialModel[], s
 
 export async function fetchOfficial(urls: SourceUrls, signal?: AbortSignal): Promise<{ pages: Record<keyof SourceUrls, string>; fetchedAt: string }> {
   const entries = await Promise.all(Object.entries(urls).map(async ([key, url]) => {
-    const parsed = new URL(url)
-    if (parsed.protocol !== 'https:' || parsed.hostname !== 'api-docs.deepseek.com') throw new Error('资料来源仅支持 DeepSeek 官方文档域名')
-    const response = await fetch(parsed, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000), redirect: 'follow' })
-    if (new URL(response.url).hostname !== 'api-docs.deepseek.com') throw new Error(`${key} 页面跳转到了非官方域名`)
+    let parsed = new URL(url)
+    const official = (target: URL) => target.protocol === 'https:' && target.hostname === 'api-docs.deepseek.com'
+    if (!official(parsed)) throw new Error('资料来源仅支持 DeepSeek 官方文档域名')
+    let response: Response | undefined
+    for (let redirects = 0; redirects <= 3; redirects++) {
+      response = await fetch(parsed, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000), redirect: 'manual' })
+      if (![301, 302, 303, 307, 308].includes(response.status)) break
+      const location = response.headers.get('location')
+      if (!location) throw new Error(`${key} 页面跳转缺少地址`)
+      parsed = new URL(location, parsed)
+      if (!official(parsed)) throw new Error(`${key} 页面跳转到了非官方域名`)
+      if (redirects === 3) throw new Error(`${key} 页面跳转次数过多`)
+    }
+    if (!response) throw new Error(`${key} 页面抓取失败`)
     if (!response.ok) throw new Error(`抓取 ${key} 失败：HTTP ${response.status}`)
     const text = await response.text()
     if (text.length > 2_000_000) throw new Error(`${key} 页面过大`)

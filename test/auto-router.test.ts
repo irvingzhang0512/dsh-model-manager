@@ -28,4 +28,13 @@ describe('AUTO 任务选择', () => {
     expect(candidateForGrade(config, models, 'simple', { messages: [message('x'.repeat(100), true)] } as never)).toMatchObject({ grade: 'complex', fallback: true })
     expect(candidateForGrade(config, models.slice(0, 2), 'simple', { messages: [message('图片', true)] } as never)).toBeUndefined()
   })
+  it('工具验证明确拒绝时跳过候选，过期证据不阻止选择', () => {
+    const config = structuredClone(DEFAULT_CONFIG)
+    config.auto.simple.target = { providerId: 'p', modelId: 'short' }
+    config.auto.normal.target = { providerId: 'p', modelId: 'text' }
+    const options = { messages: [message('调用工具')], tools: [{ name: 'test' }] } as never
+    const evidence = { status: 'rejected', stale: false } as never
+    expect(candidateForGrade(config, [makeModel('short'), makeModel('text')], 'simple', options, ref => ref.modelId === 'short' ? evidence : undefined)?.grade).toBe('normal')
+    expect(candidateForGrade(config, [makeModel('short'), makeModel('text')], 'simple', options, ref => ref.modelId === 'short' ? { ...evidence, stale: true } : undefined)?.grade).toBe('simple')
+  })
 })

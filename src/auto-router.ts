@@ -5,7 +5,7 @@ import { modelKey, resolveSelection, type ManagerConfig, type ModelRecord, type 
 export interface AutoDecision { grade: TaskGrade; reason: string; selection: Selection; candidates: ModelRef[]; fallback: boolean }
 const grades: TaskGrade[] = ['simple', 'normal', 'complex']
 
-export function candidateForGrade(config: ManagerConfig, models: ModelRecord[], grade: TaskGrade, options: GenerateOptions, verification?: (ref: ModelRef) => Verification | undefined): AutoDecision | undefined {
+export function candidateForGrade(config: ManagerConfig, models: ModelRecord[], grade: TaskGrade, options: GenerateOptions, verification?: (ref: ModelRef) => (Verification & { stale?: boolean }) | undefined): AutoDecision | undefined {
   const flatten = (blocks: GenerateOptions['messages'][number]['content']): typeof blocks => blocks.flatMap(block => block.type === 'tool-result' ? [block, ...flatten(block.content)] : [block])
   const content = options.messages.flatMap(message => flatten(message.content))
   const hasImage = content.some(block => block.type === 'image')
@@ -18,7 +18,8 @@ export function candidateForGrade(config: ManagerConfig, models: ModelRecord[], 
       const model = models.find(item => modelKey(item) === modelKey(ref))
       if (!model) return false
       if (hasImage && !config.vision.enabled && (config.models[modelKey(ref)]?.capability?.image ?? model.nativeImage) !== 'yes') return false
-      if (options.tools?.length && verification?.(ref)?.status === 'rejected') return false
+      const toolEvidence = options.tools?.length ? verification?.(ref) : undefined
+      if (toolEvidence && !toolEvidence.stale && toolEvidence.status === 'rejected') return false
       if (model.contextWindow && textLength + (selection.maxOutputTokens ?? model.defaultMaxTokens ?? 1024) > model.contextWindow) return false
       if (selection.reasoningEffort && !model.reasoningEfforts.some(e => e.id === selection.reasoningEffort)) return false
       return true

@@ -52,7 +52,7 @@ describe('官方同步宿主接口', () => {
     expect((await call('official-apply', { token: preview.json.token, selected: ['deepseek-flash:addModel'] })).status).toBe(409)
     const fresh = await call('official-preview', {})
     const applied = await call('official-apply', { token: fresh.json.token, selected: ['deepseek-flash:addModel', 'deepseek-v4-flash:id'] })
-    expect(applied.status).toBe(200)
+    expect(applied.status, JSON.stringify(applied.json)).toBe(200)
     expect(models.some(model => model.id === 'deepseek-flash')).toBe(true)
     expect((await call('official-apply', { token: fresh.json.token, selected: ['deepseek-flash:addModel'] })).status).toBe(400)
     expect((await call('official-restore', {})).status).toBe(200)
