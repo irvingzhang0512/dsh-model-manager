@@ -14,6 +14,25 @@ function llm(outputs: unknown[]) {
 function state(ids: string[]): OfficialState { return { models: ids.map(id => ({ id })), config: structuredClone(DEFAULT_CONFIG), overrides: {} } }
 
 describe('最新网页和 LLM 分析', () => {
+  it.each(['complete', 'conflicts', 'notes', 'requestedUrls', 'models', 'replacements'])('格式不合格指出 %s，拒绝结果且不自动重试', async field => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    const value: Record<string, unknown> = { ...analysis(['one']) }
+    delete value[field]
+    const { llm: runtime, stream } = llm([value])
+    await expect(analyzeOfficial(runtime, runner, source, new AbortController().signal)).rejects.toThrow(`分析结果格式无效：${field}`)
+    expect(stream).toHaveBeenCalledOnce()
+  })
+  it.each([null, [], 'model one'])('顶层 %j 不是对象时不误认清单', value => {
+    expect(() => validateOfficialAnalysis(value, [extractOfficialPage(html(['one']), source)])).toThrow('顶层必须是 JSON 对象')
+  })
+  it('缺少名称证据指出属性位置，不自动丢属性放行结果', () => {
+    const value = analysis(['one']); value.models[0].name = 'Display One'
+    expect(() => validateOfficialAnalysis(value, [extractOfficialPage(html(['one']), source)])).toThrow('models[0].propertyEvidence.name 缺少原文证据')
+  })
+  it.each(['conflicts', 'notes', 'requestedUrls', 'models', 'replacements'])('数组 %s 为 null 或字符串时不隐式补空', field => {
+    const pages = [extractOfficialPage(html(['one']), source)]
+    for (const invalid of [null, '[]']) expect(() => validateOfficialAnalysis({ ...analysis(['one']), [field]: invalid }, pages)).toThrow(`分析结果格式无效：${field}`)
+  })
   it('适配器忽略取消且 next／return 都挂起时，60 秒仍及时结束', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))

@@ -50,6 +50,7 @@ async function fixture(explicit = true) {
       const page = JSON.parse(options.messages[1].content[0].text).pages[0]
       const value = analysis(['fast', 'pro'], ['old-fast'], page)
       if (outputMode === 'invalid') value.models[0].evidence[0].quote = 'invented quote'
+      if (outputMode === 'missing-notes') delete (value as Partial<typeof value>).notes
       if (outputMode === 'paused') await new Promise<void>((resolve, reject) => { options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }); setTimeout(resolve, 25) })
       yield { type: 'text-delta', text: JSON.stringify(value) }; yield { type: 'finish', reason: { kind: 'stop' } }
     }),
@@ -71,6 +72,17 @@ async function fixture(explicit = true) {
 }
 
 describe('官方同步宿主完整写集', () => {
+  it('缺少必填字段的格式错误经 SSE 明确反馈，不提供结果或写配置', async () => {
+    const f = await fixture(), original = structuredClone(f.raw), revisions = structuredClone(f.rev)
+    f.mode('missing-notes')
+    const request = f.prepare('official-preview', { sourceUrl: source }, { accept: 'text/event-stream' })
+    await request.run()
+    expect(request.res.body).toContain('event: error'); expect(request.res.body).toContain('notes 必须是字符串数组')
+    expect(request.res.body).not.toContain('event: result'); expect(request.res.writableEnded).toBe(true)
+    expect(f.raw).toEqual(original); expect(f.rev).toEqual(revisions)
+    await expect(readFile(f.backupPath())).rejects.toMatchObject({ code: 'ENOENT' })
+    f.disposed.forEach(dispose => dispose())
+  })
   it('挂起适配器的超时结束 SSE，不写配置且新刷新作废旧预览', async () => {
     const f = await fixture(), original = structuredClone(f.raw), revisions = structuredClone(f.rev)
     const previous = await f.call('official-preview', { sourceUrl: source })
