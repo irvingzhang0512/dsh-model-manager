@@ -1,4 +1,5 @@
 import type { ModelRef } from './domain.js'
+import type { CatalogPreview } from './catalog-types.js'
 export const DEFAULT_OFFICIAL_URL = 'https://api-docs.deepseek.com/zh-cn/'
 export const OFFICIAL_PROVIDER = 'deepseek-official'
 export const DEFAULT_ANALYSIS_TIMEOUT_SECONDS = 180
@@ -29,6 +30,7 @@ export interface OfficialDiff {
   references: string[]; blockedReasons: string[]
 }
 export interface OfficialPreview {
+  catalog?: CatalogPreview
   token: string; sourceUrl: string; analyzer: ModelRef; reasoningEffort?: string; analysisTimeoutSeconds: number; fetchedAt: string
   pages: { url: string; fetchedAt: string }[]; analysis: OfficialAnalysis; diffs: OfficialDiff[]; notes: string[]
   revisions: Record<string, number | null>; overridesFingerprint: string; localModelIds: string[]

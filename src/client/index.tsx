@@ -3,10 +3,12 @@ import { AutoTab, SubagentsTab } from './auto-tabs.js'
 import { DEFAULT_OFFICIAL_URL, DEFAULT_ANALYSIS_TIMEOUT_SECONDS, officialAnalysisTimeout, predictedModelCount, type OfficialPreview, type OfficialProgress } from '../official-types.js'
 import { readOfficialStream } from './official-stream.js'
 import { OfficialProgressStatus } from './official-progress.js'
+import { CatalogManager, CatalogPreviewPanel, catalogRequest, type CatalogEditor } from './catalog-panel.js'
+import type { CatalogCapability, CatalogResolution } from '../catalog-types.js'
 import type { AliasReliability, ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
 
 export const inject = ['slots']
-type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
+type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities?: CatalogCapability[]; catalogBackupId?: string; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
 type Tab = '模型' | '别名与兜底' | 'AUTO 自动选模型' | '子 Agent' | '视觉' | '日志'
 const tabs: Tab[] = ['模型', '别名与兜底', 'AUTO 自动选模型', '子 Agent', '视觉', '日志']
 const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明' }
@@ -256,6 +258,7 @@ function AliasCard({ name, draft, models, edit, notify, removeAlias }: {
 }
 
 function ManagerSection() {
+  const [catalogEditor, setCatalogEditor] = useState<CatalogEditor | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [draft, setDraft] = useState<ManagerConfig | null>(null)
   const [tab, setTab] = useState<Tab>('模型')
@@ -264,6 +267,7 @@ function ManagerSection() {
   const [refreshing, setRefreshing] = useState(false)
   const [probing, setProbing] = useState('')
   const [preview, setPreview] = useState<ProbeDialog | null>(null)
+  const [officialError, setOfficialError] = useState('')
   const [official, setOfficial] = useState<OfficialPreview | null>(null)
   const [officialChecked, setOfficialChecked] = useState<string[]>([])
   const [officialProgress, setOfficialProgress] = useState<OfficialProgress | null>(null)
@@ -287,7 +291,7 @@ function ManagerSection() {
   const timers = useRef<number[]>([])
   useEffect(() => () => { timers.current.forEach(id => window.clearTimeout(id)); officialAbort.current?.abort() }, [])
   const effectiveAnalyzer = officialAnalyzer ?? snapshot?.hostDefault
-  useEffect(() => { setOfficial(null); setOfficialChecked([]) }, [officialSource, effectiveAnalyzer?.providerId, effectiveAnalyzer?.modelId, officialEffort, officialTimeout])
+  useEffect(() => { setOfficial(null); setOfficialChecked([]); setOfficialError('') }, [officialSource, effectiveAnalyzer?.providerId, effectiveAnalyzer?.modelId, officialEffort, officialTimeout])
   useEffect(() => { setOfficialEffort(undefined) }, [effectiveAnalyzer?.providerId, effectiveAnalyzer?.modelId])
   const dismiss = useCallback((id: number) => setNotices(list => list.filter(item => item.id !== id)), [])
   const notify = useCallback((kind: Notice['kind'], text: string) => {
@@ -368,6 +372,7 @@ function ManagerSection() {
     return result
   }
   const refreshOfficial = async () => {
+    setCatalogEditor(null); setOfficialError('')
     officialAbort.current?.abort()
     const controller = new AbortController(); officialAbort.current = controller
     setOfficial(null); setOfficialChecked([]); setOfficialProgress({ stage: 'reading', round: 1, pageCount: 0 })
@@ -379,7 +384,7 @@ function ManagerSection() {
       if (controller.signal.aborted || officialAbort.current !== controller) return
       setOfficial(result); setOfficialChecked(result.diffs.filter(item => item.field !== 'removeModel' && !item.blockedReasons.length).map(item => item.id))
       notify('info', `识别出 ${result.analysis.models.length} 个当前 API 模型、${result.diffs.length} 项差异，请核对原文证据。`)
-    } catch (error) { if (officialAbort.current === controller) notify(controller.signal.aborted ? 'info' : 'error', controller.signal.aborted ? '分析已取消，配置未修改。' : String(error)) }
+    } catch (error) { if (officialAbort.current === controller) { const reason = controller.signal.aborted ? '分析已取消，配置未修改。' : String(error); setOfficialError(reason); notify(controller.signal.aborted ? 'info' : 'error', reason) } }
     finally { if (officialAbort.current === controller) { officialAbort.current = null; setOfficialProgress(null); setBusy(false) } }
   }
   const applyOfficial = async () => {
@@ -387,6 +392,15 @@ function ManagerSection() {
     setBusy(true)
     try { await request('/official-apply', { method: 'POST', body: JSON.stringify({ token: official.token, selected: officialChecked }) }); setOfficial(null); await refreshDirectory(true); await load(); notify('success', '已应用选中的官方资料，可使用“恢复上次同步”撤回。') }
     catch (error) { notify('error', String(error)) }
+    finally { setBusy(false) }
+  }
+  const resolveOfficial = async (selected: string[], resolutions: CatalogResolution[]) => {
+    if (!official || busy) return
+    setBusy(true)
+    try {
+      const next = await catalogRequest('catalog-resolve', { token: official.token, selected, resolutions }) as OfficialPreview
+      setOfficial(next); setOfficialChecked(next.catalog?.selected ?? selected)
+    } catch (error) { notify('error', String(error)) }
     finally { setBusy(false) }
   }
   const probeOne = async (model: ModelRecord) => {
@@ -474,23 +488,28 @@ function ManagerSection() {
           {officialProgress && <button onClick={() => { officialAbort.current?.abort(); setOfficial(null); setOfficialChecked([]) }}>取消分析</button>}
           <button disabled={busy || dirty} onClick={() => { setBusy(true); void request('/official-restore', { method: 'POST', body: '{}' }).then(async () => { await load(); notify('success', '已恢复上次同步前的配置。') }).catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>恢复上次同步</button></div>
         <OfficialProgressStatus progress={officialProgress} />
+        {officialError && <p className="dmm-error" role="alert">{officialError}</p>}
         {dirty && <p className="dmm-note">有未保存的插件草稿。应用或恢复前，请先保存或重新加载放弃草稿，再刷新预览。</p>}
         {official && <>
-          <p>官方当前 <strong>{official.analysis.models.length}</strong> 个模型 · 本地 {official.localModelIds.length} 个 · 选中操作后预计 {predictedModelCount(official, officialChecked)} 个 · 差异 {official.diffs.length} 项</p>
+          <p>官方当前 <strong>{official.analysis.models.length}</strong> 个模型 · 本地 {official.localModelIds.length} 个 · 选中操作后预计 {official.catalog?.counts.find(c => c.providerId === 'deepseek-official')?.after ?? predictedModelCount(official, officialChecked)} 个 · 差异 {official.diffs.length} 项</p>
           <p className="dmm-muted">抓取时间：{official.fetchedAt}；分析模型：{official.analyzer.providerId}/{official.analyzer.modelId}；推理档位：{official.reasoningEffort ?? '模型默认'}；每轮分析时限：{official.analysisTimeoutSeconds} 秒。完整性由 LLM 判断，请核对原文；不代表当前账号调用验证。</p>
           {official.analysis.models.map(model => <div key={model.id}><strong>{model.id}</strong>{model.name ? ` · ${model.name}` : ''}{model.evidence.map((item, index) => <p className="dmm-muted" key={index}><a href={item.source} target="_blank" rel="noreferrer">依据网页</a>：{item.quote}</p>)}</div>)}
           <details><summary>实际读取页面与完整性依据</summary>{official.pages.map(page => <p key={page.url}><a href={page.url} target="_blank" rel="noreferrer">{page.url}</a> · {page.fetchedAt}</p>)}{official.analysis.completenessEvidence.map((item, index) => <p key={index}>{item.quote}</p>)}{official.notes.map((note, index) => <p key={`note-${index}`}>{note}</p>)}</details>
-          {official.diffs.map(diff => <div className="dmm-card" key={diff.id}><label><input type="checkbox" disabled={!!diff.blockedReasons.length || busy} checked={officialChecked.includes(diff.id)} onChange={event => setOfficialChecked(current => event.target.checked ? [...current, diff.id] : current.filter(id => id !== diff.id))} />{{ name: '名称更新', inputModalities: '图片能力更新', contextWindow: '上下文更新', addModel: '新增模型', migrateModel: '合并迁移', removeModel: '移除旧模型' }[diff.field]}：<strong>{diff.modelId}</strong></label>
+          {official.catalog && <CatalogPreviewPanel view={official.catalog} selected={officialChecked} busy={busy} onResolve={(selected, resolutions) => { void resolveOfficial(selected, resolutions) }} />}
+          {official.diffs.map(diff => <div className="dmm-card" key={diff.id}><label>{!official.catalog && <input type="checkbox" disabled={!!diff.blockedReasons.length || busy} checked={officialChecked.includes(diff.id)} onChange={event => setOfficialChecked(current => event.target.checked ? [...current, diff.id] : current.filter(id => id !== diff.id))} />}{{ name: '名称更新', inputModalities: '图片能力更新', contextWindow: '上下文更新', addModel: '新增模型', migrateModel: '合并迁移', removeModel: '移除旧模型' }[diff.field]}：<strong>{diff.modelId}</strong>（原文证据）</label>
             <p className="dmm-muted">{diff.reason}</p>
             {diff.field === 'migrateModel' ? <p>{(diff.before as string[]).join('、')} → {diff.modelId}（创建／合并目标、迁移引用、移除旧入口）</p> : diff.field !== 'addModel' && diff.field !== 'removeModel' ? <p>{JSON.stringify(diff.before)} → {JSON.stringify(diff.after)}</p> : null}
             {diff.references.length > 0 && <details><summary>涉及 {diff.references.length} 处引用</summary>{diff.references.map(path => <p key={path}>{path}</p>)}</details>}
-            {diff.blockedReasons.map(reason => <p className="dmm-error" key={reason}>{reason}；请调整后重新预览。</p>)}
+            {!official.catalog && diff.blockedReasons.map(reason => <p className="dmm-error" key={reason}>{reason}；请调整后重新预览。</p>)}
             {diff.evidence.map((item, index) => <p className="dmm-muted" key={index}><a href={item.source} target="_blank" rel="noreferrer">依据网页</a>：{item.quote}</p>)}
           </div>)}
           {!official.diffs.length && <p className="dmm-muted">当前官方模型清单及有证据的声明已一致。</p>}
           <button className="dmm-primary" disabled={busy || dirty || !officialChecked.length} onClick={() => void applyOfficial()}>应用选中差异</button>
         </>}
       </div>
+      <CatalogManager backupWritesPlugin={snapshot.catalogBackupWritesPlugin} backupId={snapshot.catalogBackupId} externalBusy={busy} models={snapshot.models} capabilities={snapshot.catalogCapabilities ?? []} editor={catalogEditor} setEditor={editor => { setCatalogEditor(editor); setOfficial(null); setOfficialChecked([]); document.getElementById('dmm-catalog-editor')?.scrollIntoView({ block: 'nearest' }) }} dirty={dirty} notify={notify} onApplied={value => {
+        const next = asSnapshot(value); setSnapshot(next); if (!dirty) setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config'))
+      }} />
       <details className="dmm-guide">
         <summary>这一页是干什么的？（点开查看说明）</summary>
         <p>按 Provider 分组列出宿主已加载的模型，核对并修正能力声明、实测验证。组默认全部收起，点组头展开：</p>
@@ -522,6 +541,7 @@ function ManagerSection() {
           {open && <div className="dmm-group-body">
             {group.models.map(model => <div className="dmm-card" key={`${model.providerId}:${model.modelId}`}>
               <strong>{model.name}</strong> <span className="dmm-muted">{model.providerId} / {model.modelId}</span>
+              <div className="dmm-row"><button disabled={busy || !snapshot.catalogCapabilities?.find(c => c.providerId === model.providerId)?.canRename} onClick={() => { document.getElementById('dmm-catalog-editor')?.scrollIntoView({ block: 'start' }); setCatalogEditor({ kind: 'rename', model }); setOfficial(null) }}>修改显示名称</button><button disabled={busy || !snapshot.catalogCapabilities?.find(c => c.providerId === model.providerId)?.canRemove} onClick={() => { document.getElementById('dmm-catalog-editor')?.scrollIntoView({ block: 'start' }); setCatalogEditor({ kind: 'remove', model }); setOfficial(null) }}>删除模型</button>{snapshot.catalogCapabilities?.find(c => c.providerId === model.providerId)?.reason && <span className="dmm-muted">{snapshot.catalogCapabilities.find(c => c.providerId === model.providerId)?.reason}</span>}</div>
               <div className="dmm-row">原生图片：{model.nativeImage}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}；推理档位：{model.reasoningEfforts.map(e => e.id).join(' / ') || '未知'}</div>
               <div className="dmm-muted">资料：{model.capabilitySource ?? '未知'}{model.capabilityCheckedAt ? ` · 核对于 ${model.capabilityCheckedAt}` : ''}</div>
               <div className="dmm-muted">{snapshot.verifications.filter(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId).map(item => `${item.kind}: ${item.status} / ${item.behavior ?? '未知'}${item.stale ? '（已过期）' : ''}`).join('；') || '尚无验证证据'}</div>

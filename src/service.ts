@@ -7,6 +7,7 @@ import type { SettingsPathOp, SettingsProvider } from '@deepseek-ai/dsh-settings
 import { DEFAULT_CONFIG, mergeSelection, migrateConfig, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
 import type { AutoDecision } from './auto-router.js'
 import { canonical, type FutureOverrides } from './official-state.js'
+import type { CatalogCapability } from './catalog-types.js'
 
 /**
  * 宿主设置服务拒绝过期 revision 时抛出的冲突错误（`SettingsConflictError`，`code` 固定为 `SETTINGS_CONFLICT`）。
@@ -22,6 +23,7 @@ export function isSettingsConflict(error: unknown): boolean {
 
 export interface ModelBridge {
   catalog(): Promise<ModelRecord[]>
+  catalogCapabilities?(): CatalogCapability[]
   applyNative(ref: ModelRef, fields: { image?: boolean; contextWindow?: number; maxTokens?: number }, revision: number): Promise<void>
   clearNative?(ref: ModelRef, fields: readonly ('image' | 'contextWindow' | 'maxTokens')[], revision: number): Promise<void>
 }
@@ -35,6 +37,17 @@ export interface ModelInputBridge {
 
 export class HostModelBridge implements ModelBridge {
   constructor(private readonly llm: LlmRuntime, private readonly settings: SettingsProvider) {}
+
+  catalogCapabilities(): CatalogCapability[] {
+    const namespaces = new Set(this.settings.describe({ redactSecrets: true }).map(item => item.ns as string))
+    const configured = this.llm.listConfigurableProviders()
+    return this.llm.listProviders().filter(p => p.id !== 'dsh-model-manager').map(provider => {
+      const entry = configured.find(p => p.provider === provider.id)
+      const ns = entry?.settingsNs ?? (provider.id === 'deepseek-official' ? 'llm-deepseek' : undefined)
+      const editable = this.settings.writable !== false && !!ns && namespaces.has(ns) && ['llm-deepseek', 'llm-pi-ai'].includes(ns)
+      return { providerId: provider.id, canAdd: editable, canRename: editable, canRemove: editable, minimumModels: ns === 'llm-pi-ai' ? 1 : 0, ...(!editable ? { reason: '该 Provider 未公开已适配的可写目录契约' } : {}) }
+    })
+  }
 
   async catalog(): Promise<ModelRecord[]> {
     const providers = this.llm.listProviders().filter(p => p.id !== 'dsh-model-manager')
@@ -186,9 +199,13 @@ export class ModelManagerService {
   private overrides = new Map<string, { session?: Selection; nextTurn?: Selection; active?: { turn: number; selection: Selection } }>()
   private autoDecisions = new Map<string, { turn: number; value: AutoDecision }>()
   private delegatedSessions = new Set<string>()
+  private initialization?: Promise<void>
+  private catalogBackupId?: string
+  private catalogBackupWritesPlugin?: boolean
   constructor(private readonly bridge: ModelBridge, private readonly dataDir: string, private readonly settings?: SettingsProvider) {}
 
-  async init(): Promise<void> {
+  init(): Promise<void> { return this.initialization ??= this.initialize() }
+  private async initialize(): Promise<void> {
     await mkdir(this.dataDir, { recursive: true })
     const stored = this.settings?.get('dsh-model-manager') as ManagerConfig | undefined
     if (stored) {
@@ -204,19 +221,31 @@ export class ModelManagerService {
     if (savedOverrides) for (const [session, value] of Object.entries(savedOverrides)) this.overrides.set(session, value)
     const savedCache = await readJsonWithBackup<Record<string, { answer: string; at: number }>>(join(this.dataDir, 'vision-cache.json'))
     if (savedCache) for (const [key, value] of Object.entries(savedCache)) if (value.at > Date.now() - 7 * 86400000) this.visionCache.set(key, value)
+    const latest = await readJsonWithBackup<{ manual?: string }>(join(this.dataDir, 'catalog-backups', 'latest.json'))
+    if (latest?.manual && /^[0-9a-f-]{36}$/.test(latest.manual)) {
+      const backup = await readJsonWithBackup<{ status: string; writes: { ns: string }[] }>(join(this.dataDir, 'catalog-backups', `${latest.manual}.json`))
+      if (backup?.status === 'applied') { this.catalogBackupId = latest.manual; this.catalogBackupWritesPlugin = backup.writes.some(w => w.ns === 'dsh-model-manager') }
+    }
   }
 
-  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
+  onCatalogBackup(id: string, origin: string, status: string, writesPlugin: boolean): void {
+    if (origin === 'manual' && status === 'applied') { this.catalogBackupId = id; this.catalogBackupWritesPlugin = writesPlugin }
+    else if (id === this.catalogBackupId && status === 'restored') { this.catalogBackupId = undefined; this.catalogBackupWritesPlugin = undefined }
+  }
+  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities: CatalogCapability[]; catalogBackupId?: string; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
     return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models), hostDefault: this.hostDefault(),
+      catalogCapabilities: this.bridge.catalogCapabilities?.() ?? [], catalogBackupId: this.catalogBackupId, catalogBackupWritesPlugin: this.catalogBackupWritesPlugin,
       verifications: [...this.verification.values()].map(value => ({ ...structuredClone(value), stale: value.signature !== this.signature(value.model, value.kind) })) }
   }
 
   async refresh(): Promise<ModelRecord[]> {
+    await this.initialization
     this.models = this.decorateModels(await this.bridge.catalog())
     return structuredClone(this.models)
   }
   private decorateModels(models: ModelRecord[]): ModelRecord[] {
     return models.map(model => ({ ...model,
+      catalogOrigin: this.config.catalogMetadata?.[modelKey(model)]?.origin ?? 'unknown', customName: this.config.catalogMetadata?.[modelKey(model)]?.customName ?? false,
       capabilitySource: model.providerId === 'deepseek-official' && this.config.official ? this.config.official.sourceUrl ?? this.config.official.sources?.models ?? 'DSH 已加载模型目录' : 'DSH 已加载模型目录',
       capabilityCheckedAt: model.providerId === 'deepseek-official' ? this.config.official?.checkedAt : undefined }))
   }
@@ -283,6 +312,7 @@ export class ModelManagerService {
   /** 整个官方写集持有同一覆盖队列；setOverride 和 nextTurn 消耗不能插入其间。 */
   async withFutureOverrides<T>(expected: string | undefined, action: (save: (next: FutureOverrides) => Promise<void>) => Promise<T>): Promise<T> {
     const operation = this.writeQueue.catch(() => {}).then(async () => {
+      await this.initialization
       if (expected !== undefined && expected !== this.futureOverridesFingerprint()) throw new Error('SETTINGS_CONFLICT：会话覆盖已变化')
       let fingerprint = this.futureOverridesFingerprint()
       const save = async (next: FutureOverrides) => {

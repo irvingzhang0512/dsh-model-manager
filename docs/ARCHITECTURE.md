@@ -59,7 +59,76 @@ Web 设置页分为“模型”“别名与兜底”“AUTO 自动选模型”�
 - 实施后依次执行 typecheck、build、完整测试与客户端冒烟；只重启 development，用专用会话检查新提示可读与旧 ID 可调用。缺 GUI 或凭据时记录具体未验收项，不登记整体兼容通过。
 - 本次目标包版本 0.5.0；文档阶段不提高版本。实现验证后同步说明／更新记录／验收记录，插件独立提交后同步根完整版本锁，按脚本核对安装快照及维护资料，不自动推送。
 
-## LLM 官方同步契约
+## 模型生命周期与统一操作预览（0.8.0，2026-10-10）
+
+对应 SPEC F001／F004／F007／F009／F010，基线 0.7.0，目标 0.8.0。本节经用户“可以，实现吧”明确确认后实现；规划模块为 catalog-state／catalog-types，目录桥接为 service／official-host，页面为 catalog-panel。与后文历史官方契约冲突时，本节替代“到其他页面调整冲突”“模型键设置本身阻止删除”及“只能同 Provider 迁移”的相关规则；官网识别、六页三轮、临时参数、严格证据和取消／截止机制不变。
+
+### 宿主目录与字段来源
+
+- 建立独立目录桥接与纯操作规划模块，官方同步和手动操作均调用同一规划器与事务执行器。使用 `listConfigurableProviders()` 的 settingsNs／settingsPath 及 settings.describe 的可写状态和 revision；首版适配 llm-deepseek 的 models 数组、llm-pi-ai 的 Provider profile models／modelOverrides，其他未知契约返回不可编辑原因。
+- 状态同时保存原始 user 配置、有效模型目录与 userFields 字段来源（结合 Provider 默认、运行时推导及官方证据区分 user／provider／derived／official）。模型主键是 ModelRef，绝不只按 ID 匹配。原始 user 值优先用于写回，resolveModelInfo 的 context／reasoning 等运行时结构不直接写进 models。显式数组未知键原样保留；没有 user 字段不意味着未知官方字段可随意补写。
+- 对 llm-pi-ai 默认目录的改名使用 modelOverrides.name；已有显式数组修改对应条目。新增／删除需要显式数组时物化当前有效目录的宿主配置字段，将已有 modelOverrides 合入并移除其原位置，因为该宿主不接受 models 与 modelOverrides 同时生效；备份保存两者原值及存在状态。不同未操作模型、推理／compat 设置及未知用户字段必须保留，不能把推导默认的输出上限当新用户覆盖。llm-pi-ai 删除后模型数不得为零。
+- DeepSeek 通过显式 models 数组新增／改名／删除，支持合法空数组但须先处理全部使用引用。不写 Provider 凭据、端点或协议。自定义 Provider 新型号缺少宿主必要默认／协议时拒绝预览并显示具体缺项，不擅自为整个 Provider 修改协议。
+- GET `/api/model-manager` 的完整 snapshot 增加可选 catalogBackupId／catalogBackupWritesPlugin（最近 applied 手动操作及其插件写集标记，切换页签或重开页面可发现；恢复仍须通过版本校验）和 `catalogCapabilities: {providerId, canAdd, canRename, canRemove, minimumModels, reason?}[]`；ModelRecord 增加可选 `catalogOrigin: 'manual'|'official'|'unknown'`、`customName: boolean`。原字段及 native 接口保持兼容。可配置且有合法宿主设置的既有 Provider 可用于新增；AUTO／别名不是目录 CRUD 的真实模型。
+
+### 统一操作及引用规划
+
+`CatalogOperation` 的手动输入固定为下列互斥形状：
+
+```ts
+type CatalogOperation =
+  | { kind: 'add'; model: ModelRef; name?: string; image?: boolean;
+      contextWindow?: number; maxTokens?: number }
+  | { kind: 'rename'; model: ModelRef; name: string }
+  | { kind: 'remove'; model: ModelRef }
+```
+
+ID 和提供的 name 必须非空、无首尾空白；数字为正安全整数。普通 rename 不能修改 ID。新增已有 ID 返回 400 和 `existingModel: ModelRef`，客户端保留输入并提供打开该模型编辑入口。名称不要求唯一。官方更新与 migrate 的内部意图只由验证通过的 OfficialAnalysis 构造，不能从客户端提交伪造官方证据。
+
+- 规划快照包括目录、原始 namespace 值／版本、未来覆盖指纹及元信息。同目标的全部官方旧 ID 归并一组；组内创建／更新目标、引用迁移、附属设置和旧目录删除不可拆选。其他独立组可以跳过，不解决被跳过组的冲突也可应用有效组。
+- 引用访问器明确覆盖 aliases.*.candidates／efforts、models 的 modelKey、auto.evaluator／simple／normal／complex／main／roles／preferences、vision.target、历史 official.analyzer、宿主 agent-default-model.{provider,model}、subagent-model-selection.allowedModels 和 session／nextTurn。区分 `usage` 和 `attached`；models 配置和孤立 efforts 键属于附属设置，实际候选及选择才是使用引用。禁用功能的遗留使用目标仍要处理或清理，不永久阻断删除。
+- 普通移除的手动替代可跨 Provider，defaultModel 的 provider／model 同步变更。删除旧模型附属设置需独立确认清理；旧目录的能力、未知字段及输出上限保存在备份，不复制到不同模型的宿主目录。迁移的候选／Selection 参数保持并校验，已知不支持的 reasoningEffort／tiers 提供真实支持档位或使用模型默认的选择；不静默降档。无法确认必要参数兼容时保持该组阻止并定位原因。
+- 官方兼容迁移的模型键及原用户字段按缺失字段补齐、相同值保留、不同叶值生成冲突处理。已有目标优先作为基线，但冲突不得默认消失。不同 user 值，即使与内置值相同也仍是显式设置；provider／derived 值不伪装成 user 冲突。官方未知字段保留目标已有声明，不从旧型号默认值推断新能力。两侧显式不同值必须由用户选择。
+- 冲突给出稳定 opaque id、字段路径、各方值与来源、可选官方证据以及可用 optionId；客户端只提交 id／optionId，不提交任意配置路径和值。每次模拟校验宿主输入模态和图片限制等字段组合；选择文本能力时须明确解决图片限制，不能静默生成非法配置。跨 Provider 同 ID 始终隔离。候选去重保留原顺序，重复参数不一致也生成冲突。
+
+### 图片辅助删除与迁移
+
+- 仅当删除对象出现在 vision.target 或旧 auto.roles.vision.target 的直接／别名解析链中，才产生视觉处理项；不能因“视觉辅助已启用”或目录存在其他图片模型阻止无关删除。
+- 视觉处理的 optionId 包含：替换为候选真实图片模型、disable、取消该组选择（复选框或取消删除按钮）。图片候选以宿主原生输入声明为准，不能只凭插件能力覆盖或 LLM 记忆认定可看图；未知和文本模型不可作为视觉替代。迁移后的目标声明也需按最终预览校验，官方目标失去图片能力时必须处理。
+- replaceVision 可以不同于普通引用的迁移目标，也可跨 Provider。直接目标改为对应 ModelRef；视觉通过别名时只把该视觉选择重绑到真实图片模型，不擅自改共享别名的候选。若别名仍引用待删除对象，作为其他使用引用单独显示、解决；不能绕过未处理引用校验。
+- disableVision 在该组里设 vision.enabled=false，清除指向删除对象的 vision.target（含受影响别名目标）和旧 roles.vision.target 兜底；保留无关策略、无关目标及共享别名。关闭状态下遗留目标提供明确清理选项；取消不修改配置。其他使用引用仍有阻碍时不能只写关闭开关而不执行删除。
+- 视图须列出视觉开关前后值、解析链、将清除／替换的目标和其他剩余引用。关闭后的行为沿用现有关闭规则：原生图片模型可直接处理，文本模型不再使用辅助。正在执行的旧请求和历史日志／缓存／证据不重写；后续新调用按新的配置处理。
+
+### HTTP 接口与预览状态
+
+前缀 `/api/model-manager`，各路径只注册一次；保留 trusted caller 校验及 405／Allow。
+
+| Path | Method | 请求／响应 |
+| --- | --- | --- |
+| `/catalog-preview` | POST | `{operations: CatalogOperation[]}`；刷新目录，生成稳定快照及 `CatalogPreview`，不调用 API／LLM，不写设置。 |
+| `/catalog-resolve` | POST | `{token: string, selected: string[], resolutions: {id: string, optionId: string}[]}`；接受目录或官方预览 token，替代模型、视觉操作、附属清理及参数选择均以服务端提供的选项解析。仅按缓存分析及冻结基线重建差异、校验原 revision／目录／覆盖，返回新 token；旧 token 即失效。无效／重复／未知选项拒绝，不替用户决定。 |
+| `/catalog-apply` | POST | `{token: string, selected: string[]}`；仅执行当前 token 中唯一、非空、无阻止的整体操作，重新模拟及 CAS 校验；返回 `{applied, backupId, backupAt, snapshot}` 完整状态。 |
+| `/catalog-restore` | POST | `{backupId: string}`；恢复完整 applied 的指定新备份，返回 `{restored: true, snapshot}`，并作废有关预览。 |
+
+`CatalogPreview` 固定含 token、origin（manual／official）、fetchedAt、operations（id／kind／model／before／after／references／referenceChanges／attachedSettings／conflicts／choices／blockedReasons）、selected、counts（每 Provider 的 before／after 及 operationCount）、revisions、catalogFingerprint、overridesFingerprint、writesPlugin。writesPlugin 按选中操作判断是否更改插件配置，保护其他标签草稿；referenceChanges 展示视觉开关／目标、AUTO／别名及宿主引用前后值。references 提供位置、类型与可选别名链；conflicts 提供 id、path、候选 value／source／optionId、可选 evidence 和 resolution；choices 为替代／视觉／参数／附属设置等服务端允许的选择。不在响应中下发凭据，客户端不接收任意字段写入能力。
+
+- 现有 OfficialPreview 保留分析输入、完整性、原文证据、pages、diffs 与 localModelIds，增加同一操作视图／选项和 counts。official-preview 的严格失败路径无有效 token。catalog-resolve 接受其 token 并返回含相同官方资料的更新结果，不重新获取网页或分析；official-apply 仍按 `{token,selected}` 通过同一执行器应用。
+- official-restore 的 `{}` 保持恢复最近一次官方操作；新备份由共用执行器读取，原 v1／v2 备份按旧范围兼容，不补造新写集。手动操作备份不覆盖官方最近备份指针。
+- 修改目录意图、官方临时分析参数或重新刷新立即作废旧 token。resolve 请求串行，旧响应不能覆盖新操作；处理期间禁止应用。counts 按选中整体操作的完整模拟结果算，不把字段／引用数当模型数。未解决或未选中的项不计预计变更。
+- 新增／改名／删除表单独立于插件草稿。需要写 dsh-model-manager（包括 catalogMetadata）时已有其他草稿阻止应用／恢复，提供保存或放弃后重建预览；仅宿主写入刷新不丢插件草稿。候选替代及冲突处理均无需保存。
+
+### 事务与备份
+
+- 同一执行器冻结并完整预检选中操作的原始写集（相关宿主 models／modelOverrides、catalogMetadata、插件引用／附属设置、defaultModel 的两个字段、subagent 范围、未来覆盖）。按 namespace 合并 CAS，保留原始配置未知字段和 Provider 其他值；不使用全局迁移后的默认对象覆盖原始 namespace；describe 缺少 user 时视为未显式配置，不能回退用有效默认值备份。还校验目录指纹，不能无条件以最新 revision 重试旧意图。
+- 新备份 `version: 3`、不可复用 UUID backupId，每次操作独立保存在 profile 数据目录 `catalog-backups/<backupId>.json`。包含 origin、token、时间、选中操作／用户选项、可选官方来源审计、每项原值及存在信息、写后值／revision、未来覆盖前后指纹和状态。另以原子文件 `catalog-backups/latest.json` 保存 manual／official 最近 backupId；旧 official-sync-backup.json 保留读取兼容，不覆盖。
+- 沿用 prepared／applying／applied／rolled-back／recovery-required／restored 状态、串行队列、临时文件原子替换和 .bak；每个写入成功后记录进度。失败逆序按已写 revision 和覆盖指纹回滚；后续编辑已变化时不得强制恢复，显示具体未恢复位置。恢复前统一检查完整写集及备份状态；宿主 revision 为进程内版本，重启后的旧备份若版本不匹配也保守拒绝，不以当前版本强行重试；恢复失败保留可核对进度，不虚报成功。读坏备份时尝试其 .bak，无合法备份拒绝。
+- 事务成功后刷新宿主目录及完整 snapshot，使设置卡片与宿主模型选择器观察新目录；不手改缓存或历史证据，不重写运行中已固定请求及本轮 active 选择。
+
+### 验收证据
+
+覆盖 SPEC F010 的 CRUD、物化、元信息、普通引用、冲突、指纹／CAS／回滚／恢复和 F004 全部视觉场景。客户端构建 bundle 验证独立表单、重复 ID 编辑入口、视觉三选项、别名链、关闭后的提示、未解决项跳过及模型／操作计数。development 专用临时模型和配置完成实际选择器更新及应用／恢复，测试后恢复原配置；日常仅 glm-5.3／medium 官方预览，不自动应用。源码验证依次 typecheck、build、完整测试与客户端冒烟，实际结果见 V1-COVERAGE，包版本 0.8.0。未验证项目必须单列，不登记整体兼容通过。
+
+## LLM 官方同步契约（0.4.0 历史基线）
 
 文档版本：2026-10-09，对应已确认 SPEC F007／F009，已实现于 0.4.0。前文路由入口仍有效，本节替代旧固定三页、固定表格和固定型号的解析规则。
 

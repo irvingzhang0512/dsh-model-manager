@@ -3,6 +3,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
+import { existsSync, readdirSync } from 'node:fs'
 import { apply } from '../src/index.ts'
 import { DEFAULT_CONFIG, modelKey, managedId } from '../src/domain.ts'
 import { html, analysis, source } from './official-fixtures.ts'
@@ -11,7 +12,7 @@ import { resolveDataDir } from '../src/service.ts'
 let temporary: string | undefined
 afterEach(async () => { vi.unstubAllGlobals(); vi.useRealTimers(); if (temporary) await rm(temporary, { recursive: true, force: true }); delete process.env.DSH_HOME })
 
-async function fixture(explicit = true) {
+async function fixture(explicit = true, pi = false, absentUser = false) {
   temporary = await mkdtemp(join(tmpdir(), 'dmm-official-')); process.env.DSH_HOME = temporary
   const old = { providerId: 'deepseek-official', modelId: 'old-fast' }
   const config = structuredClone(DEFAULT_CONFIG)
@@ -19,13 +20,14 @@ async function fixture(explicit = true) {
   config.models[modelKey(old)] = { capability: { image: 'yes' } }
   const originalModels = [{ id: 'old-fast', name: 'old', maxTokens: 99, custom: 'keep' }, { id: 'pro', name: 'pro' }]
   const raw: Record<string, any> = { 'dsh-model-manager': config, 'llm-deepseek': { apiKeyEnv: 'PRIVATE_KEY', ...(explicit ? { models: originalModels } : {}) }, 'agent-default-model': { provider: 'reader', model: 'reader' }, 'subagent-model-selection': { enabled: true, allowedModels: [{ provider: old.providerId, model: old.modelId }] } }
+  if (pi) raw['llm-pi-ai'] = { providers: { reader: { apiKeyEnv: 'PRIVATE_PI_KEY', modelOverrides: { reader: { maxTokens: 77, custom: 'keep' } } } } }
   const rev: Record<string, number> = Object.fromEntries(Object.keys(raw).map(ns => [ns, 1]))
   const routes = new Map<string, Function>(), disposed: Function[] = []
   let failureNamespace = '', failureOnce = false, outputMode = 'normal', analyses = 0
   const get = (ns: string) => structuredClone(ns === 'llm-deepseek' ? { ...raw[ns], models: raw[ns].models ? raw[ns].models.map(({ custom: _custom, ...model }: any) => model) : originalModels } : raw[ns])
   const settings = {
     get, register: () => ({ watch: () => () => {} }),
-    describe: () => Object.keys(raw).map(ns => ({ ns, revision: rev[ns], value: get(ns), user: structuredClone(raw[ns]) })),
+    describe: () => Object.keys(raw).map(ns => ({ ns, revision: rev[ns], value: get(ns), ...(!absentUser || ns !== 'llm-deepseek' ? { user: structuredClone(raw[ns]) } : {}) })),
     mutate: async (ns: string, ops: any[], expected: number) => {
       if (rev[ns] !== expected) throw Error('SETTINGS_CONFLICT')
       if (failureNamespace === ns && failureOnce) { failureOnce = false; throw Error('injected write failure') }
@@ -41,9 +43,9 @@ async function fixture(explicit = true) {
     replace: async (ns: string, next: unknown, expected: number) => { if (rev[ns] !== expected) throw Error('SETTINGS_CONFLICT'); raw[ns] = structuredClone(next); rev[ns]++ },
   }
   const runtime = {
-    listProviders: () => [{ id: 'deepseek-official' }, { id: 'reader' }], listConfigurableProviders: () => [],
-    listModels: async (provider: string) => provider === 'reader' ? [{ id: 'reader', name: 'reader' }] : get('llm-deepseek').models,
-    resolveModelInfo: async (provider: string, id: string) => provider === 'reader' ? { id, name: 'reader', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } } : get('llm-deepseek').models.find((model: any) => model.id === id),
+    listProviders: () => [{ id: 'deepseek-official' }, { id: 'reader' }], listConfigurableProviders: () => pi ? [{ provider: 'reader', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'reader'] }] : [],
+    listModels: async (provider: string) => provider === 'reader' ? (pi ? (raw['llm-pi-ai'].providers.reader.models ?? [{ id: 'reader', name: 'reader' }, { id: 'image', name: 'image' }]).map((m: any) => ({ ...m, ...raw['llm-pi-ai'].providers.reader.modelOverrides?.[m.id] })) : [{ id: 'reader', name: 'reader' }]) : get('llm-deepseek').models,
+    resolveModelInfo: async (provider: string, id: string) => provider === 'reader' ? { id, name: pi ? raw['llm-pi-ai'].providers.reader.models?.find((m: any) => m.id === id)?.name ?? raw['llm-pi-ai'].providers.reader.modelOverrides?.[id]?.name ?? id : 'reader', inputModalities: id === 'image' ? ['text', 'image'] : ['text'], reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } } : { id, name: id, reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] }, ...get('llm-deepseek').models.find((model: any) => model.id === id) },
     registerAdapter: () => () => {},
     stream: vi.fn(async function* (options: any) {
       analyses++
@@ -67,7 +69,10 @@ async function fixture(explicit = true) {
     return { run, res }
   }
   const call = async (path: string, value: unknown = {}, headers: Record<string, string> = {}, method = 'POST') => { const { run, res } = prepare(path, value, headers, method); await run(); return { status: res.status, json: JSON.parse(res.body) } }
-  const backupPath = () => join(resolveDataDir(), 'official-sync-backup.json')
+  const backupPath = () => {
+    const dir = join(resolveDataDir(), 'catalog-backups')
+    return existsSync(dir) ? join(dir, readdirSync(dir).find(file => /^[0-9a-f-]{36}\.json$/.test(file)) ?? 'missing.json') : join(resolveDataDir(), 'official-sync-backup.json')
+  }
   return { raw, rev, call, prepare, runtime, get, disposed, backupPath, analyses: () => analyses, mode: (value: string) => { outputMode = value }, fail: (ns: string) => { failureNamespace = ns; failureOnce = true } }
 }
 
@@ -146,7 +151,9 @@ describe('官方同步宿主完整写集', () => {
     expect(p.analysisTimeoutSeconds).toBe(180)
     expect((await f.call('official-apply', { token: p.token, selected: p.diffs.map((d: any) => d.id) })).status).toBe(200)
     const backup = JSON.parse(await readFile(f.backupPath(), 'utf8')); delete backup.analysisTimeoutSeconds
-    await writeFile(f.backupPath(), JSON.stringify(backup))
+    backup.version = 2
+    await writeFile(join(resolveDataDir(), 'official-sync-backup.json'), JSON.stringify(backup))
+    await rm(join(resolveDataDir(), 'catalog-backups', 'latest.json'))
     expect((await f.call('official-restore')).status).toBe(200)
     expect(f.raw).toEqual(original)
     f.disposed.forEach(dispose => dispose())
@@ -201,7 +208,7 @@ describe('官方同步宿主完整写集', () => {
     const result = await f.call('official-apply', { token: p.json.token, selected: p.json.diffs.map((d: any) => d.id) })
     expect(result.status).toBe(400); expect(result.json.error).toContain('已回滚'); expect(f.raw).toEqual(original)
     expect(JSON.parse(await readFile(f.backupPath(), 'utf8')).status).toBe('rolled-back')
-    expect((await f.call('official-restore')).status).toBe(409)
+    expect((await f.call('official-restore')).status).toBe(400)
   })
   it('同步后任一涉及分节再修改，恢复拒绝覆盖', async () => {
     const f = await fixture(), p = await f.call('official-preview', { sourceUrl: source })
@@ -224,4 +231,113 @@ describe('官方同步宿主完整写集', () => {
     expect(canceled.res.body).not.toContain('event: result'); expect(canceled.res.body).toContain('取消')
     f.disposed.forEach(dispose => dispose())
   })
+})
+
+
+describe('目录操作完整宿主链路', () => {
+  const model = (modelId: string, providerId = 'deepseek-official') => ({ providerId, modelId })
+  it('中文改名更新宿主选择器，重复 ID 提供编辑入口，恢复不覆盖后续编辑', async () => {
+    const f = await fixture(), original = structuredClone(f.raw)
+    const p = await f.call('catalog-preview', { operations: [{ kind: 'rename', model: model('pro'), name: '中文模型名称' }] })
+    expect(p.status, JSON.stringify(p.json)).toBe(200); expect(f.raw).toEqual(original)
+    const a = await f.call('catalog-apply', { token: p.json.token, selected: p.json.selected })
+    expect(a.status, JSON.stringify(a.json)).toBe(200)
+    expect(a.json.snapshot.models.find((m: any) => m.modelId === 'pro').name).toBe('中文模型名称')
+    expect(f.raw['dsh-model-manager'].catalogMetadata[modelKey(model('pro'))].customName).toBe(true)
+    const duplicate = await f.call('catalog-preview', { operations: [{ kind: 'add', model: model('pro') }] })
+    expect(duplicate.status).toBe(400); expect(duplicate.json.existingModel).toEqual(model('pro'))
+    const restored = await f.call('catalog-restore', { backupId: a.json.backupId })
+    expect(restored.status, JSON.stringify(restored.json)).toBe(200); expect(f.raw).toEqual(original)
+    const next = await f.call('catalog-preview', { operations: [{ kind: 'add', model: model('manual') }] })
+    const b = await f.call('catalog-apply', { token: next.json.token, selected: next.json.selected })
+    f.rev['llm-deepseek']++; f.raw['llm-deepseek'].models[0].name = '后续编辑'
+    expect((await f.call('catalog-restore', { backupId: b.json.backupId })).status).toBe(409)
+    expect(f.raw['llm-deepseek'].models[0].name).toBe('后续编辑')
+  })
+  it('删除图片辅助：阻断未解决引用，关闭与清理后整体删除，可完整恢复', async () => {
+    const f = await fixture(); f.raw['dsh-model-manager'].vision = { enabled: true, policy: 'sidecar-only', target: model('old-fast') }
+    f.raw['dsh-model-manager'].auto.roles.vision.target = model('old-fast')
+    const original = structuredClone(f.raw)
+    const p = await f.call('catalog-preview', { operations: [{ kind: 'remove', model: model('old-fast') }] })
+    const op = p.json.operations[0]
+    expect((await f.call('catalog-apply', { token: p.json.token, selected: [op.id] })).status).toBe(400)
+    expect(f.raw).toEqual(original)
+    const resolutions = op.choices.flatMap((c: any) => c.kind === 'vision' ? [{ id: c.id, optionId: 'disable' }] : c.kind === 'cleanup' ? [{ id: c.id, optionId: 'clear' }] : c.kind === 'replacement' ? [{ id: c.id, optionId: modelKey(model('pro')) }] : [])
+    const r = await f.call('catalog-resolve', { token: p.json.token, selected: [op.id], resolutions })
+    expect(r.status, JSON.stringify(r.json)).toBe(200); expect(r.json.operations[0].blockedReasons).toEqual([])
+    expect(f.raw).toEqual(original); expect(f.analyses()).toBe(0)
+    const a = await f.call('catalog-apply', { token: r.json.token, selected: r.json.selected })
+    expect(a.status, JSON.stringify(a.json)).toBe(200)
+    expect(f.raw['dsh-model-manager'].vision).toEqual({ enabled: false, policy: 'sidecar-only' })
+    expect(f.raw['dsh-model-manager'].auto.roles.vision.target).toBeUndefined()
+    expect(f.raw['llm-deepseek'].models.map((m: any) => m.id)).toEqual(['pro'])
+    expect(f.raw['dsh-model-manager'].aliases.main.candidates).toEqual([model('pro')])
+    expect(f.raw['subagent-model-selection'].allowedModels[0].model).toBe('pro')
+    expect((await f.call('catalog-restore', { backupId: a.json.backupId })).status).toBe(200)
+    expect(f.raw).toEqual(original)
+  })
+  it('目录与插件写入失败回滚；无关图片辅助不阻断删除', async () => {
+    const f = await fixture(); f.raw['dsh-model-manager'].vision = { enabled: true, policy: 'native-first', target: model('reader', 'reader') }
+    const original = structuredClone(f.raw)
+    const p = await f.call('catalog-preview', { operations: [{ kind: 'rename', model: model('pro'), name: '失败改名' }] })
+    f.fail('dsh-model-manager')
+    const a = await f.call('catalog-apply', { token: p.json.token, selected: p.json.selected })
+    expect(a.status).toBe(400); expect(a.json.error).toContain('已回滚'); expect(f.raw).toEqual(original)
+    const remove = await f.call('catalog-preview', { operations: [{ kind: 'remove', model: model('pro') }] })
+    expect(remove.json.operations[0].blockedReasons).toEqual([])
+    expect((await f.call('catalog-apply', { token: remove.json.token, selected: [remove.json.operations[0].id] })).status).toBe(200)
+    expect(f.raw['dsh-model-manager'].vision).toEqual(original['dsh-model-manager'].vision)
+  })
+  it('pi 默认目录改名只写 override，新增物化保留未知字段和输出上限，恢复默认表示', async () => {
+    const f = await fixture(true, true), original = structuredClone(f.raw)
+    const rename = await f.call('catalog-preview', { operations: [{ kind: 'rename', model: model('image', 'reader'), name: '图片中文名' }] })
+    const a = await f.call('catalog-apply', { token: rename.json.token, selected: rename.json.selected })
+    expect(a.status, JSON.stringify(a.json)).toBe(200); expect(a.json.snapshot.nativeRevision).toBe(2)
+    expect(f.raw['llm-pi-ai'].providers.reader.models).toBeUndefined()
+    expect(f.raw['llm-pi-ai'].providers.reader.modelOverrides.image.name).toBe('图片中文名')
+    expect((await f.call('catalog-restore', { backupId: a.json.backupId })).status).toBe(200); expect(f.raw).toEqual(original)
+    const p = await f.call('catalog-preview', { operations: [{ kind: 'add', model: model('pro', 'reader'), name: '另一个 Provider 的同 ID', image: true }] })
+    const b = await f.call('catalog-apply', { token: p.json.token, selected: p.json.selected })
+    expect(b.status, JSON.stringify(b.json)).toBe(200)
+    expect(f.raw['llm-pi-ai'].providers.reader.models).toEqual([{ id: 'reader', maxTokens: 77, custom: 'keep' }, { id: 'image' }, { id: 'pro', name: '另一个 Provider 的同 ID', input: ['text', 'image'] }])
+    expect(f.raw['llm-pi-ai'].providers.reader.modelOverrides).toBeUndefined()
+    expect(f.raw['llm-pi-ai'].providers.reader.apiKeyEnv).toBe('PRIVATE_PI_KEY')
+    expect((await f.call('catalog-restore', { backupId: b.json.backupId })).status).toBe(200); expect(f.raw).toEqual(original)
+  })
+  it('新预览作废旧 token，非法选项或未公开 Provider 不写配置', async () => {
+    const f = await fixture(), original = structuredClone(f.raw)
+    const first = await f.call('catalog-preview', { operations: [{ kind: 'add', model: model('new') }] })
+    const second = await f.call('catalog-preview', { operations: [{ kind: 'rename', model: model('pro'), name: '新的预览' }] })
+    expect((await f.call('catalog-apply', { token: first.json.token, selected: first.json.selected })).status).toBe(400)
+    expect((await f.call('catalog-resolve', { token: second.json.token, selected: second.json.selected, resolutions: [{ id: 'invented', optionId: 'invented' }] })).status).toBe(400)
+    expect((await f.call('catalog-preview', { operations: [{ kind: 'add', model: model('unknown', 'reader') }] })).status).toBe(400)
+    expect(f.raw).toEqual(original)
+  })
+})
+
+
+
+it('未配置 namespace 的恢复不把默认数组写成显式数组', async () => {
+  const f = await fixture(false, false, true)
+  const p = await f.call('catalog-preview', { operations: [{ kind: 'rename', model: { providerId: 'deepseek-official', modelId: 'pro' }, name: '用户名字' }] })
+  const a = await f.call('catalog-apply', { token: p.json.token, selected: p.json.selected })
+  expect(a.status, JSON.stringify(a.json)).toBe(200)
+  const backup = JSON.parse(await readFile(f.backupPath(), 'utf8'))
+  expect(backup.writes.find((w: any) => w.ns === 'llm-deepseek').fields[0].had).toBe(false)
+  expect((await f.call('catalog-restore', { backupId: a.json.backupId })).status).toBe(200)
+  expect(f.raw['llm-deepseek'].models).toBeUndefined()
+})
+
+
+it('仅宿主删除声明无需写插件，清理附属设置则标记插件写集', async () => {
+ const f=await fixture()
+ const p=await f.call('catalog-preview',{operations:[{kind:'remove',model:{providerId:'deepseek-official',modelId:'pro'}}]})
+ const r=await f.call('catalog-resolve',{token:p.json.token,selected:[p.json.operations[0].id],resolutions:[]})
+ expect(r.json.writesPlugin).toBe(false)
+ const a=await f.call('catalog-apply',{token:r.json.token,selected:r.json.selected})
+ expect(a.json.snapshot.catalogBackupWritesPlugin).toBe(false)
+ expect(a.json.snapshot.catalogBackupId).toBe(a.json.backupId)
+ expect((await f.call('catalog-restore',{backupId:a.json.backupId})).json.snapshot.catalogBackupId).toBeUndefined()
+ const rename=await f.call('catalog-preview',{operations:[{kind:'rename',model:{providerId:'deepseek-official',modelId:'pro'},name:'新名字'}]})
+ expect(rename.json.writesPlugin).toBe(true)
 })

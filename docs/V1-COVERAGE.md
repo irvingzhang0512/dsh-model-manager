@@ -1,5 +1,16 @@
 # 验收清单
 
+## 2026-10-10 模型生命周期与图片辅助删除（0.8.0）
+
+- 确认依据：用户审阅 F001／F004／F007／F009、新增 F010 及架构／配置契约后明确回复“可以，实现吧”，之后实施。配置仍为 v3；新增可选 catalogMetadata、四个 catalog POST 接口及完整 snapshot 字段。
+- 自动验证：依次 typecheck、build、193 项测试（12 个文件）通过，包含客户端 bundle 冒烟。覆盖新增／中文名称／重复 ID／跨 Provider 同 ID、默认目录与显式目录、手动名称保护、已有目标合并和字段选择、模型计数、附属设置、直接／别名／遗留视觉引用、跨 Provider 图片替换、关闭辅助整体删除、普通引用及受管理标识、推理参数检查、最后 pi-ai 模型限制、版本／覆盖冲突、回滚、恢复与旧 v2 备份。既有模拟网页／LLM 的数量、布局、路径、读取上限、取消、编造证据、无效结构及无写入回归保留。
+- development 真实页面：新增临时模型后宿主选择器由 4 个变为 5 个，恢复后回到 4 个；将 Pro 显示名称改为中文后卡片和宿主选择器同步，API ID 保持，随后恢复。准备直接视觉目标及旧兜底均指向待删模型，选择关闭辅助，一次应用目录由 4 个变为 3 个、视觉关闭、两目标清空；恢复后目录及准备配置回到原状态。GUI 发现重复遗留视觉选择问题，改为读取最新值并补回归后重验通过。截图保存在根私有 `.local/reports/catalog-rename-0.8.0.png`、`catalog-vision-delete-0.8.0.png`。
+- 原始设置层恢复：真实 rename／apply／restore 验证默认 DeepSeek 目录没有被物化成用户 models 数组，恢复语义一致；修复 absent user 被误当 effective 默认层及 pi-ai name override 恢复留下空子项的问题，增加宿主测试。最终停机核对只有测试造成的空命名空间差异后恢复原始文本，再启动普通 development（3082）；原文件 SHA-256 恢复为 `2A57C3A71031B684EA273CC4B398B926CFFA0C23D72EBD0355C6E71B49AF5F33`。
+- 日常真实预览：原全局 home、DSH 0.1.5-rc.2、3080 加载新版，glm-5.3／medium／180 秒，官网首页完整 POST 成功；最终 GUI 读取入口及实际定价链接共 2 页，识别 deepseek-flash 和 deepseek-v4-pro。已有目标合并生成 1 个整体迁移，逐项解决名称与输入模态冲突后，页面显示官方 2／本地 4／选中操作后预计 2／差异 1，应用按钮可用但未点击。已有其他 Provider 的图片辅助配置没有阻止无关迁移。截图仅存根私有 `.local/reports/daily-catalog-preview-0.8.0.png`。
+- 失败证据同样保留：另一次真实 SSE 的替代关系缺少共同原文证据，正确拒绝且不发布预览；一次旧 GUI 请求受构建热刷新中断，不计成功。错误原因新增持久页面提示，避免 toast 过期后无法辨认结果。不降低证据校验，不自动应用或重试。
+- 日常 settings.yaml 与 .credentials.yaml 前后 SHA-256 始终分别为 `A9F7D52A469AA531A0B6BF3749E39C7C8AC5555CE9A2F8784B91F2F469FA38F9`、`3C85E51C7B99AC45AF670A6D2D4190B7996B1E1AD248EA6461915D590E8BA577`；未保存分析参数、应用／恢复日常配置或复制凭据。启动触发的 pnpm 跨盘失效链接按既有 repair-web-links 脚本修复并 reconcile，8 个本地链接恢复。
+- 限制：宿主 revision 为进程内状态，跨重启恢复可能被 SETTINGS_CONFLICT 保守拒绝，本次已观察到，未放宽检查覆盖后续编辑。实际 CRUD／恢复在同一宿主生命周期验证；跨 Provider pi-ai、全部 AUTO／Subagent／会话引用迁移主要为模拟宿主证据，没有新增真实聊天、图片工具或子 Agent 全链路兼容验收。真实四页第二轮仍未复现；LLM 有效输出不保证每次成功。整体 verified=false、完整周期巡检待办保留。
+
 ## 2026-10-10 临时分析时限（0.7.0）
 
 - 确认依据：用户明确回复“确认这版，继续实现”，确认默认每轮 180 秒、临时 30–600 整数秒、计时显示和参数不保存的 F007／F009、架构／配置同版文档，之后才修改源码。实现见 `src/official-types.ts`、`src/official-sync.ts`、`src/official-host.ts`、`src/client/index.tsx` 和 `src/client/official-progress.tsx`；配置仍为 v3。

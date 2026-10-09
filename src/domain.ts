@@ -35,6 +35,7 @@ export interface AliasReliability { maxAttempts?: number; retryTransient?: boole
 export interface AliasConfig { candidates: ModelRef[]; efforts?: Record<string, string>; reliability?: AliasReliability }
 export interface ManagerConfig {
   version: 3
+  catalogMetadata?: Record<string, { origin?: 'manual' | 'official'; customName?: boolean; [key: string]: unknown }>
   aliases: Record<string, AliasConfig>
   models: Record<string, ModelSettings>
   official?: { sourceUrl?: string; analyzer?: ModelRef; checkedAt?: string; sources?: Record<string, string> }
@@ -57,6 +58,8 @@ export interface ModelRecord extends ModelRef {
   nativeEditReason?: string
   capabilitySource?: string
   capabilityCheckedAt?: string
+  catalogOrigin?: 'manual' | 'official' | 'unknown'
+  customName?: boolean
 }
 export interface Verification {
   model: ModelRef
@@ -297,6 +300,7 @@ export function migrateConfig(input: unknown): ManagerConfig {
   const preferences = current?.preferences ?? Object.fromEntries(Object.entries(roles).filter(([, value]) => value.target).map(([role, value]) => [role, value]))
   return {
     version: 3, aliases, models, official: raw.official,
+    ...((input as ManagerConfig)?.catalogMetadata ? { catalogMetadata: structuredClone((input as ManagerConfig).catalogMetadata) } : {}),
     auto: { enabled: current?.enabled ?? false, evaluator: current?.evaluator,
       simple: migrateSelectionTiers(current?.simple), normal: migrateSelectionTiers(current?.normal ?? legacyMain), complex: migrateSelectionTiers(current?.complex ?? legacyMain),
       preferences: structuredClone(preferences), main: migrateSelectionTiers(legacyMain), roles },
@@ -311,6 +315,10 @@ function isValidRef(ref: unknown): ref is ModelRef {
 
 export function validateConfig(config: ManagerConfig): void {
   if (config.version !== 3) throw new Error('不支持的配置版本')
+  if (config.catalogMetadata !== undefined) {
+    if (!config.catalogMetadata || typeof config.catalogMetadata !== 'object' || Array.isArray(config.catalogMetadata)) throw new Error('模型来源元数据无效')
+    for (const value of Object.values(config.catalogMetadata)) if (!value || typeof value !== 'object' || Array.isArray(value) || value.origin !== undefined && !['manual', 'official'].includes(value.origin) || value.customName !== undefined && typeof value.customName !== 'boolean') throw new Error('模型来源元数据无效')
+  }
   if (config.official?.sourceUrl !== undefined) {
     const url = new URL(config.official.sourceUrl)
     if (url.protocol !== 'https:' || url.username || url.password) throw new Error('官方资料入口必须是无凭据的 HTTPS 网址')
