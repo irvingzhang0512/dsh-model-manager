@@ -9,11 +9,29 @@ afterEach(() => vi.unstubAllGlobals())
 const runner = { providerId: 'other', modelId: 'reader' }
 function llm(outputs: unknown[]) {
   const stream = vi.fn(async function* () { yield { type: 'text-delta', text: typeof outputs[0] === 'string' ? outputs.shift() : JSON.stringify(outputs.shift()) }; yield { type: 'finish', reason: { kind: 'stop' } } })
-  return { llm: { stream } as never, stream }
+  return { llm: { stream, resolveModelInfo: async () => ({}) } as never, stream }
 }
 function state(ids: string[]): OfficialState { return { models: ids.map(id => ({ id })), config: structuredClone(DEFAULT_CONFIG), overrides: {} } }
 
 describe('最新网页和 LLM 分析', () => {
+  it('服务端拒绝推理参数时给出可操作提示，不回显原始响应或凭据', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    const runtime = { resolveModelInfo: async () => ({}), stream: async function* () { yield { type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_REQUEST', message: '400 reasoning_effort none is not supported; Bearer private-key' } } } } }
+    await expect(analyzeOfficial(runtime as never, runner, source, new AbortController().signal)).rejects.toThrow('分析模型拒绝推理档位')
+  })
+  it('保留导航和正文外的实际链接供补充读取，不将导航型号当正文证据', () => {
+    const page = extractOfficialPage('<nav>obsolete-model<a href="/new-pricing">模型资料</a></nav><main>Current model one</main><script><a href="/fake-script">假的</a></script><!--<a href="/fake-comment">假的</a>-->', source)
+    expect(page.links).toEqual(['https://docs.example.test/new-pricing'])
+    expect(page.text).toBe('Current model one')
+  })
+  it.each([['low', undefined, 'low'], ['low', 'high', 'high'], ['off', undefined, undefined]])('遵循真实模型公开档位 %s／默认 %s', async (supported, defaultEffort, expected) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    const { llm: runtime, stream } = llm([analysis(['one'])])
+    Object.assign(runtime, { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: supported }], defaultEffort } }) })
+    await analyzeOfficial(runtime, runner, source, new AbortController().signal)
+    expect(stream.mock.calls[0][0].reasoningEffort).toBe(expected)
+    expect(stream.mock.calls[0][0].messages[0].source).toEqual({ kind: 'plugin', plugin: 'dsh-model-manager' })
+  })
   it('通用提取正文、表格、脚注、实体与实际相关链接，排除导航和脚本', () => {
     const page = extractOfficialPage('<nav>old-model</nav><main><table><tr><th>API</th><td>new&#45;id</td></tr></table><p>footnote &amp; detail</p><a href="/changed?x=1&amp;y=2#part">详情</a><a href="https://elsewhere.test/">外部</a><script>instruction</script></main>', source)
     expect(page.text).toContain('API new-id'); expect(page.text).toContain('footnote & detail')
