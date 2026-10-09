@@ -43,7 +43,7 @@ async function fixture(explicit = true) {
   const runtime = {
     listProviders: () => [{ id: 'deepseek-official' }, { id: 'reader' }], listConfigurableProviders: () => [],
     listModels: async (provider: string) => provider === 'reader' ? [{ id: 'reader', name: 'reader' }] : get('llm-deepseek').models,
-    resolveModelInfo: async (provider: string, id: string) => provider === 'reader' ? { id, name: 'reader' } : get('llm-deepseek').models.find((model: any) => model.id === id),
+    resolveModelInfo: async (provider: string, id: string) => provider === 'reader' ? { id, name: 'reader', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } } : get('llm-deepseek').models.find((model: any) => model.id === id),
     registerAdapter: () => () => {},
     stream: vi.fn(async function* (options: any) {
       analyses++
@@ -71,6 +71,29 @@ async function fixture(explicit = true) {
 }
 
 describe('官方同步宿主完整写集', () => {
+  it('临时参数无需保存；显式宿主默认覆盖旧 analyzer，应用不保存临时偏好', async () => {
+    const f = await fixture()
+    f.raw['dsh-model-manager'].official = { sourceUrl: source, analyzer: { providerId: 'deepseek-official', modelId: 'old-fast' } }
+    const original = structuredClone(f.raw), revisions = structuredClone(f.rev)
+    const p = await f.call('official-preview', { sourceUrl: source, analyzer: null, reasoningEffort: 'high' })
+    expect(p.status, JSON.stringify(p.json)).toBe(200)
+    expect(p.json).toMatchObject({ analyzer: { providerId: 'reader', modelId: 'reader' }, reasoningEffort: 'high' })
+    expect(f.runtime.stream.mock.calls.at(-1)![0]).toMatchObject({ provider: 'reader', model: 'reader', reasoningEffort: 'high' })
+    expect(f.raw).toEqual(original); expect(f.rev).toEqual(revisions)
+    const applied = await f.call('official-apply', { token: p.json.token, selected: p.json.diffs.map((d: any) => d.id) })
+    expect(applied.status, JSON.stringify(applied.json)).toBe(200)
+    expect(f.raw['dsh-model-manager'].official).toMatchObject({ sourceUrl: source, analyzer: { providerId: 'deepseek-official', modelId: 'fast' } })
+    expect(f.raw['dsh-model-manager'].official).not.toHaveProperty('reasoningEffort')
+    expect(JSON.parse(await readFile(f.backupPath(), 'utf8')).reasoningEffort).toBe('high')
+    const defaults = await f.call('official-preview', { sourceUrl: source, analyzer: null })
+    expect(defaults.status).toBe(200); expect(defaults.json).not.toHaveProperty('reasoningEffort')
+    expect(f.runtime.stream.mock.calls.at(-1)![0]).not.toHaveProperty('reasoningEffort')
+  })
+  it.each(['invalid', '', null, 1])('非法临时推理档位 %s 不读取网页或写配置', async effort => {
+    const f = await fixture(), original = structuredClone(f.raw)
+    const p = await f.call('official-preview', { sourceUrl: source, analyzer: null, reasoningEffort: effort })
+    expect(p.status).toBe(400); expect(f.analyses()).toBe(0); expect(fetch).not.toHaveBeenCalled(); expect(f.raw).toEqual(original)
+  })
   it.each([true, false])('显式数组=%s：迁移、默认模型／Subagent／覆盖、恢复及重复同步', async explicit => {
     const f = await fixture(explicit)
     // 选择分析模型独立于默认，默认模型也迁移。

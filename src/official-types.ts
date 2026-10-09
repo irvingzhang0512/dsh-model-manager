@@ -21,7 +21,7 @@ export interface OfficialDiff {
   references: string[]; blockedReasons: string[]
 }
 export interface OfficialPreview {
-  token: string; sourceUrl: string; analyzer: ModelRef; fetchedAt: string
+  token: string; sourceUrl: string; analyzer: ModelRef; reasoningEffort?: string; fetchedAt: string
   pages: { url: string; fetchedAt: string }[]; analysis: OfficialAnalysis; diffs: OfficialDiff[]; notes: string[]
   revisions: Record<string, number | null>; overridesFingerprint: string; localModelIds: string[]
 }

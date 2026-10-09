@@ -1,5 +1,16 @@
 # 架构契约（v3）
 
+## 2026-10-09 临时分析参数契约
+
+本节对应 SPEC F007／F009，2026-10-10 经用户明确确认并实现于 0.6.0，替代原表单草稿保存及自动选择 low。
+
+- 客户端为入口、分析模型、推理档位建立独立页面状态，不使用 `edit(draft)`、localStorage 或设置写接口。首次加载用已有 official 配置和默认入口初始化；未选择分析模型时使用当前宿主默认真实模型。普通插件保存／重新加载不保存或丢弃这组三项临时参数。
+- 插件 snapshot 新增可选 `hostDefault: ModelRef`，用于未选择模型时展示其公开档位，不包含凭据。三项参数变化立即作废旧预览；切换分析模型清空档位。UI 只展示对应 ModelRecord.reasoningEfforts，默认项为“使用模型默认”；未公开档位只显示默认。同步参数不计入插件 dirty；其他插件草稿仍按既有规则阻止应用／恢复，允许用户放弃草稿后重新预览。
+- `/official-preview` POST 增加 `reasoningEffort?: string`，analyzer 允许 `ModelRef | null`：显式 null 表示使用宿主默认，不读取旧保存 analyzer；省略 analyzer 维持旧 API 客户端缺省规则。客户端每次显式发送 ModelRef 或 null；默认档位省略 reasoningEffort，不读取或新增持久化档位字段。
+- 宿主解析分析模型后，仅在显式选择档位时调用 resolveModelInfo；显式档位必须是非空字符串且出现在该模型公开 efforts 中，非法值在读取网页及调用 LLM 前拒绝。不显式指定档位则省略 GenerateOptions.reasoningEffort，不自动选择 low，也不改 Provider 设置或尝试别的档位。
+- OfficialPreview 增加 `reasoningEffort?: string` 记录本次实际显式档位，界面显示对应档位或“模型默认”。同一预览的各轮均使用该参数；备份可记录该临时请求字段供审计，但应用不能将入口／分析模型／档位写成偏好设置。原 checkedAt、模型及引用写集、revision 和覆盖指纹规则保持。
+- 验收覆盖准确传参、默认省略、模型切换清空、不支持档位提前拒绝、独立表单不污染 dirty 或持久化、无其他草稿可直接应用，以及既有取消／失效／草稿保护／CAS／恢复回归。
+
 `src/domain.ts` 定义配置、迁移、候选解析与真实档位校验；`src/service.ts` 持有目录、设置快照、验证证据、日志和轮次状态；`src/adapter.ts` 执行受管理模型请求并保持请求内选择；`src/auto-router.ts` 调用独立评估器并按能力筛选三档候选；`src/official-sync.ts` 抓取、解析并比较官方资料；`src/index.ts` 装配 DSH 宿主事件、工具与 HTTP；`src/client/` 构建设置页。
 
 模型选择器的 `AUTO` 入口仅在新 AUTO 开启时进行每轮一次评估。评估输入限长，包含最新请求和必要的近期对话；不开放工具，超时 10 秒不重试，失败回退常规档。工具循环复用轮次决策，子 Agent 和内部请求不评估。候选按原等级到更高等级依次检查图片、上下文和实际推理档位；不兼容时跳过，没有候选则报错。已有输出或工具操作后不换模型重做。评估与执行写不同日志事件。
@@ -52,7 +63,7 @@ Web 设置页分为“模型”“别名与兜底”“AUTO 自动选模型”�
 
 ### 共享类型和 LLM 输出
 
-独立分析请求先读取真实模型 metadata：声明 `defaultEffort` 时采用默认档位，否则仅在公开 `low` 时显式使用 `low`，其他情况省略；避免适配器把省略值变成服务端不支持的 `none`。系统消息来源标记为插件。正文排除导航，但实际链接从去掉脚本／样式／注释的整页 HTML 提取，导航链接仍可用于补充读取。
+独立分析仅传用户显式选择且经真实 metadata 校验的档位；模型默认时省略 reasoningEffort，不自动选择 low。系统消息来源标记为插件。正文排除导航，但实际链接从去掉脚本／样式／注释的整页 HTML 提取，导航链接仍可用于补充读取。
 
 宿主与浏览器共享类型，不再在客户端复制不完整的 OfficialPreview。以下为本次线协议字段，模型 ID 为不含空白的非空字符串，不限制厂商命名规律。
 
@@ -93,6 +104,7 @@ type OfficialPreview = {
   token: string
   sourceUrl: string
   analyzer: ModelRef
+  reasoningEffort?: string
   fetchedAt: string
   pages: { url: string; fetchedAt: string }[]
   analysis: OfficialAnalysis
@@ -125,13 +137,13 @@ type OfficialPreview = {
 
 | Path（前缀 `/api/model-manager`） | Method | 请求 | 响应／规则 |
 | --- | --- | --- | --- |
-| `/official-preview` | POST | `{ sourceUrl?: string, analyzer?: ModelRef }` | 缺省取已保存配置，再取默认入口／宿主默认模型。JSON 客户端等待完整 OfficialPreview；`Accept: text/event-stream` 返回下述事件。旧 `{sources}` 请求显式报错并提示刷新页面，不把旧三页静默解释为新入口。 |
+| `/official-preview` | POST | `{ sourceUrl?: string, analyzer?: ModelRef | null, reasoningEffort?: string }` | 省略入口／分析模型时保持旧客户端缺省；显式 analyzer:null 使用宿主默认，推理档位留空时省略。JSON 客户端等待完整 OfficialPreview；`Accept: text/event-stream` 返回下述事件。旧 `{sources}` 请求显式报错并提示刷新页面，不把旧三页静默解释为新入口。 |
 | `/official-apply` | POST | `{ token: string, selected: string[] }` | 校验 token、唯一且非空的选中 ID、blockedReasons、全部受影响 revision／覆盖状态；成功返回 `{ applied, backupAt, snapshot }`，snapshot 为完整插件状态。 |
 | `/official-restore` | POST | `{}` | 依据备份写集检查同步后版本／覆盖状态，再恢复原值和字段存在状态；成功返回 `{ restored: true, snapshot }`。 |
 
 事件流每个事件为 `event: <type>\ndata: <JSON>\n\n`：`progress` 的数据为 `{stage:'reading'|'analyzing'|'diffing', round:number, pageCount:number}`；成功 `result` 的 data 为完整 OfficialPreview；失败 `error` 为 `{error:string}`，均随后结束连接。流开始前错误用原 JSON 400／409；流开始后通过 error 事件反馈，不伪造 HTTP 状态。每 15 秒注释 keepalive，结束／连接关闭清理定时器并取消获取／LLM。浏览器用带 AbortController 的 fetch 读取 POST 流，取消关闭流并清空预览，不能用 EventSource 发 POST。
 
-修改输入网址／分析模型也清空旧预览。表单沿用插件草稿保存；预览可使用草稿字段，但有未保存草稿时禁用应用，提示先保存或放弃并重新预览。应用／恢复后使用完整 snapshot，不能用局部响应替换完整状态。
+修改临时网址／分析模型／档位清空旧预览，切换模型清空档位。临时参数不计入插件草稿；其他未保存草稿仍禁用应用，可保存或放弃后重新预览。应用／恢复后使用完整 snapshot，不能用局部响应替换完整状态。
 
 ### 写集、版本与恢复
 

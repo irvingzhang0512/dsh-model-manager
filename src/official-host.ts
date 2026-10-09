@@ -16,7 +16,7 @@ interface Host { llm: LlmRuntime; settings: SettingsProvider; webServer: WebServ
 type Field = { path: string[]; before: unknown; had: boolean; after: unknown }
 type Write = { ns: string; revision: number; fields: Field[]; appliedRevision?: number; reverted?: boolean }
 interface Backup {
-  version: 2; token: string; sourceUrl: string; analyzer: ModelRef; pages: OfficialPreview['pages']; at: string
+  version: 2; token: string; sourceUrl: string; analyzer: ModelRef; reasoningEffort?: string; pages: OfficialPreview['pages']; at: string
   status: 'prepared' | 'applying' | 'applied' | 'rolled-back' | 'recovery-required' | 'restored'
   writes: Write[]; overrides?: { before: FutureOverrides; after: FutureOverrides; appliedFingerprint?: string; reverted?: boolean }
 }
@@ -152,8 +152,10 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       const config = service.snapshot().config
       if (input.sourceUrl !== undefined && typeof input.sourceUrl !== 'string') throw new Error('入口网址无效')
       const sourceUrl = officialUrl(input.sourceUrl as string ?? config.official?.sourceUrl ?? DEFAULT_OFFICIAL_URL).href
-      const analyzer = input.analyzer === undefined ? config.official?.analyzer ?? service.hostDefault() : input.analyzer as ModelRef
+      const analyzer = input.analyzer === null ? service.hostDefault() : input.analyzer === undefined ? config.official?.analyzer ?? service.hostDefault() : input.analyzer as ModelRef
       if (!analyzer || typeof analyzer.providerId !== 'string' || typeof analyzer.modelId !== 'string' || analyzer.providerId === 'dsh-model-manager' || !service.model(analyzer)) throw new Error('请选择已加载的真实分析模型，或先设置宿主默认模型')
+      if (input.reasoningEffort !== undefined && (typeof input.reasoningEffort !== 'string' || !input.reasoningEffort)) throw new Error('分析推理档位无效')
+      const reasoningEffort = input.reasoningEffort as string | undefined
       if (revision('llm-deepseek') === null) throw new Error('DSH 未加载 DeepSeek 官方配置')
       const startingRevision = revision('llm-deepseek')
       const startingCatalog = canonical(service.snapshot().models.filter(model => model.providerId === OFFICIAL_PROVIDER))
@@ -163,7 +165,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
         timer = setInterval(() => { if (!res.destroyed && !res.writableEnded) res.write(': keepalive\n\n') }, 15_000); timer.unref()
       }
       const report = (value: OfficialProgress) => { if (streaming) emit('progress', value) }
-      const { analysis, pages } = await analyzeOfficial(ctx.llm, analyzer, sourceUrl, abort.signal, report)
+      const { analysis, pages } = await analyzeOfficial(ctx.llm, analyzer, sourceUrl, abort.signal, report, reasoningEffort)
       await service.refresh(); abort.signal.throwIfAborted()
       if (generation !== currentGeneration) throw new Error('同步预览已被新刷新取代')
       if (revision('llm-deepseek') !== startingRevision || canonical(service.snapshot().models.filter(model => model.providerId === OFFICIAL_PROVIDER)) !== startingCatalog) throw new Error('SETTINGS_CONFLICT：分析期间模型目录已变化')
@@ -171,7 +173,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       await service.flush()
       const before = revisions(), fingerprint = service.futureOverridesFingerprint(), state = await readState()
       if (!same(before, revisions()) || fingerprint !== service.futureOverridesFingerprint()) throw new Error('SETTINGS_CONFLICT')
-      const result: OfficialPreview = { token: randomUUID(), sourceUrl, analyzer, fetchedAt: pages[0].fetchedAt, pages: pages.map(({ url, fetchedAt }) => ({ url, fetchedAt })), analysis, diffs: officialDiffs(state, analysis), notes: analysis.notes, revisions: before, overridesFingerprint: fingerprint, localModelIds: state.models.map(model => model.id) }
+      const result: OfficialPreview = { token: randomUUID(), sourceUrl, analyzer, ...(reasoningEffort ? { reasoningEffort } : {}), fetchedAt: pages[0].fetchedAt, pages: pages.map(({ url, fetchedAt }) => ({ url, fetchedAt })), analysis, diffs: officialDiffs(state, analysis), notes: analysis.notes, revisions: before, overridesFingerprint: fingerprint, localModelIds: state.models.map(model => model.id) }
       abort.signal.throwIfAborted()
       if (generation !== currentGeneration) throw new Error('预览已失效')
       preview = result
@@ -194,7 +196,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
         const after = applyOfficialDiffs(before, current.diffs.filter(diff => selected.includes(diff.id)))
         after.config.official = { ...after.config.official, checkedAt: current.fetchedAt }
         validateConfig(after.config)
-        const backup: Backup = { version: 2, token: current.token, sourceUrl: current.sourceUrl, analyzer: current.analyzer, pages: current.pages, at: new Date().toISOString(), status: 'prepared', writes: buildWrites(before, after), ...(!same(before.overrides, after.overrides) ? { overrides: { before: before.overrides, after: after.overrides } } : {}) }
+        const backup: Backup = { version: 2, token: current.token, sourceUrl: current.sourceUrl, analyzer: current.analyzer, ...(current.reasoningEffort ? { reasoningEffort: current.reasoningEffort } : {}), pages: current.pages, at: new Date().toISOString(), status: 'prepared', writes: buildWrites(before, after), ...(!same(before.overrides, after.overrides) ? { overrides: { before: before.overrides, after: after.overrides } } : {}) }
         // 完成预检后立即消费 token；部分失败也不能重放同一次预览。
         preview = undefined
         await transaction(backup, saveOverrides, false)

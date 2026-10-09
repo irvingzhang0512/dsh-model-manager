@@ -24,13 +24,26 @@ describe('最新网页和 LLM 分析', () => {
     expect(page.links).toEqual(['https://docs.example.test/new-pricing'])
     expect(page.text).toBe('Current model one')
   })
-  it.each([['low', undefined, 'low'], ['low', 'high', 'high'], ['off', undefined, undefined]])('遵循真实模型公开档位 %s／默认 %s', async (supported, defaultEffort, expected) => {
+  it.each([['low', undefined], ['high', 'high'], ['off', undefined]])('留空省略档位，不自动选择公开 %s／默认 %s', async (supported, defaultEffort) => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
     const { llm: runtime, stream } = llm([analysis(['one'])])
     Object.assign(runtime, { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: supported }], defaultEffort } }) })
     await analyzeOfficial(runtime, runner, source, new AbortController().signal)
-    expect(stream.mock.calls[0][0].reasoningEffort).toBe(expected)
+    expect(stream.mock.calls[0][0]).not.toHaveProperty('reasoningEffort')
     expect(stream.mock.calls[0][0].messages[0].source).toEqual({ kind: 'plugin', plugin: 'dsh-model-manager' })
+  })
+  it.each(['low', 'high', 'off'])('只传递显式选择的公开档位 %s', async effort => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    const { llm: runtime, stream } = llm([analysis(['one'])])
+    Object.assign(runtime, { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: effort }] } }) })
+    await analyzeOfficial(runtime, runner, source, new AbortController().signal, undefined, effort)
+    expect(stream.mock.calls[0][0].reasoningEffort).toBe(effort)
+  })
+  it('不公开的推理档位在读取网页／调用 LLM 前拒绝', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    const { llm: runtime, stream } = llm([])
+    await expect(analyzeOfficial(runtime, runner, source, new AbortController().signal, undefined, 'high')).rejects.toThrow('不支持推理档位')
+    expect(fetch).not.toHaveBeenCalled(); expect(stream).not.toHaveBeenCalled()
   })
   it('通用提取正文、表格、脚注、实体与实际相关链接，排除导航和脚本', () => {
     const page = extractOfficialPage('<nav>old-model</nav><main><table><tr><th>API</th><td>new&#45;id</td></tr></table><p>footnote &amp; detail</p><a href="/changed?x=1&amp;y=2#part">详情</a><a href="https://elsewhere.test/">外部</a><script>instruction</script></main>', source)

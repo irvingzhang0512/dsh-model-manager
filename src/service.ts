@@ -206,8 +206,8 @@ export class ModelManagerService {
     if (savedCache) for (const [key, value] of Object.entries(savedCache)) if (value.at > Date.now() - 7 * 86400000) this.visionCache.set(key, value)
   }
 
-  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] } {
-    return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models),
+  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
+    return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models), hostDefault: this.hostDefault(),
       verifications: [...this.verification.values()].map(value => ({ ...structuredClone(value), stale: value.signature !== this.signature(value.model, value.kind) })) }
   }
 
