@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AutoTab, SubagentsTab } from './auto-tabs.js'
+import { DEFAULT_OFFICIAL_URL, predictedModelCount, type OfficialPreview, type OfficialProgress } from '../official-types.js'
+import { readOfficialStream } from './official-stream.js'
 import type { AliasReliability, ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
 
 export const inject = ['slots']
 type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; verifications: (Verification & { stale: boolean })[] }
 type Tab = '模型' | '别名与兜底' | 'AUTO 自动选模型' | '子 Agent' | '视觉' | '日志'
 const tabs: Tab[] = ['模型', '别名与兜底', 'AUTO 自动选模型', '子 Agent', '视觉', '日志']
-type OfficialPreview = { token: string; sources: { models: string; thinking: string; updates: string }; fetchedAt: string; diffs: { id: string; field: string; before: unknown; after: unknown; source: string; reason: string }[]; notes: string[] }
 const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明' }
 type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
 type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[]; nativeRevision?: number }
@@ -262,9 +263,10 @@ function ManagerSection() {
   const [refreshing, setRefreshing] = useState(false)
   const [probing, setProbing] = useState('')
   const [preview, setPreview] = useState<ProbeDialog | null>(null)
-  const [officialSources, setOfficialSources] = useState({ models: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing', thinking: 'https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/', updates: 'https://api-docs.deepseek.com/zh-cn/updates' })
   const [official, setOfficial] = useState<OfficialPreview | null>(null)
   const [officialChecked, setOfficialChecked] = useState<string[]>([])
+  const [officialProgress, setOfficialProgress] = useState<OfficialProgress | null>(null)
+  const officialAbort = useRef<AbortController | null>(null)
   const [notices, setNotices] = useState<Notice[]>([])
   const [aliasName, setAliasName] = useState('')
   const [logs, setLogs] = useState<Record<string, unknown>[]>([])
@@ -277,7 +279,8 @@ function ManagerSection() {
   const verifyAbort = useRef<AbortController | null>(null)
   const noticeSeq = useRef(0)
   const timers = useRef<number[]>([])
-  useEffect(() => () => { timers.current.forEach(id => window.clearTimeout(id)) }, [])
+  useEffect(() => () => { timers.current.forEach(id => window.clearTimeout(id)); officialAbort.current?.abort() }, [])
+  useEffect(() => { setOfficial(null); setOfficialChecked([]) }, [draft?.official?.sourceUrl, draft?.official?.analyzer?.providerId, draft?.official?.analyzer?.modelId])
   const dismiss = useCallback((id: number) => setNotices(list => list.filter(item => item.id !== id)), [])
   const notify = useCallback((kind: Notice['kind'], text: string) => {
     const id = ++noticeSeq.current
@@ -290,7 +293,7 @@ function ManagerSection() {
     const next = asSnapshot(await request(''))
     // 插件 host 改动需要重启 DSH：旧 host 返回 v1 配置（别名是数组、无 auto 字段），新页面渲染必然崩溃，这里给出明确指引。
     if (next.config.version !== 3) throw new Error(`检测到旧版插件服务（配置格式 v${next.config.version}）：请重启 DSH 让新版 host 生效后刷新本页`)
-    setSnapshot(next); setDraft(structuredClone(next.config)); setFatal('')
+    setSnapshot(next); setDraft(structuredClone(next.config)); setFatal(''); setOfficial(null); setOfficialChecked([])
     setExpanded(new Set())
   }
   useEffect(() => { void load().catch(error => setFatal(String(error))) }, [])
@@ -313,6 +316,7 @@ function ManagerSection() {
     try {
       const next = asSnapshot(await request('', { method: 'PUT', body: JSON.stringify({ revision: snapshot.revision, config: draft }) }))
       setSnapshot(next); setDraft(structuredClone(next.config)); window.dispatchEvent(new Event('dmm:config'))
+      setOfficial(null); setOfficialChecked([])
       notify('success', '已保存插件配置（所有标签页），后续请求使用新配置。')
     } catch (error) {
       const text = String(error)
@@ -351,13 +355,21 @@ function ManagerSection() {
     return result
   }
   const refreshOfficial = async () => {
+    officialAbort.current?.abort()
+    const controller = new AbortController(); officialAbort.current = controller
+    setOfficial(null); setOfficialChecked([]); setOfficialProgress({ stage: 'reading', round: 1, pageCount: 0 })
     setBusy(true)
-    try { const result = await request('/official-preview', { method: 'POST', body: JSON.stringify({ sources: officialSources }) }) as OfficialPreview; setOfficial(result); setOfficialChecked(result.diffs.map(item => item.id)); notify('info', `已读取 ${result.diffs.length} 项差异，请核对来源和字段。`) }
-    catch (error) { notify('error', String(error)) }
-    finally { setBusy(false) }
+    try {
+      const response = await fetch('/api/model-manager/official-preview', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify({ sourceUrl: draft?.official?.sourceUrl ?? DEFAULT_OFFICIAL_URL, analyzer: draft?.official?.analyzer }), signal: controller.signal })
+      const result = await readOfficialStream(response, value => { if (officialAbort.current === controller && !controller.signal.aborted) setOfficialProgress(value) })
+      if (controller.signal.aborted || officialAbort.current !== controller) return
+      setOfficial(result); setOfficialChecked(result.diffs.filter(item => item.field !== 'removeModel' && !item.blockedReasons.length).map(item => item.id))
+      notify('info', `识别出 ${result.analysis.models.length} 个当前 API 模型、${result.diffs.length} 项差异，请核对原文证据。`)
+    } catch (error) { if (officialAbort.current === controller) notify(controller.signal.aborted ? 'info' : 'error', controller.signal.aborted ? '分析已取消，配置未修改。' : String(error)) }
+    finally { if (officialAbort.current === controller) { officialAbort.current = null; setOfficialProgress(null); setBusy(false) } }
   }
   const applyOfficial = async () => {
-    if (!official) return
+    if (!official || dirty) return
     setBusy(true)
     try { await request('/official-apply', { method: 'POST', body: JSON.stringify({ token: official.token, selected: officialChecked }) }); setOfficial(null); await refreshDirectory(true); await load(); notify('success', '已应用选中的官方资料，可使用“恢复上次同步”撤回。') }
     catch (error) { notify('error', String(error)) }
@@ -437,13 +449,29 @@ function ManagerSection() {
     </details>
     <div className="dmm-tabs">{tabs.map(item => <button key={item} aria-selected={tab === item} onClick={() => { setTab(item); if (item === '日志') void request('/logs').then(result => setLogs(result.events)).catch(error => notify('error', String(error))) }}>{item}</button>)}</div>
     {tab === '模型' && <>
-      <div className="dmm-card"><strong>同步 DeepSeek 官方配置</strong><p className="dmm-muted">点击后读取以下官方网页，先预览差异再应用。网页不一致或解析失败时不会写入。</p>
-        {(['models', 'thinking', 'updates'] as const).map(key => <div className="dmm-row" key={key}><label>{key} <input style={{ minWidth: 440, maxWidth: '100%' }} value={officialSources[key]} onChange={event => setOfficialSources(current => ({ ...current, [key]: event.target.value }))} /></label></div>)}
-        <div className="dmm-row"><button disabled={busy} onClick={() => void refreshOfficial()}>刷新并预览</button><button disabled={busy} onClick={() => { setBusy(true); void request('/official-restore', { method: 'POST', body: '{}' }).then(async () => { await load(); notify('success', '已恢复上次同步前的配置。') }).catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>恢复上次同步</button></div>
-        {official && <><p className="dmm-muted">抓取时间：{official.fetchedAt}；模型来源：<a href={official.sources.models} target="_blank" rel="noreferrer">打开官方网页</a></p>
-          {official.diffs.map(diff => <div className="dmm-row" key={diff.id}><label><input type="checkbox" checked={officialChecked.includes(diff.id)} onChange={event => setOfficialChecked(current => event.target.checked ? [...current, diff.id] : current.filter(id => id !== diff.id))} />{diff.id}：{typeof diff.before === 'object' ? JSON.stringify(diff.before) : String(diff.before)} → <strong>{typeof diff.after === 'object' ? JSON.stringify(diff.after) : String(diff.after)}</strong></label><span className="dmm-muted">{diff.reason} · <a href={diff.source} target="_blank" rel="noreferrer">依据网页</a></span></div>)}
-          {!official.diffs.length && <p className="dmm-muted">当前官方模型声明已与网页一致。</p>}
-          <button className="dmm-primary" disabled={busy || !officialChecked.length} onClick={() => void applyOfficial()}>应用选中差异</button>
+      <div className="dmm-card"><strong>同步 DeepSeek 官方配置</strong>
+        <p className="dmm-muted">每次重新读取入口网页，由 LLM 根据原文识别当前 API model name；必要时读取相关链接。会调用一次或多次分析模型，产生用量。先预览，再手动应用。</p>
+        <div className="dmm-row"><label>资料入口 <input aria-label="官方资料入口" disabled={busy} style={{ width: 'min(520px, 100%)' }} value={draft.official?.sourceUrl ?? DEFAULT_OFFICIAL_URL} onChange={event => edit(next => { next.official = { ...next.official, sourceUrl: event.target.value } })} /></label></div>
+        <div className="dmm-row"><label>分析模型 <SelectModel disabled={busy} value={draft.official?.analyzer} models={snapshot.models.filter(model => model.providerId !== 'dsh-model-manager')} aliases={[]} onChange={value => edit(next => { next.official = { ...next.official, analyzer: value && typeof value !== 'string' ? value : undefined } })} /></label><span className="dmm-muted">未选择时使用宿主默认模型；独立于 AUTO。网址和模型使用页面底部“保存设置”保存。</span></div>
+        <div className="dmm-row"><button disabled={busy} onClick={() => void refreshOfficial()}>刷新并预览</button>
+          {officialProgress && <button onClick={() => { officialAbort.current?.abort(); setOfficial(null); setOfficialChecked([]) }}>取消分析</button>}
+          <button disabled={busy || dirty} onClick={() => { setBusy(true); void request('/official-restore', { method: 'POST', body: '{}' }).then(async () => { await load(); notify('success', '已恢复上次同步前的配置。') }).catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>恢复上次同步</button></div>
+        {officialProgress && <p role="status">{{ reading: '读取网页', analyzing: '分析资料', diffing: '生成差异' }[officialProgress.stage]}… 已读取 {officialProgress.pageCount} 页{officialProgress.round ? `，第 ${officialProgress.round} 轮` : ''}</p>}
+        {dirty && <p className="dmm-note">有未保存的插件草稿。应用或恢复前，请先保存或重新加载放弃草稿，再刷新预览。</p>}
+        {official && <>
+          <p>官方当前 <strong>{official.analysis.models.length}</strong> 个模型 · 本地 {official.localModelIds.length} 个 · 选中操作后预计 {predictedModelCount(official, officialChecked)} 个 · 差异 {official.diffs.length} 项</p>
+          <p className="dmm-muted">抓取时间：{official.fetchedAt}；分析模型：{official.analyzer.providerId}/{official.analyzer.modelId}。完整性由 LLM 判断，请核对原文；不代表当前账号调用验证。</p>
+          {official.analysis.models.map(model => <div key={model.id}><strong>{model.id}</strong>{model.name ? ` · ${model.name}` : ''}{model.evidence.map((item, index) => <p className="dmm-muted" key={index}><a href={item.source} target="_blank" rel="noreferrer">依据网页</a>：{item.quote}</p>)}</div>)}
+          <details><summary>实际读取页面与完整性依据</summary>{official.pages.map(page => <p key={page.url}><a href={page.url} target="_blank" rel="noreferrer">{page.url}</a> · {page.fetchedAt}</p>)}{official.analysis.completenessEvidence.map((item, index) => <p key={index}>{item.quote}</p>)}{official.notes.map((note, index) => <p key={`note-${index}`}>{note}</p>)}</details>
+          {official.diffs.map(diff => <div className="dmm-card" key={diff.id}><label><input type="checkbox" disabled={!!diff.blockedReasons.length || busy} checked={officialChecked.includes(diff.id)} onChange={event => setOfficialChecked(current => event.target.checked ? [...current, diff.id] : current.filter(id => id !== diff.id))} />{{ name: '名称更新', inputModalities: '图片能力更新', contextWindow: '上下文更新', addModel: '新增模型', migrateModel: '合并迁移', removeModel: '移除旧模型' }[diff.field]}：<strong>{diff.modelId}</strong></label>
+            <p className="dmm-muted">{diff.reason}</p>
+            {diff.field === 'migrateModel' ? <p>{(diff.before as string[]).join('、')} → {diff.modelId}（创建／合并目标、迁移引用、移除旧入口）</p> : diff.field !== 'addModel' && diff.field !== 'removeModel' ? <p>{JSON.stringify(diff.before)} → {JSON.stringify(diff.after)}</p> : null}
+            {diff.references.length > 0 && <details><summary>涉及 {diff.references.length} 处引用</summary>{diff.references.map(path => <p key={path}>{path}</p>)}</details>}
+            {diff.blockedReasons.map(reason => <p className="dmm-error" key={reason}>{reason}；请调整后重新预览。</p>)}
+            {diff.evidence.map((item, index) => <p className="dmm-muted" key={index}><a href={item.source} target="_blank" rel="noreferrer">依据网页</a>：{item.quote}</p>)}
+          </div>)}
+          {!official.diffs.length && <p className="dmm-muted">当前官方模型清单及有证据的声明已一致。</p>}
+          <button className="dmm-primary" disabled={busy || dirty || !officialChecked.length} onClick={() => void applyOfficial()}>应用选中差异</button>
         </>}
       </div>
       <details className="dmm-guide">

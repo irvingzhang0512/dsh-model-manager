@@ -1,6 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -19,7 +17,7 @@ import { HostModelBridge, ModelManagerService, isSettingsConflict, resolveDataDi
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
 import { registerManagerTools } from './tools.js'
 import { probePng } from './probe-image.js'
-import { OFFICIAL_SOURCES, fetchOfficial, officialDiffs, parseOfficialPages, type OfficialPreview, type SourceUrls } from './official-sync.js'
+import { registerOfficialSync } from './official-host.js'
 import { recommendAuto } from './recommend-auto.js'
 
 export const name = 'dsh-model-manager'
@@ -162,8 +160,6 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
   const vision = new VisionRegistry()
   const adapter = new ManagedAdapter(ctx.llm, service, vision)
   let ready = false
-  let officialPreview: OfficialPreview | undefined
-  const officialBackup = join(resolveDataDir(), 'official-sync-backup.json')
   void service.init().then(() => { ready = true }).catch(err => ctx.logger?.error?.(`[dsh-model-manager] 初始化失败: ${String(err)}`))
   ctx.effect(() => scope.watch(next => service.onSettingsChanged(next)), 'dsh-model-manager: settings')
   ctx.effect(() => ctx.llm.registerAdapter([MANAGED_PROVIDER], adapter), 'dsh-model-manager: adapter')
@@ -279,100 +275,7 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     } catch (err) { error(res, err) }
   } }), 'dsh-model-manager: subagents route')
 
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/official-preview', handler: async (req, res) => {
-    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
-    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
-    try {
-      const input = await body(req) as { sources?: SourceUrls }
-      const sources = input.sources ?? OFFICIAL_SOURCES
-      if (!sources || Object.keys(OFFICIAL_SOURCES).some(key => typeof sources[key as keyof SourceUrls] !== 'string')) throw new Error('官方资料来源不完整')
-      const { pages, fetchedAt } = await fetchOfficial(sources)
-      const models = parseOfficialPages(pages)
-      const revision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
-      if (revision === undefined) throw new Error('DSH 未加载 DeepSeek 官方配置')
-      officialPreview = { token: randomUUID(), sources, fetchedAt, models, diffs: officialDiffs(service.snapshot().models, models, sources.models), notes: [], revision }
-      json(res, 200, officialPreview)
-    } catch (err) { error(res, err) }
-  } }), 'dsh-model-manager: official preview')
-
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/official-apply', handler: async (req, res) => {
-    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
-    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
-    try {
-      const input = await body(req) as { token: string; selected: string[] }
-      const preview = officialPreview
-      if (!preview || input.token !== preview.token || !Array.isArray(input.selected) || input.selected.some(id => !preview.diffs.some(diff => diff.id === id))) throw new Error('同步预览已失效，请重新刷新')
-      if (!input.selected.length || new Set(input.selected).size !== input.selected.length) throw new Error('请选择不重复的同步差异')
-      const revision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
-      if (revision !== preview.revision) throw new Error('SETTINGS_CONFLICT')
-      const section = ctx.settings.get('llm-deepseek') as { models?: { id: string; name?: string; contextWindow?: number; inputModalities?: string[]; [key: string]: unknown }[] } | undefined
-      if (!section?.models?.length) throw new Error('DeepSeek 官方模型清单不可编辑')
-      const original = structuredClone(section.models)
-      const updated = structuredClone(original)
-      for (const diff of preview.diffs.filter(item => input.selected.includes(item.id))) {
-        if (diff.field === 'id') continue
-        if (diff.field === 'addModel') {
-          const official = diff.after as (typeof preview.models)[number]
-          if (updated.some(item => item.id === official.id)) throw new Error(`模型已存在：${official.id}`)
-          updated.push({ id: official.id, name: official.name, contextWindow: official.contextWindow, inputModalities: official.image ? ['text', 'image'] : ['text'], ...(official.id === 'deepseek-flash' ? { systemPromptUpdate: 'in-history' } : {}) })
-          continue
-        }
-        const model = updated.find(item => item.id === diff.id.split(':')[0])
-        if (!model) throw new Error(`模型清单已变化：${diff.id}`)
-        if (diff.field === 'name') model.name = diff.after as string
-        if (diff.field === 'contextWindow') model.contextWindow = diff.after as number
-        if (diff.field === 'inputModalities') model.inputModalities = diff.after === 'yes' ? ['text', 'image'] : ['text']
-      }
-      if (input.selected.includes('deepseek-v4-flash:id') && !updated.some(item => item.id === 'deepseek-flash')) throw new Error('迁移旧 Flash 引用前须先添加新 Flash 模型')
-      const originalConfig = service.snapshot()
-      await mkdir(resolveDataDir(), { recursive: true })
-      const backup = { at: new Date().toISOString(), models: original, config: originalConfig.config, appliedOfficialRevision: undefined as number | undefined, appliedPluginRevision: undefined as number | undefined }
-      await writeFile(officialBackup, JSON.stringify(backup), { encoding: 'utf8', mode: 0o600 })
-      const changedHost = JSON.stringify(updated) !== JSON.stringify(original)
-      if (changedHost) await ctx.settings.mutate('llm-deepseek', [{ op: 'set', path: ['models'], value: updated }], revision)
-      try {
-        const next = structuredClone(originalConfig.config)
-        if (input.selected.includes('deepseek-v4-flash:id')) {
-          const change = (value: unknown): void => {
-            if (!value || typeof value !== 'object') return
-            if ('providerId' in value && 'modelId' in value && value.providerId === 'deepseek-official' && value.modelId === 'deepseek-v4-flash') value.modelId = 'deepseek-flash'
-            for (const item of Object.values(value)) change(item)
-          }
-          change(next)
-        }
-        next.official = { checkedAt: preview.fetchedAt, sources: preview.sources }
-        await service.update(next, originalConfig.revision)
-      } catch (failure) {
-        if (changedHost) {
-          const rollbackRevision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
-          if (rollbackRevision !== undefined) await ctx.settings.mutate('llm-deepseek', [{ op: 'set', path: ['models'], value: original }], rollbackRevision)
-        }
-        throw failure
-      }
-      await service.refresh()
-      backup.appliedOfficialRevision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
-      backup.appliedPluginRevision = service.snapshot().revision
-      await writeFile(officialBackup, JSON.stringify(backup), { encoding: 'utf8', mode: 0o600 })
-      officialPreview = undefined
-      json(res, 200, { applied: input.selected.length, backupAt: new Date().toISOString(), snapshot: service.snapshot() })
-    } catch (err) { error(res, err) }
-  } }), 'dsh-model-manager: official apply')
-
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/official-restore', handler: async (req, res) => {
-    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
-    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
-    try {
-      const backup = JSON.parse(await readFile(officialBackup, 'utf8')) as { models: unknown[]; config: ManagerConfig; appliedOfficialRevision?: number; appliedPluginRevision?: number; restored?: boolean }
-      const revision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.revision
-      if (revision === undefined) throw new Error('DeepSeek 配置不可用')
-      if (backup.restored || backup.appliedOfficialRevision === undefined || backup.appliedPluginRevision === undefined || revision !== backup.appliedOfficialRevision || service.snapshot().revision !== backup.appliedPluginRevision) throw new Error('SETTINGS_CONFLICT：同步后配置已有变化，请手动核对备份')
-      await ctx.settings.mutate('llm-deepseek', [{ op: 'set', path: ['models'], value: backup.models }], revision)
-      await service.update(backup.config, service.snapshot().revision)
-      await service.refresh()
-      await writeFile(officialBackup, JSON.stringify({ ...backup, restored: true }), { encoding: 'utf8', mode: 0o600 })
-      json(res, 200, { restored: true, snapshot: service.snapshot() })
-    } catch (err) { error(res, err) }
-  } }), 'dsh-model-manager: official restore')
+  registerOfficialSync(ctx, service)
 
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/native', handler: async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }

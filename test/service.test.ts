@@ -217,4 +217,22 @@ describe('宿主桥接与版本控制', () => {
       await service.flush()
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
+  it('官方迁移锁内结束本轮时，下一轮覆盖立即消费且不能被迁移或恢复复活', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dmm-consume-'))
+    const service = new ModelManagerService({ catalog: async () => [], applyNative: async () => {} }, dir)
+    try {
+      await service.init(); await service.setOverride('s', 'nextTurn', { maxOutputTokens: 55 })
+      service.effectiveSelection('s', 1)
+      const fingerprint = service.futureOverridesFingerprint()
+      await expect(service.withFutureOverrides(fingerprint, async save => {
+        const original = service.futureOverrides()
+        service.endTurn('s', 1)
+        expect(service.effectiveSelection('s', 2).maxOutputTokens).toBeUndefined()
+        await save(original)
+      })).rejects.toThrow('CONFLICT')
+      await service.flush()
+      expect(service.futureOverrides()).toEqual({})
+      expect(JSON.parse(await readFile(join(dir, 'overrides.json'), 'utf8'))).toEqual({ s: {} })
+    } finally { await service.flush(); await rm(dir, { recursive: true, force: true }) }
+  })
 })

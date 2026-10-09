@@ -6,6 +6,7 @@ import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { SettingsPathOp, SettingsProvider } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_CONFIG, mergeSelection, migrateConfig, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
 import type { AutoDecision } from './auto-router.js'
+import { canonical, type FutureOverrides } from './official-state.js'
 
 /**
  * 宿主设置服务拒绝过期 revision 时抛出的冲突错误（`SettingsConflictError`，`code` 固定为 `SETTINGS_CONFLICT`）。
@@ -216,7 +217,7 @@ export class ModelManagerService {
   }
   private decorateModels(models: ModelRecord[]): ModelRecord[] {
     return models.map(model => ({ ...model,
-      capabilitySource: model.providerId === 'deepseek-official' && this.config.official ? this.config.official.sources.models : 'DSH 已加载模型目录',
+      capabilitySource: model.providerId === 'deepseek-official' && this.config.official ? this.config.official.sourceUrl ?? this.config.official.sources?.models ?? 'DSH 已加载模型目录' : 'DSH 已加载模型目录',
       capabilityCheckedAt: model.providerId === 'deepseek-official' ? this.config.official?.checkedAt : undefined }))
   }
 
@@ -260,7 +261,9 @@ export class ModelManagerService {
     if (selection?.target) {
       resolveSelection(this.config, selection.target)
     }
-    const value = this.overrides.get(session) ?? {}
+    await this.withFutureOverrides(undefined, async save => {
+    const next = this.futureOverrides()
+    const value = next[session] ?? {}
     const preview = { ...value, [scope]: selection }
     // v2：非 AUTO 的原生请求没有全局配置行，覆盖只叠加在空基线上。
     const effective = mergeSelection(mergeSelection({}, preview.session), preview.nextTurn)
@@ -268,15 +271,44 @@ export class ModelManagerService {
     if (effective.maxOutputTokens !== undefined && (!Number.isInteger(effective.maxOutputTokens) || effective.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
     if (selection) value[scope] = structuredClone(selection)
     else delete value[scope]
-    this.overrides.set(session, value)
-    const target = join(this.dataDir, 'overrides.json')
-    this.writeQueue = this.writeQueue.catch(() => {}).then(async () => {
-      const saved = Object.fromEntries([...this.overrides.entries()].map(([key, item]) => [key, { session: item.session, nextTurn: item.nextTurn }]))
-      await writeFile(`${target}.tmp`, JSON.stringify(saved), 'utf8')
-      try { await copyFile(target, `${target}.bak`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-      await rename(`${target}.tmp`, target)
+    next[session] = value
+    await save(next)
     })
-    await this.writeQueue
+  }
+
+  futureOverrides(): FutureOverrides {
+    return Object.fromEntries([...this.overrides.entries()].filter(([, value]) => value.session || value.nextTurn).map(([key, value]) => [key, structuredClone({ ...(value.session ? { session: value.session } : {}), ...(value.nextTurn ? { nextTurn: value.nextTurn } : {}) })]))
+  }
+  futureOverridesFingerprint(): string { return createHash('sha256').update(canonical(this.futureOverrides())).digest('hex') }
+  /** 整个官方写集持有同一覆盖队列；setOverride 和 nextTurn 消耗不能插入其间。 */
+  async withFutureOverrides<T>(expected: string | undefined, action: (save: (next: FutureOverrides) => Promise<void>) => Promise<T>): Promise<T> {
+    const operation = this.writeQueue.catch(() => {}).then(async () => {
+      if (expected !== undefined && expected !== this.futureOverridesFingerprint()) throw new Error('SETTINGS_CONFLICT：会话覆盖已变化')
+      let fingerprint = this.futureOverridesFingerprint()
+      const save = async (next: FutureOverrides) => {
+        if (fingerprint !== this.futureOverridesFingerprint()) throw new Error('SETTINGS_CONFLICT：下一轮覆盖已消耗')
+        const target = join(this.dataDir, 'overrides.json')
+        await writeFile(`${target}.tmp`, JSON.stringify(next), 'utf8')
+        try { await copyFile(target, `${target}.bak`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        await rename(`${target}.tmp`, target)
+        // endTurn 必须即时消费选择；磁盘等待期间也不能将已消费的覆盖重新放回内存。
+        if (fingerprint !== this.futureOverridesFingerprint()) {
+          await writeFile(`${target}.tmp`, JSON.stringify(this.futureOverrides()), 'utf8')
+          await rename(`${target}.tmp`, target)
+          throw new Error('SETTINGS_CONFLICT：下一轮覆盖已消耗')
+        }
+        // 保留 active 请求快照，未来覆盖才迁移或恢复。
+        for (const [key, value] of this.overrides) {
+          delete value.session; delete value.nextTurn
+          if (next[key]) Object.assign(value, structuredClone(next[key]))
+        }
+        for (const [key, value] of Object.entries(next)) if (!this.overrides.has(key)) this.overrides.set(key, structuredClone(value))
+        fingerprint = this.futureOverridesFingerprint()
+      }
+      return action(save)
+    })
+    this.writeQueue = operation.then(() => {}, () => {})
+    return operation
   }
 
   effectiveSelection(session: string, turn: number): Selection {
@@ -301,7 +333,10 @@ export class ModelManagerService {
     const value = this.overrides.get(session)
     if (value?.active?.turn !== turn) return
     delete value.active
-    if (value.nextTurn) void this.setOverride(session, 'nextTurn').catch(() => {})
+    if (value.nextTurn) {
+      delete value.nextTurn
+      void this.setOverride(session, 'nextTurn').catch(() => {})
+    }
   }
 
   signature(ref: ModelRef, kind?: Verification['kind']): string {

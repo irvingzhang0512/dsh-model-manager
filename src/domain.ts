@@ -37,7 +37,7 @@ export interface ManagerConfig {
   version: 3
   aliases: Record<string, AliasConfig>
   models: Record<string, ModelSettings>
-  official?: { checkedAt: string; sources: Record<string, string> }
+  official?: { sourceUrl?: string; analyzer?: ModelRef; checkedAt?: string; sources?: Record<string, string> }
   /** main/roles 仅供旧配置迁移和已有会话读取。 */
   auto: { enabled: boolean; evaluator?: ModelRef; simple: Selection; normal: Selection; complex: Selection; preferences: Record<string, Selection>; main: Selection; roles: Record<Role, RoleSettings> }
   vision: { enabled: boolean; policy: VisionPolicy; target?: ModelRef | string }
@@ -296,6 +296,11 @@ function isValidRef(ref: unknown): ref is ModelRef {
 
 export function validateConfig(config: ManagerConfig): void {
   if (config.version !== 3) throw new Error('不支持的配置版本')
+  if (config.official?.sourceUrl !== undefined) {
+    const url = new URL(config.official.sourceUrl)
+    if (url.protocol !== 'https:' || url.username || url.password) throw new Error('官方资料入口必须是无凭据的 HTTPS 网址')
+  }
+  if (config.official?.analyzer && (!isValidRef(config.official.analyzer) || config.official.analyzer.providerId === 'dsh-model-manager')) throw new Error('分析模型必须是具体已加载的真实模型')
   if (!Number.isInteger(config.reliability.maxAttempts) || config.reliability.maxAttempts < 1 || config.reliability.maxAttempts > 3) throw new Error('尝试次数必须为 1–3')
   for (const [name, alias] of Object.entries(config.aliases ?? {})) {
     if (!/^[a-z][a-z0-9_-]*$/.test(name) || !alias || !Array.isArray(alias.candidates) || !alias.candidates.length) throw new Error(`无效别名：${name}`)

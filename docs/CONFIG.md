@@ -17,4 +17,23 @@
 
 原生子 Agent 模型范围不在此分节，页面读写 DSH 的 `subagent-model-selection`。其修改对新会话生效。
 
-DeepSeek 官方同步的预览和应用分别使用 `/api/model-manager/official-preview` 与 `/official-apply`，恢复使用 `/official-restore`。仅抓取官方文档域名并修改 `llm-deepseek` 的显式模型清单；第三方 Provider 不参与。应用前检查宿主 revision 并备份模型清单和插件配置。
+DeepSeek 官方同步保留 `/api/model-manager/official-preview`、`/official-apply` 与 `/official-restore`；预览从可配置入口读取资料，写入范围及备份规则见下文。第三方 Provider 不参与。
+
+## LLM 官方同步配置
+
+2026-10-09 已确认契约，0.4.0 实现；替代旧固定域名／三页读取及两份配置备份限制。
+
+| 字段 | 类型／默认 | 行为 |
+| --- | --- | --- |
+| `official.sourceUrl` | 可选 HTTPS URL，缺省 `https://api-docs.deepseek.com/zh-cn/` | 每次显式刷新重新读取的入口，可手动修改 hostname 和路径；后续页面和重定向限该 hostname。 |
+| `official.analyzer` | 可选 `{ providerId, modelId }` | 单独的真实分析模型，未配置使用宿主默认；不接受受管理 Provider、AUTO 或别名，不回退 AUTO 评估模型。 |
+| `official.checkedAt` | 可选 ISO 时间 | 最近一次成功应用使用的网页抓取时间；仅预览不会修改。 |
+| `official.sources` | 可选 `Record<string, string>` | 旧三页来源保留为历史，不驱动新抓取；新来源证据在完整预览和备份中记录，不用新的入口覆盖旧历史。 |
+
+这些可选字段仍属于 v3，旧 v1/v2/v3 迁移保留原 official 内容；只补缺省行为，不在启动时自动联网或调用 LLM。入口与分析模型使用现有插件草稿保存，保存不会刷新网页；预览请求显式字段优先于已保存值，未提供再取缺省。用户修改分析模型不会修改 `auto.evaluator`、宿主默认模型或原生 Subagent 设置。
+
+新同步由 LLM 识别当前 model name、替代关系和有原文依据的属性；模型数量、型号、表格布局、价格／思考页面路径不固定。最多六页、三轮分析，具体结构、限额、事件流、差异依赖及备份契约见 [架构](ARCHITECTURE.md#llm-官方同步契约)。
+
+已存在模型保留用户 maxTokens、凭据和未知字段。明确替代关系的选中迁移会同时改变官方模型清单、插件模型引用／模型键、宿主默认模型、原生 Subagent 范围及未来会话覆盖；进行中的请求与历史证据不改。无替代关系的移除存在引用时阻止，用户先调整对应配置再重新预览。新旧用户配置的不同叶值需手动调整，不静默采用任意一方。
+
+无效结果或不完整证据不提供可应用预览；分析可能多次调用 LLM，点击前显示用量提示。官方声明的当前清单不等于当前账号可调用验证，也不改变宿主真实公开的推理档位。

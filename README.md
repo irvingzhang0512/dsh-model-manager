@@ -28,7 +28,9 @@ Subagent 是 DSH 原生机制。主 Agent 可以不创建子 Agent，也可以�
 
 ## DeepSeek 官方资料
 
-“模型”页可点击“刷新并预览”读取可调整的 [官方模型表](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)、[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)和[更新日志](https://api-docs.deepseek.com/zh-cn/updates)。预览列出来源、抓取时间和字段差异；只应用勾选项。资料冲突或解析失败时不覆盖配置。同步仅处理 `llm-deepseek` 官方 Provider，不迁移第三方同名模型；保存前核对 revision，应用前备份，可用“恢复上次同步”撤回。凭据和用户设置的输出上限不会随官方资料刷新而覆盖。
+“模型”页使用可保存的资料入口，默认 [DeepSeek 文档首页](https://api-docs.deepseek.com/zh-cn/)。点击“刷新并预览”重新读取网页，由独立分析模型根据原文识别当前 API model name；未选择时使用宿主默认模型，绕过 AUTO 和别名。最多读取六页、调用三轮 LLM，可取消；页面显示模型清单、证据、差异和预计数量，不固定模型数量。
+
+新增、更新和无冲突迁移默认勾选；没有替代关系的移除需手动选择，有引用或用户设置冲突时阻止操作。应用前保存或放弃插件草稿并重新预览；完整迁移插件、宿主和未来会话引用，保留凭据、输出上限及未知字段，备份后可恢复。失败或资料不完整不提供可应用预览；恢复遇到后续编辑会拒绝覆盖。分析会产生 LLM 用量，需要当前环境已配置可用凭据。详见 [规格](docs/SPEC.md)、[架构](docs/ARCHITECTURE.md#llm-官方同步契约) 和 [配置](docs/CONFIG.md#llm-官方同步配置)。
 
 ## 常见问题
 
