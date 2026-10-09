@@ -1,5 +1,15 @@
 # 验收清单
 
+## 2026-10-10 临时分析时限（0.7.0）
+
+- 确认依据：用户明确回复“确认这版，继续实现”，确认默认每轮 180 秒、临时 30–600 整数秒、计时显示和参数不保存的 F007／F009、架构／配置同版文档，之后才修改源码。实现见 `src/official-types.ts`、`src/official-sync.ts`、`src/official-host.ts`、`src/client/index.tsx` 和 `src/client/official-progress.tsx`；配置仍为 v3。
+- typecheck、build、168 项测试（11 个文件）通过，含客户端 bundle 冒烟。新增模拟四页／第二轮：第一轮 130 秒、第二轮 70 秒，默认 180 秒按轮重新计时后正常生成清单；30／60／180／600 截止、持续推理不延长、取消及挂起清理、非法类型和越界提前拒绝、无 token／配置写入、开始时间和时限经 SSE 下发、备份记录及旧 v2 缺字段恢复、本轮显示和计时器清理均覆盖。
+- 日常完整 GUI：原全局 `C:/Users/irving/.dsh`、DSH 0.1.5-rc.2、PID 35852 加载新版。入口首页、arkcli-coding-plan/glm-5.3、medium、180 秒，读取 1 页／第 1 轮成功识别 deepseek-flash、deepseek-v4-pro；46 秒时查看已完成，不能据此声称精确请求耗时为 46 秒。本地 4 个、预计 4 个，迁移组因 `llm-deepseek.models.deepseek-flash.inputModalities` 冲突正确阻断，没有应用。
+- 日常表单：更改时限为 240 后旧预览清空，“保存设置”保持禁用；“重新加载”后临时 240 保留。29 秒在客户端拒绝并恢复按钮；恢复 180 后发起真实分析再取消，立即显示“分析已取消，配置未修改”，没有结果或遗留等待。三项已有参数和档位同样未保存。
+- development 真实验证：通过 credentials 服务只读解析现有 Coding Plan 引用，凭据仅注入该次开发进程环境；临时 profile patch 加载相同 Provider，未写用户设置或凭据。两次首页 GUI 和一次定价 GUI 未生成预览，提示已过期，未保留错误原因；单独完整 POST 首页捕获“替代关系缺少旧／新 ID 的共同原文证据”，按规则拒绝且不写配置。随后使用首页实际链接 `https://api-docs.deepseek.com/zh-cn/quick_start/pricing` 作为可配置入口，完整 POST 与 GUI 均成功，实际同域重定向到结尾斜杠路径，读取 1 页／第 1 轮，glm-5.3／medium／180 秒，识别两个当前 ID 和两个旧 ID 的替代证据。GUI 8 秒时已完成，本地 4、选中操作后预计 2、1 项合并迁移；仅预览，未应用。
+- 清理与文件证据：临时 development patch 经内容一致检查恢复原模板，停止含测试凭据的进程后重新启动普通开发环境；日常继续运行新版。日常 settings.yaml、.credentials.yaml 前后 SHA-256 分别始终为 `A4AD900DE2015CAD98BAECFD9CFB6653FA1F574845CB8343C577DB1976F8BB24`、`3C85E51C7B99AC45AF670A6D2D4190B7996B1E1AD248EA6461915D590E8BA577`；开发 settings.yaml 始终为 `2A57C3A71031B684EA273CC4B398B926CFFA0C23D72EBD0355C6E71B49AF5F33`。截图仅保存在根私有工作区 `.local/reports/daily-official-preview-0.7.0.png` 与 `development-official-preview-0.7.0.png`。
+- 限制：真实请求没有重现用户四页／第二轮路径；该路径超过旧 60 秒的行为有模拟回归，不能当作真实上游时长证据。无效 JSON／证据仍会拒绝，180 秒不保证每次 LLM 都成功；未放宽证据、不自动重试或改档位。人工应用／恢复、AUTO／视觉／Subagent 的整体验证和完整周期巡检仍未完成，不提高整体兼容性标记。
+
 ## 2026-10-10 日常完整预览补验（0.6.2，时限设计待确认）
 
 - 用户实测截图：同一 glm-5.3／medium 在已读 4 页、第 2 轮触发每轮 60 秒截止。之前的独立适配器程序成功及日常重启检查，不能代替日常 HTTP＋浏览器的完整预览验证。

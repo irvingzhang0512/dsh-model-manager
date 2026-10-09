@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
@@ -75,7 +75,7 @@ describe('官方同步宿主完整写集', () => {
   it('缺少必填字段的格式错误经 SSE 明确反馈，不提供结果或写配置', async () => {
     const f = await fixture(), original = structuredClone(f.raw), revisions = structuredClone(f.rev)
     f.mode('missing-notes')
-    const request = f.prepare('official-preview', { sourceUrl: source }, { accept: 'text/event-stream' })
+    const request = f.prepare('official-preview', { sourceUrl: source, analysisTimeoutSeconds: 60 }, { accept: 'text/event-stream' })
     await request.run()
     expect(request.res.body).toContain('event: error'); expect(request.res.body).toContain('notes 必须是字符串数组')
     expect(request.res.body).not.toContain('event: result'); expect(request.res.writableEnded).toBe(true)
@@ -89,7 +89,7 @@ describe('官方同步宿主完整写集', () => {
     vi.useFakeTimers()
     const returned = vi.fn(() => new Promise<never>(() => {}))
     f.runtime.stream.mockImplementation((() => ({ [Symbol.asyncIterator]: () => ({ next: () => new Promise<never>(() => {}), return: returned }) })) as never)
-    const request = f.prepare('official-preview', { sourceUrl: source }, { accept: 'text/event-stream' })
+    const request = f.prepare('official-preview', { sourceUrl: source, analysisTimeoutSeconds: 60 }, { accept: 'text/event-stream' })
     const pending = request.run()
     await vi.advanceTimersByTimeAsync(0)
     expect(request.res.body).toContain('"stage":"analyzing"')
@@ -107,19 +107,49 @@ describe('官方同步宿主完整写集', () => {
     const f = await fixture()
     f.raw['dsh-model-manager'].official = { sourceUrl: source, analyzer: { providerId: 'deepseek-official', modelId: 'old-fast' } }
     const original = structuredClone(f.raw), revisions = structuredClone(f.rev)
-    const p = await f.call('official-preview', { sourceUrl: source, analyzer: null, reasoningEffort: 'high' })
+    const p = await f.call('official-preview', { sourceUrl: source, analyzer: null, reasoningEffort: 'high', analysisTimeoutSeconds: 300 })
     expect(p.status, JSON.stringify(p.json)).toBe(200)
-    expect(p.json).toMatchObject({ analyzer: { providerId: 'reader', modelId: 'reader' }, reasoningEffort: 'high' })
+    expect(p.json).toMatchObject({ analyzer: { providerId: 'reader', modelId: 'reader' }, reasoningEffort: 'high', analysisTimeoutSeconds: 300 })
     expect(f.runtime.stream.mock.calls.at(-1)![0]).toMatchObject({ provider: 'reader', model: 'reader', reasoningEffort: 'high' })
     expect(f.raw).toEqual(original); expect(f.rev).toEqual(revisions)
     const applied = await f.call('official-apply', { token: p.json.token, selected: p.json.diffs.map((d: any) => d.id) })
     expect(applied.status, JSON.stringify(applied.json)).toBe(200)
     expect(f.raw['dsh-model-manager'].official).toMatchObject({ sourceUrl: source, analyzer: { providerId: 'deepseek-official', modelId: 'fast' } })
     expect(f.raw['dsh-model-manager'].official).not.toHaveProperty('reasoningEffort')
+    expect(f.raw['dsh-model-manager'].official).not.toHaveProperty('analysisTimeoutSeconds')
+    expect(JSON.parse(await readFile(f.backupPath(), 'utf8')).analysisTimeoutSeconds).toBe(300)
     expect(JSON.parse(await readFile(f.backupPath(), 'utf8')).reasoningEffort).toBe('high')
     const defaults = await f.call('official-preview', { sourceUrl: source, analyzer: null })
     expect(defaults.status).toBe(200); expect(defaults.json).not.toHaveProperty('reasoningEffort')
+    expect(defaults.json.analysisTimeoutSeconds).toBe(180)
     expect(f.runtime.stream.mock.calls.at(-1)![0]).not.toHaveProperty('reasoningEffort')
+  })
+  it.each([null, '180', '', 29, 601, 30.5])('非法临时时限 %s 不读取网页或写配置，并作废旧 token', async value => {
+    const f = await fixture(), original = structuredClone(f.raw), revisions = structuredClone(f.rev)
+    const previous = await f.call('official-preview', { sourceUrl: source })
+    vi.mocked(fetch).mockClear(); f.runtime.stream.mockClear()
+    const p = await f.call('official-preview', { sourceUrl: source, analysisTimeoutSeconds: value })
+    expect(p.status).toBe(400); expect(p.json.error).toContain('30–600')
+    expect(fetch).not.toHaveBeenCalled(); expect(f.runtime.stream).not.toHaveBeenCalled()
+    expect(f.raw).toEqual(original); expect(f.rev).toEqual(revisions)
+    expect((await f.call('official-apply', { token: previous.json.token, selected: previous.json.diffs.map((d: any) => d.id) })).status).toBe(400)
+    await expect(readFile(f.backupPath())).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  it('默认时限和宿主开始时间经 SSE 下发；旧 v2 备份缺少时限仍可恢复', async () => {
+    const f = await fixture(), original = structuredClone(f.raw)
+    const request = f.prepare('official-preview', { sourceUrl: source }, { accept: 'text/event-stream' })
+    await request.run()
+    const events = request.res.body.split('\n\n').filter(part => part.startsWith('event:')).map(part => ({ type: part.split('\n')[0], value: JSON.parse(part.split('\ndata: ')[1]) }))
+    const progress = events.find(event => event.value.stage === 'analyzing')!.value
+    expect(progress.analysisTimeoutSeconds).toBe(180); expect(Number.isFinite(Date.parse(progress.analysisStartedAt))).toBe(true)
+    const p = events.find(event => event.type === 'event: result')!.value
+    expect(p.analysisTimeoutSeconds).toBe(180)
+    expect((await f.call('official-apply', { token: p.token, selected: p.diffs.map((d: any) => d.id) })).status).toBe(200)
+    const backup = JSON.parse(await readFile(f.backupPath(), 'utf8')); delete backup.analysisTimeoutSeconds
+    await writeFile(f.backupPath(), JSON.stringify(backup))
+    expect((await f.call('official-restore')).status).toBe(200)
+    expect(f.raw).toEqual(original)
+    f.disposed.forEach(dispose => dispose())
   })
   it.each(['invalid', '', null, 1])('非法临时推理档位 %s 不读取网页或写配置', async effort => {
     const f = await fixture(), original = structuredClone(f.raw)

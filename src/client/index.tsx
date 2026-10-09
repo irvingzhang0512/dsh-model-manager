@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AutoTab, SubagentsTab } from './auto-tabs.js'
-import { DEFAULT_OFFICIAL_URL, predictedModelCount, type OfficialPreview, type OfficialProgress } from '../official-types.js'
+import { DEFAULT_OFFICIAL_URL, DEFAULT_ANALYSIS_TIMEOUT_SECONDS, officialAnalysisTimeout, predictedModelCount, type OfficialPreview, type OfficialProgress } from '../official-types.js'
 import { readOfficialStream } from './official-stream.js'
+import { OfficialProgressStatus } from './official-progress.js'
 import type { AliasReliability, ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
 
 export const inject = ['slots']
@@ -269,6 +270,7 @@ function ManagerSection() {
   const [officialSource, setOfficialSource] = useState(DEFAULT_OFFICIAL_URL)
   const [officialAnalyzer, setOfficialAnalyzer] = useState<ModelRef>()
   const [officialEffort, setOfficialEffort] = useState<string>()
+  const [officialTimeout, setOfficialTimeout] = useState(String(DEFAULT_ANALYSIS_TIMEOUT_SECONDS))
   const officialFormInitialized = useRef(false)
   const officialAbort = useRef<AbortController | null>(null)
   const [notices, setNotices] = useState<Notice[]>([])
@@ -285,7 +287,7 @@ function ManagerSection() {
   const timers = useRef<number[]>([])
   useEffect(() => () => { timers.current.forEach(id => window.clearTimeout(id)); officialAbort.current?.abort() }, [])
   const effectiveAnalyzer = officialAnalyzer ?? snapshot?.hostDefault
-  useEffect(() => { setOfficial(null); setOfficialChecked([]) }, [officialSource, effectiveAnalyzer?.providerId, effectiveAnalyzer?.modelId, officialEffort])
+  useEffect(() => { setOfficial(null); setOfficialChecked([]) }, [officialSource, effectiveAnalyzer?.providerId, effectiveAnalyzer?.modelId, officialEffort, officialTimeout])
   useEffect(() => { setOfficialEffort(undefined) }, [effectiveAnalyzer?.providerId, effectiveAnalyzer?.modelId])
   const dismiss = useCallback((id: number) => setNotices(list => list.filter(item => item.id !== id)), [])
   const notify = useCallback((kind: Notice['kind'], text: string) => {
@@ -371,7 +373,8 @@ function ManagerSection() {
     setOfficial(null); setOfficialChecked([]); setOfficialProgress({ stage: 'reading', round: 1, pageCount: 0 })
     setBusy(true)
     try {
-      const response = await fetch('/api/model-manager/official-preview', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify({ sourceUrl: officialSource, analyzer: officialAnalyzer ?? null, ...(officialEffort ? { reasoningEffort: officialEffort } : {}) }), signal: controller.signal })
+      const analysisTimeoutSeconds = officialAnalysisTimeout(Number(officialTimeout))
+      const response = await fetch('/api/model-manager/official-preview', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify({ sourceUrl: officialSource, analyzer: officialAnalyzer ?? null, ...(officialEffort ? { reasoningEffort: officialEffort } : {}), analysisTimeoutSeconds }), signal: controller.signal })
       const result = await readOfficialStream(response, value => { if (officialAbort.current === controller && !controller.signal.aborted) setOfficialProgress(value) })
       if (controller.signal.aborted || officialAbort.current !== controller) return
       setOfficial(result); setOfficialChecked(result.diffs.filter(item => item.field !== 'removeModel' && !item.blockedReasons.length).map(item => item.id))
@@ -465,15 +468,16 @@ function ManagerSection() {
         <div className="dmm-row"><label>资料入口 <input aria-label="官方资料入口" disabled={busy} style={{ width: 'min(520px, 100%)' }} value={officialSource} onChange={event => setOfficialSource(event.target.value)} /></label></div>
         <div className="dmm-row"><label>分析模型 <SelectModel disabled={busy} value={officialAnalyzer} models={snapshot.models.filter(model => model.providerId !== 'dsh-model-manager')} aliases={[]} onChange={value => { setOfficialAnalyzer(value && typeof value !== 'string' ? value : undefined); setOfficialEffort(undefined) }} /></label>
           <label>推理档位 <EffortSelect disabled={busy} label="分析推理档位" target={effectiveAnalyzer} value={officialEffort} models={snapshot.models} aliases={{}} onChange={setOfficialEffort} /></label></div>
+        <div className="dmm-row"><label>每轮分析时限（秒） <input aria-label="每轮分析时限（秒）" type="number" min={30} max={600} step={1} disabled={busy} value={officialTimeout} onChange={event => setOfficialTimeout(event.target.value)} /></label></div>
         <p className="dmm-muted">本次参数不保存，无需点击“保存设置”。未选择分析模型时使用宿主默认模型{!officialAnalyzer && snapshot.hostDefault ? `（${snapshot.hostDefault.providerId}/${snapshot.hostDefault.modelId}）` : ''}；独立于 AUTO。刷新只生成预览，手动应用才改选中差异。</p>
         <div className="dmm-row"><button disabled={busy} onClick={() => void refreshOfficial()}>刷新并预览</button>
           {officialProgress && <button onClick={() => { officialAbort.current?.abort(); setOfficial(null); setOfficialChecked([]) }}>取消分析</button>}
           <button disabled={busy || dirty} onClick={() => { setBusy(true); void request('/official-restore', { method: 'POST', body: '{}' }).then(async () => { await load(); notify('success', '已恢复上次同步前的配置。') }).catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>恢复上次同步</button></div>
-        {officialProgress && <p role="status">{{ reading: '读取网页', analyzing: '分析资料', diffing: '生成差异' }[officialProgress.stage]}… 已读取 {officialProgress.pageCount} 页{officialProgress.round ? `，第 ${officialProgress.round} 轮` : ''}</p>}
+        <OfficialProgressStatus progress={officialProgress} />
         {dirty && <p className="dmm-note">有未保存的插件草稿。应用或恢复前，请先保存或重新加载放弃草稿，再刷新预览。</p>}
         {official && <>
           <p>官方当前 <strong>{official.analysis.models.length}</strong> 个模型 · 本地 {official.localModelIds.length} 个 · 选中操作后预计 {predictedModelCount(official, officialChecked)} 个 · 差异 {official.diffs.length} 项</p>
-          <p className="dmm-muted">抓取时间：{official.fetchedAt}；分析模型：{official.analyzer.providerId}/{official.analyzer.modelId}；推理档位：{official.reasoningEffort ?? '模型默认'}。完整性由 LLM 判断，请核对原文；不代表当前账号调用验证。</p>
+          <p className="dmm-muted">抓取时间：{official.fetchedAt}；分析模型：{official.analyzer.providerId}/{official.analyzer.modelId}；推理档位：{official.reasoningEffort ?? '模型默认'}；每轮分析时限：{official.analysisTimeoutSeconds} 秒。完整性由 LLM 判断，请核对原文；不代表当前账号调用验证。</p>
           {official.analysis.models.map(model => <div key={model.id}><strong>{model.id}</strong>{model.name ? ` · ${model.name}` : ''}{model.evidence.map((item, index) => <p className="dmm-muted" key={index}><a href={item.source} target="_blank" rel="noreferrer">依据网页</a>：{item.quote}</p>)}</div>)}
           <details><summary>实际读取页面与完整性依据</summary>{official.pages.map(page => <p key={page.url}><a href={page.url} target="_blank" rel="noreferrer">{page.url}</a> · {page.fetchedAt}</p>)}{official.analysis.completenessEvidence.map((item, index) => <p key={index}>{item.quote}</p>)}{official.notes.map((note, index) => <p key={`note-${index}`}>{note}</p>)}</details>
           {official.diffs.map(diff => <div className="dmm-card" key={diff.id}><label><input type="checkbox" disabled={!!diff.blockedReasons.length || busy} checked={officialChecked.includes(diff.id)} onChange={event => setOfficialChecked(current => event.target.checked ? [...current, diff.id] : current.filter(id => id !== diff.id))} />{{ name: '名称更新', inputModalities: '图片能力更新', contextWindow: '上下文更新', addModel: '新增模型', migrateModel: '合并迁移', removeModel: '移除旧模型' }[diff.field]}：<strong>{diff.modelId}</strong></label>

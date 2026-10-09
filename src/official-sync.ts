@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { GenerateOptions, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { ModelRef } from './domain.js'
 import type { OfficialAnalysis, OfficialEvidence, OfficialPage, OfficialProgress } from './official-types.js'
+import { DEFAULT_ANALYSIS_TIMEOUT_SECONDS, officialAnalysisTimeout } from './official-types.js'
 
 const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
 
@@ -159,7 +160,8 @@ const systemPrompt = `你是 API 官方资料分析器。只根据提供的最�
 只有原文明说旧 ID 的兼容／替代关系，才返回 replacements 项 {"oldId":"旧 API ID","newId":"当前清单 ID","evidence":[{"source":"实际已读 URL","quote":"同时含旧新精确 API ID 和替代关系的连续原文"}]}。quote 必须同时包含 oldId 和 newId，显示名不能替代 API 字符串。必要时复制连续的前后句，无法找到原文就不返回替代关系。
 所有 quote 必须直接复制所给正文中的连续原文，不省略、改写或自行加空格；source 精确使用已读页面 URL。确实不能确认型号清单完整时 complete=false，从实际 links 选择尚未读取的相关 requestedUrls，notes 说明不足。最多三轮；完整结果 requestedUrls 必须为空。资料冲突写 conflicts，不宣称完整。
 返回前检查：JSON 完整；七个顶层字段齐全且类型正确；每个 ID、证据、属性证据和替代关系满足上述要求。`
-export async function analyzeOfficial(llm: LlmRuntime, analyzer: ModelRef, sourceUrl: string, signal: AbortSignal, progress: (value: OfficialProgress) => void = () => {}, requestedEffort?: string): Promise<{ analysis: OfficialAnalysis; pages: OfficialPage[] }> {
+export async function analyzeOfficial(llm: LlmRuntime, analyzer: ModelRef, sourceUrl: string, signal: AbortSignal, progress: (value: OfficialProgress) => void = () => {}, requestedEffort?: string, analysisTimeoutSeconds = DEFAULT_ANALYSIS_TIMEOUT_SECONDS): Promise<{ analysis: OfficialAnalysis; pages: OfficialPage[] }> {
+  officialAnalysisTimeout(analysisTimeoutSeconds)
   const entry = officialUrl(sourceUrl), pages: OfficialPage[] = [], fetched = new Set<string>()
   let reasoningEffort: GenerateOptions['reasoningEffort']
   if (requestedEffort !== undefined) {
@@ -178,16 +180,18 @@ export async function analyzeOfficial(llm: LlmRuntime, analyzer: ModelRef, sourc
       if (!pages.some(item => item.url === page.url)) pages.push(page)
       if (pages.reduce((sum, item) => sum + item.text.length, 0) > 120_000) throw new Error('资料超过读取限额，未生成同步建议')
     }
-    signal.throwIfAborted(); progress({ stage: 'analyzing', round, pageCount: pages.length })
+    signal.throwIfAborted()
     const messages: GenerateOptions['messages'] = [
       { id: randomUUID() as never, role: 'system', source: { kind: 'plugin', plugin: 'dsh-model-manager' }, content: [{ type: 'text', text: systemPrompt }] },
       { id: randomUUID() as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: JSON.stringify({ round, finalRound: round === 3, pages }) }] },
     ]
     let output = ''
     const deadline = new AbortController()
-    const timer = setTimeout(() => deadline.abort(new Error('本轮资料分析已超过 60 秒，已停止预览。可降低推理档位或更换分析模型后重试。')), 60_000)
+    const analysisStartedAt = new Date().toISOString()
+    const timer = setTimeout(() => deadline.abort(new Error(`本轮资料分析已超过 ${analysisTimeoutSeconds} 秒，已停止预览。可调整本次分析时限、降低推理档位或更换分析模型后重试。`)), analysisTimeoutSeconds * 1000)
     const roundSignal = AbortSignal.any([signal, deadline.signal])
     try {
+      progress({ stage: 'analyzing', round, pageCount: pages.length, analysisStartedAt, analysisTimeoutSeconds })
       for await (const chunk of abortableStream(llm.stream({ provider: analyzer.providerId, model: analyzer.modelId, messages, ...(reasoningEffort ? { reasoningEffort } : {}), signal: roundSignal }), roundSignal)) {
         roundSignal.throwIfAborted()
         if (chunk.type === 'text-delta') output += chunk.text

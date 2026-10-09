@@ -14,6 +14,45 @@ function llm(outputs: unknown[]) {
 function state(ids: string[]): OfficialState { return { models: ids.map(id => ({ id })), config: structuredClone(DEFAULT_CONFIG), overrides: {} } }
 
 describe('最新网页和 LLM 分析', () => {
+  it('默认 180 秒按轮计时：第一轮 130 秒、四页第二轮 70 秒均完成', async () => {
+    vi.useFakeTimers()
+    const start = Date.now(), links = [1, 2, 3].map(index => `https://docs.example.test/detail-${index}`)
+    vi.stubGlobal('fetch', vi.fn(async (url: URL) => new Response(String(url) === source ? html([], [], links) : html(['one', 'two']))))
+    const calls: any[] = [], progress: any[] = []
+    const runtime = { stream: async function* (options: any) {
+      const input = JSON.parse(options.messages[1].content[0].text); calls.push(options)
+      await new Promise(resolve => setTimeout(resolve, input.round === 1 ? 130_000 : 70_000))
+      const value = input.round === 1 ? { complete: false, conflicts: [], models: [], replacements: [], completenessEvidence: [], requestedUrls: links, notes: [] } : analysis(['one', 'two'], [], input.pages[1])
+      yield { type: 'text-delta', text: JSON.stringify(value) }; yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+    const pending = analyzeOfficial(runtime as never, runner, source, new AbortController().signal, value => progress.push(value))
+    await vi.advanceTimersByTimeAsync(200_000)
+    const result = await pending
+    expect(result.pages).toHaveLength(4); expect(result.analysis.models.map(model => model.id)).toEqual(['one', 'two'])
+    expect(progress.filter(value => value.stage === 'analyzing')).toEqual([
+      { stage: 'analyzing', round: 1, pageCount: 1, analysisStartedAt: new Date(start).toISOString(), analysisTimeoutSeconds: 180 },
+      { stage: 'analyzing', round: 2, pageCount: 4, analysisStartedAt: new Date(start + 130_000).toISOString(), analysisTimeoutSeconds: 180 },
+    ])
+    expect(calls.every(call => !call.signal.aborted)).toBe(true); expect(vi.getTimerCount()).toBe(0)
+  })
+  it.each([30, 180, 600])('选择 %s 秒：到绝对截止才取消，忽略适配器挂起', async seconds => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    let signal!: AbortSignal
+    const runtime = { stream: (options: any) => { signal = options.signal; return { [Symbol.asyncIterator]: () => ({ next: () => new Promise<never>(() => {}) }) } } }
+    const pending = analyzeOfficial(runtime as never, runner, source, new AbortController().signal, undefined, undefined, seconds)
+    const rejected = expect(pending).rejects.toThrow(`${seconds} 秒`)
+    await vi.advanceTimersByTimeAsync(seconds * 1000 - 1)
+    expect(signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1); await rejected
+    expect(signal.aborted).toBe(true); expect(vi.getTimerCount()).toBe(0)
+  })
+  it.each([null, '180', '', 29, 601, 30.5, NaN, Infinity])('非法时限 %s 在网页和 LLM 之前拒绝', async value => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    const { llm: runtime, stream } = llm([])
+    await expect(analyzeOfficial(runtime, runner, source, new AbortController().signal, undefined, undefined, value as never)).rejects.toThrow('30–600 的整数秒')
+    expect(fetch).not.toHaveBeenCalled(); expect(stream).not.toHaveBeenCalled()
+  })
   it.each(['complete', 'conflicts', 'notes', 'requestedUrls', 'models', 'replacements'])('格式不合格指出 %s，拒绝结果且不自动重试', async field => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
     const value: Record<string, unknown> = { ...analysis(['one']) }
@@ -39,7 +78,7 @@ describe('最新网页和 LLM 分析', () => {
     const never = () => new Promise<never>(() => {})
     const returned = vi.fn(never), started = vi.fn()
     const runtime = { stream: () => ({ [Symbol.asyncIterator]: () => ({ next: () => { started(); return never() }, return: returned }) }) }
-    const pending = analyzeOfficial(runtime as never, runner, source, new AbortController().signal)
+    const pending = analyzeOfficial(runtime as never, runner, source, new AbortController().signal, undefined, undefined, 60)
     const rejected = expect(pending).rejects.toThrow('60 秒')
     await vi.advanceTimersByTimeAsync(0)
     expect(started).toHaveBeenCalledOnce()
@@ -72,7 +111,7 @@ describe('最新网页和 LLM 分析', () => {
     const runtime = { stream: async function* () {
       while (true) { await new Promise(resolve => setTimeout(resolve, 1000)); yield { type: 'reasoning-delta', text: 'thinking' } }
     } }
-    const pending = analyzeOfficial(runtime as never, runner, source, new AbortController().signal)
+    const pending = analyzeOfficial(runtime as never, runner, source, new AbortController().signal, undefined, undefined, 60)
     const rejected = expect(pending).rejects.toThrow('60 秒')
     await vi.advanceTimersByTimeAsync(60_000)
     await rejected

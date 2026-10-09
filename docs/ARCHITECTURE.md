@@ -1,11 +1,12 @@
 # 架构契约（v3）
 
-## 2026-10-10 临时分析时限（待确认，拟 0.7.0）
+## 2026-10-10 临时分析时限（0.7.0）
 
-对应 SPEC F007／F009；本节尚未获确认和实现。当前 0.6.2 仍按下文每轮 60 秒执行，确认后仅由本节覆盖分析时限、临时参数及相关进度契约。
+对应 SPEC F007／F009，2026-10-10 用户明确回复“确认这版，继续实现”后开发。本节替代原固定每轮 60 秒，覆盖分析时限、临时参数及相关进度契约；配置 v3 不变。
 
 - `POST /api/model-manager/official-preview` 增加可选 `analysisTimeoutSeconds?: number`；省略使用 180，提供时必须是 30–600 的安全整数。null、字符串、空值、小数和越界在网页获取／LLM 调用前拒绝。每次请求固定有效值，传给 `analyzeOfficial`，不读取任何新持久化设置。
 - `analyzeOfficial(..., requestedEffort?: string, analysisTimeoutSeconds = 180)` 在读取网页前校验同一范围，沿用 0.6.1 竞争流读取与取消的实现。每轮开始建立一次截止计时器，触发秒数为本次有效值，错误说明该值；正常／失败／取消均清理。持续推理输出不能延长截止；每页 10 秒、六页三轮和不自动重试保持。
+- 共享 `officialAnalysisTimeout(value?: unknown): number` 负责缺省 180 和严格范围校验，宿主／分析器共用；客户端将 numeric 输入解析为数值后调用同一校验，空输入不视为省略。
 - `OfficialProgress` 在 analyzing 时额外携带 `analysisStartedAt: string`（宿主 ISO 时间）和 `analysisTimeoutSeconds: number`；reading／diffing 可省略。浏览器按此开始时间每秒显示本轮已用秒数和时限，切换轮次重置显示、结束／取消卸载计时；浏览器显示不控制宿主截止。事件类型、keepalive 和旧字段保持，旧客户端可忽略新增字段。
 - `OfficialPreview` 增加必填实际 `analysisTimeoutSeconds: number`。新备份记录该有效值作为操作审计参数；既有 version:2 备份缺字段仍可恢复，不补写偏好或把分析参数纳入恢复写集。
 - 客户端独立临时 numeric 输入“每轮分析时限（秒）”，默认 180，30–600 整数；不得进入插件 draft、localStorage 或设置接口。更改时限清空旧预览，开始后禁用参数输入而取消保持可用；普通插件保存／重新加载保留临时输入。无持久化配置版本变化。
@@ -70,7 +71,7 @@ Web 设置页分为“模型”“别名与兜底”“AUTO 自动选模型”�
 4. 校验 LLM 结构、引用和原文证据；不完整则继续读取合法补充链接后再分析，无法完成则失败。只有完整且无冲突的结果才生成差异。用户点击应用之前，网页获取和 LLM 调用都不改模型配置。
 5. 生成差异时重新读取所有迁移涉及的配置和覆盖状态，检查分析前后模型目录与 `llm-deepseek` 设置版本未变化；并发变化时报 409，要求重新预览。预览有效性由本次 generation、token、设置版本和覆盖状态共同决定；旧请求即使晚返回也不得重新发布旧 token。
 
-固定限额：最多六个不同页面（入口加五个补充页）、三轮 LLM 调用，每页最多 2,000,000 个 HTML 字符；提取后的总正文最多 120,000 个字符，超限报错而非截断后宣称完整。每页获取超时 10 秒，最多三次重定向，每轮分析超时 60 秒、输出最多 32,000 个字符；不自动重试 LLM。所有阶段共用取消信号，取消后不得发布 token。重定向也必须 HTTPS 且与入口 hostname 相同；实际最终 URL 写入来源记录。
+限额：最多六个不同页面（入口加五个补充页）、三轮 LLM 调用，每页最多 2,000,000 个 HTML 字符；提取后的总正文最多 120,000 个字符，超限报错而非截断后宣称完整。每页获取超时 10 秒，最多三次重定向，每轮分析默认 180 秒、临时可选 30–600 整数秒，输出最多 32,000 个字符；不自动重试 LLM。所有阶段共用取消信号，取消后不得发布 token。重定向也必须 HTTPS 且与入口 hostname 相同；实际最终 URL 写入来源记录。
 
 0.6.1 等待修复：每轮使用插件截止计时器，将外部取消和截止信号传给适配器，并在读取异步迭代器时竞争该信号。不依赖适配器及时响应 abort；超时／取消后的 iterator.return 只尽力清理，不阻塞错误反馈。正常完成／失败都清理截止计时器和监听器；迟到输出不得恢复结果或发布 token。此处保证插件结束等待，不能保证忽略取消的上游立即停止计算，不改变上述既有时间限额。
 
@@ -104,6 +105,10 @@ type OfficialAnalysis = {
   notes: string[]
 }
 type OfficialPage = { url: string; fetchedAt: string; text: string; links: string[] }
+type OfficialProgress = {
+  stage: 'reading' | 'analyzing' | 'diffing'; round: number; pageCount: number
+  analysisStartedAt?: string; analysisTimeoutSeconds?: number
+}
 type OfficialDiff = {
   id: string
   modelId: string
@@ -120,6 +125,7 @@ type OfficialPreview = {
   sourceUrl: string
   analyzer: ModelRef
   reasoningEffort?: string
+  analysisTimeoutSeconds: number
   fetchedAt: string
   pages: { url: string; fetchedAt: string }[]
   analysis: OfficialAnalysis
@@ -152,7 +158,7 @@ type OfficialPreview = {
 
 | Path（前缀 `/api/model-manager`） | Method | 请求 | 响应／规则 |
 | --- | --- | --- | --- |
-| `/official-preview` | POST | `{ sourceUrl?: string, analyzer?: ModelRef | null, reasoningEffort?: string }` | 省略入口／分析模型时保持旧客户端缺省；显式 analyzer:null 使用宿主默认，推理档位留空时省略。JSON 客户端等待完整 OfficialPreview；`Accept: text/event-stream` 返回下述事件。旧 `{sources}` 请求显式报错并提示刷新页面，不把旧三页静默解释为新入口。 |
+| `/official-preview` | POST | `{ sourceUrl?: string, analyzer?: ModelRef | null, reasoningEffort?: string, analysisTimeoutSeconds?: number }` | 省略入口／分析模型时保持旧客户端缺省；显式 analyzer:null 使用宿主默认，推理档位留空时省略，时限省略采用 180。JSON 客户端等待完整 OfficialPreview；`Accept: text/event-stream` 返回下述事件。旧 `{sources}` 请求显式报错并提示刷新页面，不把旧三页静默解释为新入口。 |
 | `/official-apply` | POST | `{ token: string, selected: string[] }` | 校验 token、唯一且非空的选中 ID、blockedReasons、全部受影响 revision／覆盖状态；成功返回 `{ applied, backupAt, snapshot }`，snapshot 为完整插件状态。 |
 | `/official-restore` | POST | `{}` | 依据备份写集检查同步后版本／覆盖状态，再恢复原值和字段存在状态；成功返回 `{ restored: true, snapshot }`。 |
 

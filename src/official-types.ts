@@ -1,6 +1,11 @@
 import type { ModelRef } from './domain.js'
 export const DEFAULT_OFFICIAL_URL = 'https://api-docs.deepseek.com/zh-cn/'
 export const OFFICIAL_PROVIDER = 'deepseek-official'
+export const DEFAULT_ANALYSIS_TIMEOUT_SECONDS = 180
+export function officialAnalysisTimeout(value: unknown = DEFAULT_ANALYSIS_TIMEOUT_SECONDS): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 30 || value > 600) throw new Error('每轮分析时限必须是 30–600 的整数秒')
+  return value
+}
 export interface OfficialEvidence { source: string; quote: string }
 export interface OfficialModel {
   id: string; name?: string; image?: boolean; contextWindow?: number; efforts?: string[]
@@ -13,7 +18,10 @@ export interface OfficialAnalysis {
   completenessEvidence: OfficialEvidence[]; requestedUrls: string[]; notes: string[]
 }
 export interface OfficialPage { url: string; fetchedAt: string; text: string; links: string[] }
-export interface OfficialProgress { stage: 'reading' | 'analyzing' | 'diffing'; round: number; pageCount: number }
+export interface OfficialProgress {
+  stage: 'reading' | 'analyzing' | 'diffing'; round: number; pageCount: number
+  analysisStartedAt?: string; analysisTimeoutSeconds?: number
+}
 export interface OfficialDiff {
   id: string; modelId: string
   field: 'name' | 'inputModalities' | 'contextWindow' | 'addModel' | 'migrateModel' | 'removeModel'
@@ -21,7 +29,7 @@ export interface OfficialDiff {
   references: string[]; blockedReasons: string[]
 }
 export interface OfficialPreview {
-  token: string; sourceUrl: string; analyzer: ModelRef; reasoningEffort?: string; fetchedAt: string
+  token: string; sourceUrl: string; analyzer: ModelRef; reasoningEffort?: string; analysisTimeoutSeconds: number; fetchedAt: string
   pages: { url: string; fetchedAt: string }[]; analysis: OfficialAnalysis; diffs: OfficialDiff[]; notes: string[]
   revisions: Record<string, number | null>; overridesFingerprint: string; localModelIds: string[]
 }
