@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { analyzeOfficial, extractOfficialPage, fetchOfficialPage, validateOfficialAnalysis } from '../src/official-sync.ts'
-import { DEFAULT_CONFIG, modelKey } from '../src/domain.ts'
+import { DEFAULT_CONFIG, modelKey, managedId, fromManagedId } from '../src/domain.ts'
 import { applyOfficialDiffs, officialDiffs, type OfficialState } from '../src/official-state.ts'
 import { predictedModelCount } from '../src/official-types.ts'
 import { analysis, html, source } from './official-fixtures.ts'
@@ -104,6 +104,9 @@ describe('完整清单比较与迁移', () => {
     expect(next.config.aliases.entry.efforts).toEqual({ [modelKey(target)]: 'high' })
     expect(next.defaultModel).toMatchObject({ model: 'fast', other: 'keep' }); expect(next.subagents?.allowedModels).toHaveLength(1)
     expect(next.overrides.s.nextTurn?.target).toEqual(target); expect(next.config.official?.analyzer).toEqual(target)
+    expect(managedId(next.config.aliases.entry.candidates[0])).toBe('deepseek-official/fast')
+    expect(fromManagedId(managedId(next.config.aliases.entry.candidates[0]))).toEqual(target)
+    expect(fromManagedId(Buffer.from(JSON.stringify([old.providerId, old.modelId])).toString('base64url'))).toEqual(old)
     expect(officialDiffs(next, analysis(['fast', 'pro'], ['old-fast', 'old-vision']))).toEqual([])
     expect(original.models).toHaveLength(4)
   })

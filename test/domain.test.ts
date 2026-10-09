@@ -6,6 +6,26 @@ function evidence(kind: Verification['kind'], status: Verification['status'], be
 }
 
 describe('模型配置', () => {
+  it('具体模型标识直接呈现平台和型号', () => {
+    const ref = { providerId: 'arkcli-coding-plan', modelId: 'deepseek-v4-1-flash' }
+    expect(managedId(ref)).toBe('arkcli-coding-plan/deepseek-v4-1-flash')
+    expect(fromManagedId('arkcli-coding-plan/deepseek-v4-1-flash')).toEqual(ref)
+  })
+  it('兼容旧 Base64url 标识及特殊字符，分隔符不会造成碰撞', () => {
+    for (const ref of [
+      { providerId: 'platform', modelId: 'model' },
+      { providerId: '平台/a:%', modelId: '模型/b:%2F' },
+      { providerId: 'auto', modelId: 'alias:test' },
+    ]) {
+      expect(fromManagedId(managedId(ref))).toEqual(ref)
+      expect(fromManagedId(Buffer.from(JSON.stringify([ref.providerId, ref.modelId])).toString('base64url'))).toEqual(ref)
+    }
+    expect(managedId({ providerId: 'a/b', modelId: 'c' })).toBe('a%2Fb/c')
+    expect(managedId({ providerId: 'a', modelId: 'b/c' })).toBe('a/b%2Fc')
+  })
+  it.each(['', '/m', 'p/', 'p/m/extra', 'p/%', 'p/%GG', 'p/%FF', 'auto', 'alias:test', '***', 'W10', 'bnVsbA', 'WyJwIiwiIl0', 'WyJwIiwxXQ', 'WyJwIiwibSIsIngiXQ'])('拒绝无效的受管理标识 %s', id => {
+    expect(() => fromManagedId(id)).toThrow('无效的受管理模型 ID')
+  })
   it('不同 Provider 的同名模型 ID 不碰撞', () => {
     const a = { providerId: 'one', modelId: 'same' }
     const b = { providerId: 'two', modelId: 'same' }

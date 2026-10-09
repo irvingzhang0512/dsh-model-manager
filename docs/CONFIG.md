@@ -2,6 +2,8 @@
 
 `dsh-model-manager` 设置保存在 DSH 的同名设置分节。模型键由 Provider ID 和模型 ID 组成，避免不同 Provider 的同名模型冲突。
 
+0.5.0 的可读受管理路由 ID 为分别 URI 转义的平台／模型 ID，继续接受旧 Base64url ID。它不改变配置 v3、`{providerId, modelId}` 引用对象或 JSON 复合存储键 `modelKey()`，无需迁移设置或历史会话；格式见 [架构契约](ARCHITECTURE.md#可读受管理模型标识契约)。
+
 | 字段 | 用途 |
 | --- | --- |
 | `aliases` | 有序候选和别名级兜底策略；`efforts` 按候选模型键保存实际推理档位 |

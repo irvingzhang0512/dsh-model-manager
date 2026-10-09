@@ -24,6 +24,26 @@ function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: s
 }
 
 describe('受管理请求', () => {
+  it('新旧标识在解析、准备和直接调用中指向相同实际模型', async () => {
+    const { adapter, calls } = harness()
+    const legacy = Buffer.from(JSON.stringify([model.providerId, model.modelId])).toString('base64url')
+    for (const id of [managedId(model), legacy]) {
+      expect((await adapter.resolveModel('dsh-model-manager', id)).id).toBe(id)
+      const prepared = await adapter.prepareCall('dsh-model-manager', id)
+      for await (const _ of prepared.stream({ provider: 'dsh-model-manager', model: id, messages: [] })) { /* drain */ }
+      for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: id, messages: [] })) { /* drain */ }
+    }
+    expect(calls).toHaveLength(4)
+    expect(calls.every(call => call.provider === 'provider-a' && call.model === 'text')).toBe(true)
+  })
+  it('无效标识不调用底层模型', async () => {
+    const { adapter, calls } = harness()
+    await expect(adapter.prepareCall('dsh-model-manager', 'provider-a/%GG')).rejects.toThrow('无效的受管理模型 ID')
+    await expect((async () => {
+      for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: 'provider-a/text/extra', messages: [] })) { /* drain */ }
+    })()).rejects.toThrow('无效的受管理模型 ID')
+    expect(calls).toHaveLength(0)
+  })
   it('准备后修改别名不影响已捕获的请求', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
     config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }] }

@@ -126,13 +126,28 @@ export function modelKey(ref: ModelRef): string {
 }
 
 export function managedId(ref: ModelRef): string {
-  return Buffer.from(modelKey(ref), 'utf8').toString('base64url')
+  return `${encodeURIComponent(ref.providerId)}/${encodeURIComponent(ref.modelId)}`
 }
 
 export function fromManagedId(id: string): ModelRef {
-  const raw: unknown = JSON.parse(Buffer.from(id, 'base64url').toString('utf8'))
-  if (!Array.isArray(raw) || raw.length !== 2 || raw.some(v => typeof v !== 'string' || !v)) throw new Error('无效的受管理模型 ID')
-  return { providerId: raw[0], modelId: raw[1] }
+  try {
+    let raw: unknown
+    if (id.includes('/')) {
+      const parts = id.split('/')
+      if (parts.length !== 2 || parts.some(part => !part)) throw new Error()
+      raw = parts.map(part => decodeURIComponent(part))
+    } else {
+      // 旧会话保留原标识；只解码，不改写宿主选择或历史记录。
+      if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error()
+      const bytes = Buffer.from(id, 'base64url')
+      if (bytes.toString('base64url') !== id) throw new Error()
+      raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+    }
+    if (!Array.isArray(raw) || raw.length !== 2 || raw.some(v => typeof v !== 'string' || !v)) throw new Error()
+    return { providerId: raw[0], modelId: raw[1] }
+  } catch {
+    throw new Error('无效的受管理模型 ID')
+  }
 }
 
 export function aliasCandidates(config: ManagerConfig, name: string): ModelRef[] {

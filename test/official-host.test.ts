@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { apply } from '../src/index.ts'
-import { DEFAULT_CONFIG, modelKey } from '../src/domain.ts'
+import { DEFAULT_CONFIG, modelKey, managedId } from '../src/domain.ts'
 import { html, analysis, source } from './official-fixtures.ts'
 import { resolveDataDir } from '../src/service.ts'
 
@@ -86,6 +86,7 @@ describe('官方同步宿主完整写集', () => {
     expect(f.raw['agent-default-model']).toMatchObject({ model: 'fast', other: 'keep' }); expect(f.raw['subagent-model-selection'].allowedModels[0].model).toBe('fast')
     expect((await f.call('overrides', {}, {}, 'GET')).status).toBe(400) // 需要 sessionId，不误读其他会话。
     expect(result.json.snapshot.config.models[modelKey({ providerId: 'deepseek-official', modelId: 'fast' })]).toEqual({ capability: { image: 'yes' } })
+    expect(managedId(result.json.snapshot.config.aliases.main.candidates[0])).toBe('deepseek-official/fast')
     const fresh = await f.call('official-preview', { sourceUrl: source, analyzer: { providerId: 'reader', modelId: 'reader' } })
     expect(fresh.json.diffs).toEqual([])
     expect((await f.call('official-apply', { token: preview.json.token, selected: preview.json.diffs.map((d: any) => d.id) })).status).toBe(400)
@@ -94,6 +95,8 @@ describe('官方同步宿主完整写集', () => {
     expect(f.get('llm-deepseek').models.map((m: any) => m.id)).toEqual(['old-fast', 'pro'])
     expect(Object.hasOwn(f.raw['llm-deepseek'], 'models')).toBe(explicit)
     expect(f.raw['agent-default-model'].model).toBe('old-fast'); expect(f.raw['subagent-model-selection'].allowedModels[0].model).toBe('old-fast')
+    expect(managedId(restored.json.snapshot.config.aliases.main.candidates[0])).toBe('deepseek-official/old-fast')
+    expect(restored.json.snapshot.config.models[modelKey({ providerId: 'deepseek-official', modelId: 'old-fast' })]).toEqual({ capability: { image: 'yes' } })
     expect((await f.call('official-restore')).status).toBe(409)
   })
   it('settings revision 与未来覆盖变化拒绝应用；编造证据不写配置', async () => {
