@@ -9,7 +9,7 @@ import { html, analysis, source } from './official-fixtures.ts'
 import { resolveDataDir } from '../src/service.ts'
 
 let temporary: string | undefined
-afterEach(async () => { vi.unstubAllGlobals(); if (temporary) await rm(temporary, { recursive: true, force: true }); delete process.env.DSH_HOME })
+afterEach(async () => { vi.unstubAllGlobals(); vi.useRealTimers(); if (temporary) await rm(temporary, { recursive: true, force: true }); delete process.env.DSH_HOME })
 
 async function fixture(explicit = true) {
   temporary = await mkdtemp(join(tmpdir(), 'dmm-official-')); process.env.DSH_HOME = temporary
@@ -71,6 +71,26 @@ async function fixture(explicit = true) {
 }
 
 describe('官方同步宿主完整写集', () => {
+  it('挂起适配器的超时结束 SSE，不写配置且新刷新作废旧预览', async () => {
+    const f = await fixture(), original = structuredClone(f.raw), revisions = structuredClone(f.rev)
+    const previous = await f.call('official-preview', { sourceUrl: source })
+    vi.useFakeTimers()
+    const returned = vi.fn(() => new Promise<never>(() => {}))
+    f.runtime.stream.mockImplementation((() => ({ [Symbol.asyncIterator]: () => ({ next: () => new Promise<never>(() => {}), return: returned }) })) as never)
+    const request = f.prepare('official-preview', { sourceUrl: source }, { accept: 'text/event-stream' })
+    const pending = request.run()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(request.res.body).toContain('"stage":"analyzing"')
+    await vi.advanceTimersByTimeAsync(60_000)
+    await pending
+    expect(request.res.body).toContain('event: error'); expect(request.res.body).toContain('60 秒')
+    expect(request.res.body).not.toContain('event: result'); expect(request.res.writableEnded).toBe(true)
+    expect(f.raw).toEqual(original); expect(f.rev).toEqual(revisions)
+    expect((await f.call('official-apply', { token: previous.json.token, selected: previous.json.diffs.map((d: any) => d.id) })).status).toBe(400)
+    await expect(readFile(f.backupPath())).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(returned).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0)
+    f.disposed.forEach(dispose => dispose())
+  })
   it('临时参数无需保存；显式宿主默认覆盖旧 analyzer，应用不保存临时偏好', async () => {
     const f = await fixture()
     f.raw['dsh-model-manager'].official = { sourceUrl: source, analyzer: { providerId: 'deepseek-official', modelId: 'old-fast' } }

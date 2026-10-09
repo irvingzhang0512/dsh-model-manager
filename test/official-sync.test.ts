@@ -5,7 +5,7 @@ import { applyOfficialDiffs, officialDiffs, type OfficialState } from '../src/of
 import { predictedModelCount } from '../src/official-types.ts'
 import { analysis, html, source } from './official-fixtures.ts'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 const runner = { providerId: 'other', modelId: 'reader' }
 function llm(outputs: unknown[]) {
   const stream = vi.fn(async function* () { yield { type: 'text-delta', text: typeof outputs[0] === 'string' ? outputs.shift() : JSON.stringify(outputs.shift()) }; yield { type: 'finish', reason: { kind: 'stop' } } })
@@ -14,6 +14,67 @@ function llm(outputs: unknown[]) {
 function state(ids: string[]): OfficialState { return { models: ids.map(id => ({ id })), config: structuredClone(DEFAULT_CONFIG), overrides: {} } }
 
 describe('最新网页和 LLM 分析', () => {
+  it('适配器忽略取消且 next／return 都挂起时，60 秒仍及时结束', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    const never = () => new Promise<never>(() => {})
+    const returned = vi.fn(never), started = vi.fn()
+    const runtime = { stream: () => ({ [Symbol.asyncIterator]: () => ({ next: () => { started(); return never() }, return: returned }) }) }
+    const pending = analyzeOfficial(runtime as never, runner, source, new AbortController().signal)
+    const rejected = expect(pending).rejects.toThrow('60 秒')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(started).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(60_000)
+    await rejected
+    expect(returned).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  }, 1000)
+  it('适配器忽略取消时立即结束；迟到的结果不恢复预览', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    const controller = new AbortController()
+    let resolveNext!: (value: IteratorResult<unknown>) => void
+    const returned = vi.fn(async () => { throw new Error('清理失败') })
+    const next = vi.fn(() => new Promise<IteratorResult<unknown>>(resolve => { resolveNext = resolve }))
+    const runtime = { stream: () => ({ [Symbol.asyncIterator]: () => ({ next, return: returned }) }) }
+    const pending = analyzeOfficial(runtime as never, runner, source, controller.signal)
+    const rejected = expect(pending).rejects.toThrow('用户取消')
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort(new Error('用户取消'))
+    await rejected
+    resolveNext({ done: false, value: { type: 'text-delta', text: JSON.stringify(analysis(['one'])) } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(next).toHaveBeenCalledOnce(); expect(returned).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('持续推理输出不延长每轮 60 秒上限', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    const runtime = { stream: async function* () {
+      while (true) { await new Promise(resolve => setTimeout(resolve, 1000)); yield { type: 'reasoning-delta', text: 'thinking' } }
+    } }
+    const pending = analyzeOfficial(runtime as never, runner, source, new AbortController().signal)
+    const rejected = expect(pending).rejects.toThrow('60 秒')
+    await vi.advanceTimersByTimeAsync(60_000)
+    await rejected
+    await vi.advanceTimersByTimeAsync(1000) // 迟到的 next 完成后允许适配器清理。
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('正常结束清理截止计时，不再取消已完成的分析', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
+    let receivedSignal!: AbortSignal
+    const runtime = { stream: async function* (options: { signal: AbortSignal }) {
+      receivedSignal = options.signal
+      yield { type: 'text-delta', text: JSON.stringify(analysis(['one'])) }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+    const result = await analyzeOfficial(runtime as never, runner, source, new AbortController().signal)
+    expect(result.analysis.models.map(model => model.id)).toEqual(['one'])
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(65_000)
+    expect(receivedSignal.aborted).toBe(false)
+  })
   it('服务端拒绝推理参数时给出可操作提示，不回显原始响应或凭据', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))
     const runtime = { resolveModelInfo: async () => ({}), stream: async function* () { yield { type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_REQUEST', message: '400 reasoning_effort none is not supported; Bearer private-key' } } } } }

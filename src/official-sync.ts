@@ -4,6 +4,28 @@ import type { ModelRef } from './domain.js'
 import type { OfficialAnalysis, OfficialEvidence, OfficialPage, OfficialProgress } from './official-types.js'
 
 const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+
+// 适配器未响应 abort 时，也不能让预览一直等待 next() 或清理 return()。
+async function* abortableStream<T>(source: AsyncIterable<T>, signal: AbortSignal): AsyncGenerator<T> {
+  signal.throwIfAborted()
+  const iterator = source[Symbol.asyncIterator]()
+  let abort!: () => void, exhausted = false
+  const aborted = new Promise<never>((_, reject) => { abort = () => reject(signal.reason) })
+  signal.addEventListener('abort', abort, { once: true })
+  try {
+    while (true) {
+      signal.throwIfAborted()
+      const chunk = await Promise.race([iterator.next(), aborted])
+      if (chunk.done) { exhausted = true; return }
+      yield chunk.value
+    }
+  } finally {
+    signal.removeEventListener('abort', abort)
+    if (!exhausted) {
+      try { void Promise.resolve(iterator.return?.()).catch(() => {}) } catch { /* 清理失败不遮盖原错误。 */ }
+    }
+  }
+}
 function decode(value: string): string {
   return value.replace(/&(#x[0-9a-f]+|#\d+|nbsp|amp|quot|apos|lt|gt);/gi, (_, entity: string) => {
     if (entity[0] === '#') {
@@ -147,18 +169,24 @@ export async function analyzeOfficial(llm: LlmRuntime, analyzer: ModelRef, sourc
       { id: randomUUID() as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: JSON.stringify({ round, finalRound: round === 3, pages }) }] },
     ]
     let output = ''
-    for await (const chunk of llm.stream({ provider: analyzer.providerId, model: analyzer.modelId, messages, ...(reasoningEffort ? { reasoningEffort } : {}), signal: AbortSignal.any([signal, AbortSignal.timeout(60_000)]) })) {
-      signal.throwIfAborted()
-      if (chunk.type === 'text-delta') output += chunk.text
-      if (output.length > 32_000) throw new Error('分析输出过长')
-      if (chunk.type === 'finish' && chunk.reason.kind !== 'stop') {
-        const code = 'failure' in chunk.reason ? chunk.reason.failure.code : chunk.reason.kind
-        if (code === 'MISSING_CREDENTIAL') throw new Error('分析模型缺少凭据，请先在当前 DSH 环境配置该模型的凭据')
-        if (code === 'AUTH') throw new Error('分析模型认证失败，请核对当前环境的模型凭据')
-        if (code === 'INVALID_REQUEST' && 'failure' in chunk.reason && /reasoning_effort.*not supported/i.test(chunk.reason.failure.message)) throw new Error('分析模型拒绝推理档位，请选择该模型支持的分析推理档位后重试；必要时核对宿主声明')
-        throw new Error(`分析请求失败：${/^[\w-]{1,80}$/.test(code) ? code : chunk.reason.kind}`)
+    const deadline = new AbortController()
+    const timer = setTimeout(() => deadline.abort(new Error('本轮资料分析已超过 60 秒，已停止预览。可降低推理档位或更换分析模型后重试。')), 60_000)
+    const roundSignal = AbortSignal.any([signal, deadline.signal])
+    try {
+      for await (const chunk of abortableStream(llm.stream({ provider: analyzer.providerId, model: analyzer.modelId, messages, ...(reasoningEffort ? { reasoningEffort } : {}), signal: roundSignal }), roundSignal)) {
+        roundSignal.throwIfAborted()
+        if (chunk.type === 'text-delta') output += chunk.text
+        if (output.length > 32_000) throw new Error('分析输出过长')
+        if (chunk.type === 'finish' && chunk.reason.kind !== 'stop') {
+          const code = 'failure' in chunk.reason ? chunk.reason.failure.code : chunk.reason.kind
+          if (code === 'MISSING_CREDENTIAL') throw new Error('分析模型缺少凭据，请先在当前 DSH 环境配置该模型的凭据')
+          if (code === 'AUTH') throw new Error('分析模型认证失败，请核对当前环境的模型凭据')
+          if (code === 'INVALID_REQUEST' && 'failure' in chunk.reason && /reasoning_effort.*not supported/i.test(chunk.reason.failure.message)) throw new Error('分析模型拒绝推理档位，请选择该模型支持的分析推理档位后重试；必要时核对宿主声明')
+          throw new Error(`分析请求失败：${/^[\w-]{1,80}$/.test(code) ? code : chunk.reason.kind}`)
+        }
       }
-    }
+      roundSignal.throwIfAborted()
+    } finally { clearTimeout(timer) }
     signal.throwIfAborted()
     const cleaned = output.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/, '$1')
     let parsed: unknown
