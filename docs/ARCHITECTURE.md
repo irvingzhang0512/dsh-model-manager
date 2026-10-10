@@ -1,5 +1,73 @@
 # 架构契约（v3）
 
+## 智能补全已有模型参数（文档版 model-parameters-20261010-v1，待确认／待实现）
+
+对应 SPEC F011 及 F001／F006／F009。本节基线 0.10.0／`5e33bec0bf1b66aeeac92a79cf86c2d7a3fd301b`，规划 0.11.0；尚无本功能源码，既有目录／官方事务继续按已实现契约运行。用户已要求实施计划，具体本版文档尚待明确确认。本节不改变原官方清单完整性、替代／迁移、原生 Subagent 或旧偏好停用规则。
+
+### 字段边界与来源
+
+只分析已加载真实模型，键为 ModelRef；客户端通过 ID／name 不区分大小写子串筛选，实际请求只提交已选 ModelRef。重复引用在服务端去重保留顺序，最多 100 个目标；未知目标、空列表或管理 Provider 在外部调用前拒绝。Provider 名称／协议来自宿主，不能由 LLM 改写。
+
+| 宿主契约 | 可分析与写入的模型字段 | 限制 |
+| --- | --- | --- |
+| llm-pi-ai PiAiModelProfile／PiAiModelOverride | name、contextWindow、maxTokens、input、reasoningEfforts、compat 的全部公开叶字段 | id 固定；models 显式数组优先，合法内置目录覆盖才写 modelOverrides；reasoningEfforts 为 false 或完整合法映射，off 可用 null，其余档位须合法 wire 值。 |
+| llm-deepseek DeepSeekCatalogModel | name、description、contextWindow、maxTokens、inputModalities、imagePixelBudget、imageMaxBytes、systemPromptUpdate | 按该宿主字段类型校验；没有模型级 reasoningEfforts／compat 写入入口，不伪造。图片预算是配置策略，没有平台明确建议则无建议，不以模型知识任意推算。 |
+| 其他 Provider | 展示目标、无建议或不可写原因 | 未适配的配置契约不提供应用；后续增加适配需独立明确字段与验收。 |
+
+字段定义严格以锁定 DSH 0.1.5-rc.2 已安装宿主公开类型／校验为基线。llm-pi-ai compat 按 Completions、Responses（含 Azure／Codex）、Anthropic、Bedrock 实际协议提供对应字段；宿主 withheld 字段不开放。布尔、枚举、数值、结构化 kwargs 等分别用明确 schema，不接受任意对象／路径。升级时核对字段表与宿主，不根据 LLM 输出扩展白名单。Provider api／baseURL／headers／apiKeyEnv、路由默认容量／输出、运行偏好均不可写。
+
+新增 `ParameterFieldDescriptor`：`{field: string[], label: string, schema: object, writable: boolean, reason?: string, effect?: string}`；field 是目标模型内部、服务端生成的路径段，不能含 id／Provider 路径或原型属性。`ModelParameterTarget` 固定含 model、name、api、writable、reason?、fields、currentValues、currentSources；不得携带密钥、完整 Provider 原配置。currentValues 记录实际可观察值，不能把 LlmResolvedModelInfo 结构直接写进 models。
+
+来源枚举 `user | catalog | provider-default | runtime-default | unknown`：先用 settings.describe.user 判定原始用户模型叶值，再用适配器原始内置目录判断 catalog，再判 Provider 兜底／宿主常量默认；无法证明时 unknown，禁止由数值碰巧相等猜来源。对于 reasoningEfforts 要保留原始 wire 映射，不能用展示 label 反推；compat 来源按叶字段识别。目标源、协议及现有元数据在分析开始冻结，之后应用不重新解释来源。
+
+### 分析服务与搜索
+
+规划模块：`model-parameters.ts` 提供描述、结构校验与建议规划；`parameter-analysis.ts` 负责搜索／正文／独立 LLM；`client/parameter-panel.tsx` 提供目标选择、进度及字段预览。通过现有 official-host 的事务入口接入，不建立另一套无版本保护的直接写配置通路。
+
+- `describeParameterTargets(state, hostCatalog): ModelParameterTarget[]`：状态为原始与有效配置，hostCatalog 提供已安装原始目录／协议元数据，不含调用凭据；返回全部当前真实模型及其字段来源。
+- `validateParameterSuggestions(value: unknown, target: ModelParameterTarget, pages: OfficialPage[]): ParameterSuggestion[]`：逐字段解析、类型／协议／证据校验；非法建议导致该目标 failed，不生成其可应用字段，其他目标继续。合法未知项无 value，不构造更新。
+- `analyzeModelParameters(llm, search, targets, options, signal, progress): Promise<ParameterAnalysis>`：options 固定 analyzer、reasoningEffort?、analysisTimeoutSeconds；串行目标，结果与调用计数不写宿主设置。取消竞争覆盖不响应 AbortSignal 的流读取，失败与 effect 清理及时释放 handle。
+- `parameterIntents(state, analysis, selectedFields): CatalogIntent[]`：selectedFields 为当前分析发出的 opaque 字段 id，只生成选中字段的 update 意图，模型 ID 固定；同一模型归为一个依赖一致的操作。
+
+豆包搜索客户端使用原生 fetch，不在公开插件绑定用户机器上的 Python skill／arkcli 文件。固定 `POST https://open.feedcoopapi.com/search_api/web_search`，Bearer Key 仅由 ctx.credentials.resolve(credentialRef(name)) 获取；请求 `{Query, SearchType:'web', Count:5, NeedSummary:true}`，按 Result.WebResults 取标题、URL、Snippet／Summary 作为线索，业务错误与 HTTP 错误都检查。请求含 skill 已使用的 `X-Traffic-Tag: skill_web_search_common`。每请求总时限 30 秒，不自动重试；每目标最多两次搜索、三个正文页面、两轮 LLM，正文每页 10 秒／最多 2,000,000 字符，沿用 HTML 文本提取。第一查询按公开平台名、精确 ID／名称、model specifications／API parameters；资料不足第二查询补充精确型号与缺失字段关键词。
+
+搜索只发送公开平台名、型号与参数关键词，不发送完整配置、密钥、内部地址或 headers。结果地址只允许公开 HTTPS、无 URL 凭据；校验域名／DNS／重定向，不访问本地／私网／保留地址。每个官方候选页面及后续链接限定其已核实平台官方 hostname；LLM 不能以任意网址请求追加页面。官方站点身份与型号关系随预览证据展示；无法核实的站点不升级为 official。原基础模型文档缺少当前 Provider 关系时至多作为 knowledge 线索。
+
+第一轮 LLM 根据实际正文给出有证据的字段或未知项；仍有缺失且未遇官方冲突时，第二轮允许知识建议（或追加正文分析），官方结果优先，不用知识覆盖冲突。搜索缺凭据／401／额度／网络／正文失败作为 notes 展示，可继续知识判断；LLM 格式错误或调用失败将该目标标 failed，不在同一目标自动重试。流式输出限 2,000,000 字符；每轮分析默认 180 秒、30–600 整数，取消／总截止不因输出延长。分析模型必须是已加载真实模型，null／省略使用当前宿主默认并解析真实目标，不能递归进入 AUTO／别名；公开档位校验沿用官方分析。
+
+LLM 输出固定 `{suggestions:[{field:string[], basis:'official'|'knowledge'|'unknown', value?:unknown, reason:string, evidence?:{source:string,quote:string}[]}], notes:string[]}`。unknown 禁止携带 value；official 必须有对应已读 URL 与连续原文，同时保留本目标精确 ID／平台身份证据；knowledge 不得伪造已读引文。校验白名单、重复字段、JSON 类型、引文存在、字段组合；格式／引文通过不声明程序证明语义或官方能力。未返回字段保持未知，不把缺失视为不支持。
+
+### HTTP、SSE 与字段选择
+
+各 exact path 只注册一次，保留 trusted caller、405／Allow、409 冲突、1 MiB 请求体上限。
+
+| Path | Method | 契约 |
+| --- | --- | --- |
+| `/api/model-manager/model-parameter-preview` | POST | `{models: ModelRef[], analyzer?: ModelRef|null, reasoningEffort?:string, analysisTimeoutSeconds?:number}`；先验证目标与参数并冻结原配置，再分析；Accept:text/event-stream 使用下述 SSE，未声明时返回同形状 JSON。 |
+| `/api/model-manager/catalog-resolve` | POST | 原 `{token,selected,resolutions}` 增加可选 `selectedFields:string[]`，仅 parameter origin 支持；缺省保持冻结默认／上次字段选择。未知／重复 id 拒绝，其他 origin 提交 selectedFields 拒绝。只重算、不搜索、不写配置；成功返回完整新预览并使旧 token 失效。 |
+| `/api/model-manager/catalog-apply` | POST | 原 `{token,selected}` 不变；使用 token 中已确认的字段集合和依赖选择，不能临时提交路径／值。返回既有 applied／backupId／backupAt／完整 snapshot。 |
+| `/api/model-manager/catalog-restore` | POST | 原 `{backupId}` 不变，支持 parameter 写集；恢复后返回完整 snapshot，并作废有关预览。 |
+
+SSE 事件 progress／result／error 与 15 秒 keepalive；progress 含 stage（searching／reading／analyzing／planning）、model?、modelIndex、modelCount、searchCount、analysisCount，以及 analyzing 时 round／analysisStartedAt／analysisTimeoutSeconds。result 唯一终止并返回 ModelParameterPreview，不能借用官方 parser 的 analysis.complete 判定；断开连接／重新分析／effect 卸载取消作废旧任务与 token。单项失败记录到 result，整体取消／基线变化／全部无建议无有效 token；有建议但初始未选择可给 token，禁止空应用。正常全同值时展示 no-change，不提供应用 token。
+
+`ParameterSuggestion`：`{id:string, model:ModelRef, field:string[], currentValue?:unknown, currentSource:ParameterValueSource, value?:unknown, basis:'official'|'knowledge'|'unknown', reason:string, evidence:OfficialEvidence[], writable:boolean, blockedReason?:string, effect?:string}`。id 由服务端生成，仅 within token 有效；value 是合法模型内部字段值，客户端无通用编辑路径入口。
+
+`ParameterModelResult`：`{model:ModelRef,status:'ready'|'no-change'|'failed'|'unsupported',suggestions:ParameterSuggestion[],notes:string[]}`。`ModelParameterPreview` 在 CatalogPreview 基础增加 `parameterAnalysis:{analyzer,reasoningEffort?,analysisTimeoutSeconds,searchCount,analysisCount,results:ParameterModelResult[]}` 和 `selectedFields:string[]`；CatalogPreview.origin 扩为 manual／official／parameter，旧数据／客户端输入保持兼容。GET 完整 snapshot 增加可选 parameterBackupId，展示最近已应用参数操作；备份恢复始终按指定 id 与版本校验，不以页面记录绕过保护。
+
+缺失／兜底默认项只有 official 且无用户或实际 catalog 冲突才默认选择；已有不同值（包括有效目录值）、名称来源不明／自定义、knowledge、maxTokens、模型图片预算策略始终不默认选择。未显式配置但已继承有效目录同值时展示一致，不物化用户覆盖。compat 按已声明 schema 叶字段选择，未选叶值保留；数组／reasoningEfforts／结构化 kwargs／args 各作为原子字段选择，不按任意深路径拆分。
+
+### 组合校验、事务与配置生命周期
+
+选中字段须先合并到原始模型，按对应宿主公开 schema／协议验证并重新推导有效图片、容量、输出和档位。不单纯沿用旧 service.records 的能力判断；推理映射更改后检查全部仍有效的 AUTO／别名／旧主模型／视觉兜底／未来 session 与 nextTurn 选择。新推理映射必须使其 compat 有效，字段未选造成缺必要设置时列为阻止，不能隐式勾选其他字段。模型输出大于组合上下文等宿主非法组合拒绝，不自动修约束。
+
+图片声明与插件覆盖冲突，提供保留原值并跳过冲突字段／同步覆盖／清除覆盖继承宿主的服务端选项；有效视觉目标失去图片声明提供替换有效原生图片模型／明确关闭与清理相关目标／跳过该目标变更，保留无关视觉配置。推理引用不兼容提供公开档位／使用模型默认／跳过目标变更，不静默降档。停用 auto.preferences 不因本次补全复活或重新成为有效使用引用；旧 main／有效视觉兜底按当前已有契约处理。一个模型的选中字段与明确引用修正同组应用，未解决则阻止该模型，不拆成半完成写入。
+
+参数名改动遵循现有 catalogMetadata 自定义名称保护，用户采用官方名称时 customName=false、知识名称时 customName=true，保留 origin 与未知元信息。仅模型宿主字段的应用不清空插件草稿；有元信息、覆盖或引用写集时须先保存／放弃无关插件草稿并重新预览。搜索引用保存是独立单字段操作，不能顺带保存全局草稿。
+
+所有 parameter 操作进入 existing writesQueue；完整读原始 user 层／冻结 namespace revisions、目录和未来覆盖 fingerprint，按宿主配置路径构造 models／modelOverrides 字段更新，保留未知字段、不把全部有效默认 models 导出为新用户数组。不满足合法 modelOverrides 时不可写；DeepSeek 显式数组按已有完整目录事务保留其他项。备份 version:3 沿用现有状态机，origin 增加 parameter，保存 parameterAnalysis、selectedFields、原值及存在状态／写后 revision；`catalog-backups/latest.json` 增加 parameter 指针，保留 manual／official 指针和旧 v1／v2／v3 恢复范围。
+
+配置 v3 只新增可选 parameterCompletion.searchCredentialName，按 CONFIG 同版规则维护；旧配置不补空 section、不清理未知字段、不改已有模型参数或停用字段。失败回滚、坏备份 .bak、后续修改／跨重启拒绝恢复、完整响应与日志脱敏沿用 F010。实现后必须将来源判定、请求实际参数、老配置保存与恢复分别验证，不能用补全结果充当真实探测证据。
+
 ## 子 Agent 配置入口移除与旧偏好清理（0.10.0）
 
 文档版本：2026-10-10；基线 0.9.0／`ddafc33142be0423c361ee474a0bd1f1ae4cd345`，对应 SPEC F002／F003／F005／F009。用户审阅具体文档后回复“继续”明确确认，已按该版实现；实现状态：已实现。此节替代下文关于偏好提示、六标签页及插件 /subagents 路由的旧规则；历史版本契约与验证保留。配置仍为 v3，目标包版本 0.10.0。
