@@ -10,24 +10,64 @@ export async function catalogRequest(path: string, value: unknown): Promise<any>
 }
 export function CatalogPreviewPanel({ view, selected, busy, onResolve }: { view: CatalogPreview; selected: string[]; busy: boolean; onResolve: (selected: string[], resolutions: CatalogResolution[]) => void }) {
   const resolutions = view.operations.flatMap(operation => operation.choices.filter(c => c.resolution).map(c => ({ id: c.id, optionId: c.resolution! })))
-  const labels = { add: '新增模型', rename: '修改显示名称', remove: '删除模型', update: '更新声明', migrate: '整体合并迁移' }
+  const labels = { add: '新增模型', rename: '修改显示名称', remove: '删除模型', update: '更新声明', migrate: '整体合并迁移', removeAlias: '删除别名' }
+  const pathLabel = (path: string) => ({ 'auto.main.target': '旧主模型绑定', 'auto.simple.target': 'AUTO 简单任务', 'auto.normal.target': 'AUTO 常规任务', 'auto.complex.target': 'AUTO 复杂任务', 'vision.target': '当前视觉模型', 'auto.roles.vision.target': '旧视觉兜底', 'agent-default-model.model': '宿主默认模型' }[path] ?? (path.startsWith('auto.preferences.') ? '分工偏好' : path.startsWith('auto.roles.') ? '旧角色模型' : path.startsWith('overrides.') ? '未来会话／下一轮模型覆盖' : path.startsWith('subagent-model-selection.') ? '子 Agent 模型范围' : path))
   return <div>
     <p className="dmm-muted">只在应用时写入；处理冲突和引用不会调用 LLM。删除或迁移是一组整体操作。</p>
     {view.counts.filter(c => c.operationCount || view.operations.some(o => o.model.providerId === c.providerId)).map(c => <p key={c.providerId}>{c.providerId}：本地 {c.before} 个 → 选中操作后 {c.after} 个；{c.operationCount} 项选中操作</p>)}
     {view.operations.map(operation => <div className="dmm-card" key={operation.id}>
-      <label><input type="checkbox" disabled={busy || (!!operation.blockedReasons.length && !selected.includes(operation.id))} checked={selected.includes(operation.id)} onChange={e => onResolve(e.target.checked ? [...selected, operation.id] : selected.filter(id => id !== operation.id), resolutions)} />{labels[operation.kind]}：<strong>{operation.model.modelId}</strong> · {operation.model.providerId}</label>
+      <label><input type="checkbox" disabled={busy || (!!operation.blockedReasons.length && !selected.includes(operation.id))} checked={selected.includes(operation.id)} onChange={e => onResolve(e.target.checked ? [...selected, operation.id] : selected.filter(id => id !== operation.id), resolutions)} />{labels[operation.kind]}：<strong>{operation.kind === 'removeAlias' ? `@${operation.model.modelId.slice(6)}` : operation.model.modelId}</strong> · {operation.model.providerId}</label>
       <p className="dmm-muted">{JSON.stringify(operation.before)} → {JSON.stringify(operation.after)}</p>
       {!!operation.referenceChanges?.length && <details open><summary>引用与视觉开关变化</summary>{operation.referenceChanges.map(change => <p className="dmm-muted" key={change.path}>{change.path}：{JSON.stringify(change.before)} → {JSON.stringify(change.after)}</p>)}</details>}
       {!!operation.references.filter(r => r.type === 'usage').length && <details><summary>使用引用</summary>{operation.references.filter(r => r.type === 'usage').map((r, i) => <p className="dmm-muted" key={i}>{r.chain?.join(' → ') ?? r.path}</p>)}</details>}
       {!!operation.attachedSettings.length && <details open><summary>附属设置（将随明确确认的删除清理并备份）</summary>{operation.attachedSettings.map(path => <p className="dmm-muted" key={path}>{path}</p>)}</details>}
-      {operation.choices.map(choice => <div className="dmm-row" key={choice.id}><label>{choice.kind === 'vision' ? '图片辅助模型：替换／关闭辅助并删除／取消删除' : choice.path}<select disabled={busy} value={choice.resolution ?? ''} onChange={e => {
+      {operation.choices.map(choice => <div className="dmm-row" key={choice.id}><label>{pathLabel(choice.path)} <span className="dmm-muted">（{choice.path}）</span><select aria-label={pathLabel(choice.path)} disabled={busy} value={choice.resolution ?? ''} onChange={e => {
         const next = resolutions.filter(r => r.id !== choice.id)
         if (e.target.value) next.push({ id: choice.id, optionId: e.target.value })
         onResolve(selected, next)
       }}><option value="">请选择处理方式</option>{choice.options.map(option => <option key={option.optionId} value={option.optionId}>{option.label}</option>)}</select></label>{choice.kind === 'vision' && <span className="dmm-muted">取消删除：不勾选本组；共享别名等其他引用仍需处理。</span>}</div>)}
-      {operation.kind === 'remove' && <button disabled={busy} onClick={() => onResolve(selected.filter(id => id !== operation.id), resolutions)}>取消删除（保留原配置）</button>}
+      {(operation.kind === 'remove' || operation.kind === 'removeAlias') && <button disabled={busy} onClick={() => onResolve(selected.filter(id => id !== operation.id), resolutions)}>取消删除（保留原配置）</button>}
       {operation.blockedReasons.map((reason, i) => <p className="dmm-error" key={i}>{reason}</p>)}
     </div>)}
+  </div>
+}
+
+export function AliasRemovalManager({ name, close, dirty, externalBusy, backupId, onApplied, notify, onBusyChange }: {
+  name: string | null; close: () => void; dirty: boolean; externalBusy: boolean; backupId?: string
+  onApplied: (snapshot: { config: ManagerConfig; [key: string]: unknown }) => void
+  notify: (kind: 'info' | 'success' | 'error', message: string) => void
+  onBusyChange: (busy: boolean) => void
+}) {
+  const [view, setView] = useState<CatalogPreview | null>(null), [working, setWorking] = useState(false), [error, setError] = useState('')
+  const busy = working || externalBusy
+  useEffect(() => { setView(null); setError('') }, [name, dirty])
+  const act = async (action: () => Promise<void>) => { setWorking(true); onBusyChange(true); setError(''); try { await action() } catch (failure) { setView(null); setError(String(failure)); notify('error', String(failure)) } finally { setWorking(false); onBusyChange(false) } }
+  const preview = () => void act(async () => {
+    if (!name || dirty) return
+    setView(null)
+    setView(await catalogRequest('catalog-preview', { operations: [{ kind: 'removeAlias', name }] }))
+  })
+  const resolve = (selected: string[], resolutions: CatalogResolution[]) => void act(async () => {
+    if (!view || dirty) return
+    setView(await catalogRequest('catalog-resolve', { token: view.token, selected, resolutions }))
+  })
+  const apply = () => void act(async () => {
+    if (!view || dirty) return
+    const result = await catalogRequest('catalog-apply', { token: view.token, selected: view.selected })
+    setView(null); close(); onApplied(result.snapshot); notify('success', '已删除别名并处理引用；真实模型保留，可恢复本次操作。')
+  })
+  const restore = () => void act(async () => {
+    if (dirty || !backupId) return
+    const result = await catalogRequest('catalog-restore', { backupId })
+    setView(null); close(); onApplied(result.snapshot); notify('success', '已恢复本次操作及其引用。')
+  })
+  if (!name && !backupId) return null
+  return <div className="dmm-card" id="dmm-alias-removal">
+    <div className="dmm-row"><strong>{name ? `删除别名 @${name}` : '操作恢复'}</strong>{backupId && <button disabled={busy || dirty} onClick={restore}>恢复本次操作及引用</button>}</div>
+    {name && <><p className="dmm-muted">先处理下面的使用引用，再整体删除。候选真实模型保留；旧主模型绑定也会显示在这里。</p><div className="dmm-row"><button disabled={busy || dirty} onClick={preview}>预览别名删除及引用</button><button disabled={busy} onClick={() => { setView(null); close() }}>取消删除</button></div></>}
+    {dirty && <p className="dmm-dirty">有未保存的插件草稿。先保存，或点“重新加载”放弃草稿，再重新预览；当前草稿不会被删除预览覆盖。</p>}
+    {error && <p role="alert" className="dmm-error">{error}</p>}
+    {view && <><CatalogPreviewPanel view={view} selected={view.selected} busy={busy || dirty} onResolve={resolve} /><button className="dmm-primary" disabled={busy || dirty || !view.selected.length || view.operations.some(o => view.selected.includes(o.id) && o.blockedReasons.length > 0)} onClick={apply}>应用别名删除及引用修改</button></>}
   </div>
 }
 

@@ -20,4 +20,5 @@
 - 验证调用的证据与能力声明分开。网络错误或不确定结果不得自动写能力；图片临时提权必须恢复原声明。
 - 生命周期按 F010：API ID 与显示名称分离，手动目录只操作宿主公开可写 Provider。普通引用允许用户明确跨 Provider 替换，图片引用单独检查原生图片声明；官方自动目标仍限官方 Provider。图片辅助的存在不阻止删除无关模型，附属设置可明确清理。预览、冲突选择、应用与恢复共用完整写集及版本检查，不能清空无关插件草稿或把 effective 默认层写成用户层；跨重启 revision 不匹配时保守拒绝恢复。
 - 代码修改后依次运行 `npm run typecheck`、`npm run build`、`npm test`，然后做客户端冒烟。安装到 web profile 并重启 DSH 后使用专用会话检查 AUTO、视觉和原生 Subagent；完成验证后再更新兼容性记录与安装快照。
+- 别名删除按 F002／F004／F009：alias-removal 规划逻辑入口及其全部使用引用，接入相同 catalog 事务；不能把逻辑别名当真实目录模型删除。旧主模型仍有运行语义，清理须用户明确选择；旧视觉兜底不影响无关当前视觉模型，关闭后的目标与失效值在页面仍须可见。
 - README、`docs/CONFIG.md`、`docs/ARCHITECTURE.md`、`docs/V1-COVERAGE.md` 和 `docs/CHANGELOG.md` 应与用户可见行为一致。`docs/REQUIREMENTS.md` 是原始需求，保持只读。

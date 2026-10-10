@@ -3,7 +3,7 @@ import { AutoTab, SubagentsTab } from './auto-tabs.js'
 import { DEFAULT_OFFICIAL_URL, DEFAULT_ANALYSIS_TIMEOUT_SECONDS, officialAnalysisTimeout, predictedModelCount, type OfficialPreview, type OfficialProgress } from '../official-types.js'
 import { readOfficialStream } from './official-stream.js'
 import { OfficialProgressStatus } from './official-progress.js'
-import { CatalogManager, CatalogPreviewPanel, catalogRequest, type CatalogEditor } from './catalog-panel.js'
+import { AliasRemovalManager, CatalogManager, CatalogPreviewPanel, catalogRequest, type CatalogEditor } from './catalog-panel.js'
 import type { CatalogCapability, CatalogResolution } from '../catalog-types.js'
 import type { AliasReliability, ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
 
@@ -105,9 +105,11 @@ function EffortSelect({ target, value, models, aliases, onChange, disabled, labe
     <option value="">使用模型默认</option>{efforts.map(e => <option key={e.id} value={e.id}>{e.id === 'off' ? '关闭思考' : e.name}（{e.id}）</option>)}
   </select>
 }
-function SelectModel({ value, models, aliases, disabled, onChange }: { value?: ModelRef | string; models: ModelRecord[]; aliases: string[]; disabled?: boolean; onChange: (next?: ModelRef | string) => void }) {
+export function SelectModel({ value, models, aliases, disabled, onChange }: { value?: ModelRef | string; models: ModelRecord[]; aliases: string[]; disabled?: boolean; onChange: (next?: ModelRef | string) => void }) {
+  const missing = value && (typeof value === 'string' ? !aliases.includes(value.slice(1)) : !models.some(model => model.providerId === value.providerId && model.modelId === value.modelId))
   return <select disabled={disabled} value={refValue(value)} onChange={event => onChange(parseRef(event.target.value))}>
     <option value="">未设置</option>
+    {missing && <option value={refValue(value)}>{typeof value === 'string' ? value : `${value.providerId}/${value.modelId}`}（失效：别名未绑定或模型不在当前可选目录）</option>}
     {aliases.map(alias => <option key={alias} value={`@${alias}`}>@{alias}</option>)}
     {models.map(model => <option key={`${model.providerId}:${model.modelId}`} value={JSON.stringify([model.providerId, model.modelId])}>{model.name} · {model.providerId}</option>)}
   </select>
@@ -170,7 +172,11 @@ const policyHelp: Record<ManagerConfig['vision']['policy'], string> = {
   'sidecar-only': '所有图片一律经看图工具由视觉模型代看；必须配置视觉模型，否则带图片的请求直接报错。',
 }
 
-function VisionSection({ draft, models, aliases, edit }: { draft: ManagerConfig; models: ModelRecord[]; aliases: string[]; edit: (fn: (next: ManagerConfig) => void) => void }) {
+export function VisionSection({ draft, models, aliases, edit }: { draft: ManagerConfig; models: ModelRecord[]; aliases: string[]; edit: (fn: (next: ManagerConfig) => void) => void }) {
+  const clearVision = () => {
+    if (draft.auto.roles.vision.target && !window.confirm('仍有旧视觉兜底。清空视觉模型会同时清除当前目标和旧兜底及其推理档位；视觉开关和其他设置保留。确认清除？')) return
+    edit(next => { delete next.vision.target; delete next.auto.roles.vision.target; delete next.auto.roles.vision.reasoningEffort; delete next.auto.roles.vision.tier; delete next.auto.roles.vision.thinking })
+  }
   return <>
     <details className="dmm-guide">
       <summary>视觉辅助是做什么的？（点开查看说明）</summary>
@@ -187,9 +193,10 @@ function VisionSection({ draft, models, aliases, edit }: { draft: ManagerConfig;
       {draft.vision.enabled && <>
       <div className="dmm-row"><label>策略 <select value={draft.vision.policy} onChange={event => edit(next => { next.vision.policy = event.target.value as ManagerConfig['vision']['policy'] })}><option value="native-first">原生优先（推荐）</option><option value="sidecar-first">看图工具优先</option><option value="native-only">仅原生直读</option><option value="sidecar-only">仅看图工具</option></select></label><span className="dmm-muted">决定「当前模型直接看图」与「交给视觉模型代看」如何取舍。</span></div>
       <div className="dmm-hint">{policyHelp[draft.vision.policy]}</div>
-      <div className="dmm-row"><label>视觉模型 <SelectModel value={draft.vision.target} models={models.filter(m => m.nativeImage === 'yes')} aliases={aliases} onChange={value => edit(next => { next.vision.target = value })} /></label></div>
       <details className="dmm-guide"><summary>何时使用辅助模型？</summary><p>当前模型不能直接看图时，辅助模型先理解图片，再把文字结果交给当前模型。未选择辅助模型且当前模型不支持图片时，请求会报错。</p></details>
       </>}
+      <div className="dmm-row"><label>视觉模型 <SelectModel value={draft.vision.target} models={models.filter(m => m.nativeImage === 'yes')} aliases={aliases} onChange={value => { if (!value) clearVision(); else edit(next => { next.vision.target = value }) }} /></label><button disabled={!draft.vision.target && !draft.auto.roles.vision.target} onClick={clearVision}>{draft.auto.roles.vision.target ? '清空视觉目标及旧兜底' : '清除当前视觉目标'}</button></div>
+      {draft.auto.roles.vision.target && <div className="dmm-row"><label>旧视觉兜底 <SelectModel value={draft.auto.roles.vision.target} models={models.filter(m => m.nativeImage === 'yes')} aliases={aliases} onChange={value => edit(next => { delete next.auto.roles.vision.reasoningEffort; delete next.auto.roles.vision.tier; delete next.auto.roles.vision.thinking; if (value) next.auto.roles.vision.target = value; else delete next.auto.roles.vision.target })} /></label><button onClick={() => edit(next => { delete next.auto.roles.vision.target; delete next.auto.roles.vision.reasoningEffort; delete next.auto.roles.vision.tier; delete next.auto.roles.vision.thinking })}>清除旧视觉兜底</button><p className="dmm-muted">未设置当前目标时仍可能使用此旧兜底。要清空视觉模型，请同时明确清除此项；清除无关旧兜底不会关闭当前辅助。</p></div>}
     </div>
     <div className="dmm-guide">
       <strong>看图工具的工作方式</strong>
@@ -279,6 +286,7 @@ function ManagerSection() {
   const officialAbort = useRef<AbortController | null>(null)
   const [notices, setNotices] = useState<Notice[]>([])
   const [aliasName, setAliasName] = useState('')
+  const [removingAlias, setRemovingAlias] = useState<string | null>(null)
   const [logs, setLogs] = useState<Record<string, unknown>[]>([])
   const [modelFilter, setModelFilter] = useState('')
   const [providerFilter, setProviderFilter] = useState('')
@@ -326,7 +334,7 @@ function ManagerSection() {
     if (!silent) notify('success', `目录已刷新：宿主加载 ${next.models.length} 个模型${added || removed ? `（新增 ${added}、移除 ${removed}）` : '（与上次相比没有变化）'}。`)
     return next
   }
-  const edit = (fn: (next: ManagerConfig) => void) => setDraft(current => { if (!current) return current; const next = structuredClone(current); fn(next); return next })
+  const edit = (fn: (next: ManagerConfig) => void) => setDraft(current => { if (!current || busy) return current; const next = structuredClone(current); fn(next); return next })
   const save = async () => {
     if (!snapshot || !draft) return
     setBusy(true)
@@ -572,7 +580,8 @@ function ManagerSection() {
         </ul>
       </details>
       <div className="dmm-card"><div className="dmm-row"><input placeholder="别名，如 fast" value={aliasName} onChange={event => setAliasName(event.target.value)} /><button onClick={() => { if (!/^[a-z][a-z0-9_-]*$/.test(aliasName) || draft.aliases[aliasName]) return; edit(next => { next.aliases[aliasName] = { candidates: [] } }); setAliasName('') }}>添加别名</button></div><p className="dmm-muted">候选按顺序尝试；每个别名至少添加一个具体模型后才能保存。</p></div>
-      {aliases.map(alias => <AliasCard key={alias} name={alias} draft={draft} models={snapshot.models} edit={edit} notify={notify} removeAlias={name => edit(next => { delete next.aliases[name] })} />)}
+      <AliasRemovalManager key={removingAlias ?? 'restore'} name={removingAlias} close={() => setRemovingAlias(null)} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
+      {aliases.map(alias => <AliasCard key={alias} name={alias} draft={draft} models={snapshot.models} edit={edit} notify={notify} removeAlias={name => { if (busy) return; if (!Object.hasOwn(snapshot.config.aliases, name)) { edit(next => { delete next.aliases[name] }); return }; setRemovingAlias(name); setOfficial(null); setCatalogEditor(null); document.getElementById('dmm-alias-removal')?.scrollIntoView({ block: 'nearest' }) }} />)}
       <div className="dmm-card">
         <strong>全局默认兜底策略</strong>
         <p className="dmm-muted">对走「模型管理」入口的所有请求生效；别名可用上面的覆盖项单独调整。聊天里的表现通常是「卡一下换了个模型继续答」；实际用了哪个模型可去「日志」页核对。</p>

@@ -114,7 +114,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
   const fingerprint = (state: CatalogState) => canonical([state.profiles, service.snapshot().models])
   const present = (state: CatalogState, intents: CatalogIntent[], origin: CatalogPreview['origin'], choices: CatalogResolution[] = [], selected?: string[]): CatalogPreview => {
     const plan = planCatalog(state, intents, choices, selected)
-    const picked = selected ?? plan.operations.filter(o => o.kind !== 'remove' && !o.blockedReasons.length).map(o => o.id)
+    const picked = selected ?? plan.operations.filter(o => o.kind !== 'remove' && o.kind !== 'removeAlias' && !o.blockedReasons.length).map(o => o.id)
     const simulated = planCatalog(state, intents, choices, picked)
     return { token: randomUUID(), origin, fetchedAt: new Date().toISOString(), operations: plan.operations, selected: picked, writesPlugin: origin === 'official' || !same(state.config, simulated.after.config), counts: state.profiles.map(p => ({ providerId: p.providerId, before: p.models.length, after: simulated.after.profiles.find(q => q.providerId === p.providerId)!.models.length, operationCount: plan.operations.filter(o => o.model.providerId === p.providerId && picked.includes(o.id) && !o.blockedReasons.length).length })), revisions: revisions(), catalogFingerprint: fingerprint(state), overridesFingerprint: service.futureOverridesFingerprint() }
   }

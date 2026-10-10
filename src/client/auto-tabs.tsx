@@ -20,8 +20,10 @@ function parse(value: string): ModelRef | string | undefined {
   return { providerId, modelId }
 }
 function Pick({ value, models, aliases, onChange }: { value?: ModelRef | string; models: ModelRecord[]; aliases: string[]; onChange: (value?: ModelRef | string) => void }) {
+  const missing = value && (typeof value === 'string' ? !aliases.includes(value.slice(1)) : !models.some(model => key(model) === key(value)))
   return <select value={typeof value === 'string' ? value : value ? key(value) : ''} onChange={event => onChange(parse(event.target.value))}>
     <option value="">未设置</option>{aliases.map(alias => <option key={alias} value={`@${alias}`}>@{alias}</option>)}
+    {missing && <option value={typeof value === 'string' ? value : key(value)}>{typeof value === 'string' ? value : `${value.providerId}/${value.modelId}`}（失效：别名未绑定或模型未加载）</option>}
     {models.map(model => <option key={key(model)} value={key(model)}>{model.name} · {model.providerId}</option>)}
   </select>
 }

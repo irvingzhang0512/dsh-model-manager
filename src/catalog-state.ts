@@ -2,6 +2,7 @@ import { fromManagedId, managedId, mapSelectionEffort, modelKey, resolveSelectio
 import { canonical, officialReferences, type HostModel } from './official-state.js'
 import { OFFICIAL_PROVIDER, type OfficialAnalysis, type OfficialDiff } from './official-types.js'
 import type { CatalogChoice, CatalogDiff, CatalogIntent, CatalogOperation, CatalogProfile, CatalogReference, CatalogResolution, CatalogState } from './catalog-types.js'
+import { planAliasRemoval } from './alias-removal.js'
 
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b)
 const isRef = (value: unknown): value is ModelRef => !!value && typeof (value as ModelRef).providerId === 'string' && typeof (value as ModelRef).modelId === 'string'
@@ -10,6 +11,13 @@ export function manualIntents(input: unknown, state: CatalogState): CatalogInten
   if (!Array.isArray(input) || !input.length || input.length > 100) throw new Error('请输入 1–100 项目录操作')
   const seen = new Set<string>()
   return input.map((item: CatalogOperation) => {
+    if (item?.kind === 'removeAlias') {
+      if (typeof item.name !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(item.name) || !Object.hasOwn(state.config.aliases, item.name) || Object.keys(item).some(key => !['kind', 'name'].includes(key))) throw new Error('别名删除操作无效或别名不存在')
+      const model = { providerId: 'dsh-model-manager', modelId: `alias:${item.name}` }, key = modelKey(model)
+      if (seen.has(key)) throw new Error('同一别名不能重复提交操作')
+      seen.add(key)
+      return { id: JSON.stringify(['removeAlias', item.name]), kind: item.kind, model }
+    }
     if (!item || !['add', 'rename', 'remove'].includes(item.kind) || !isRef(item.model) || !validText(item.model.providerId) || !validText(item.model.modelId)) throw new Error('目录操作或 API ID 无效')
     const key = modelKey(item.model)
     if (seen.has(key)) throw new Error('同一模型不能重复提交操作')
@@ -154,6 +162,12 @@ export function planCatalog(before: CatalogState, intents: CatalogIntent[], reso
     }
   }
   for (const intent of intents) {
+    if (intent.kind === 'removeAlias') {
+      const { diff, working } = planAliasRemoval(state, intent, intents, choice)
+      operations.push(diff)
+      if (!diff.blockedReasons.length && (!selected || selected.includes(diff.id))) Object.assign(state, working)
+      continue
+    }
     const profile = state.profiles.find(p => p.providerId === intent.model.providerId)
     if (!profile) throw new Error('目录不可编辑')
     const current = profile.models.find(m => m.id === intent.model.modelId)

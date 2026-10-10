@@ -59,6 +59,21 @@ Web 设置页分为“模型”“别名与兜底”“AUTO 自动选模型”�
 - 实施后依次执行 typecheck、build、完整测试与客户端冒烟；只重启 development，用专用会话检查新提示可读与旧 ID 可调用。缺 GUI 或凭据时记录具体未验收项，不登记整体兼容通过。
 - 本次目标包版本 0.5.0；文档阶段不提高版本。实现验证后同步说明／更新记录／验收记录，插件独立提交后同步根完整版本锁，按脚本核对安装快照及维护资料，不自动推送。
 
+## 别名删除引用处理契约（0.9.0，2026-10-10）
+
+对应 SPEC F002／F004／F009，基线 0.8.0。用户审阅具体规格及本节／配置契约后以“继续实现”明确确认，随后实现。配置版本维持 v3，现有模型 CRUD 和官方同步仍按下节已实现契约运行。纯规划实现位于 alias-removal，复用 catalog-state 和 official-host 的选项验证及事务执行器。
+
+- `CatalogOperation` 新增互斥输入 `{ kind: 'removeAlias'; name: string }`。name 是不含 @ 的现有合法别名键；不存在、格式无效、未知键及重复删除意图返回 400。别名候选真实模型不作为删除对象，不修改对应目录、能力覆盖或其他别名。
+- 内部 `CatalogIntent`／`CatalogDiff` 的 kind 增加 removeAlias，沿用 model 作为逻辑主体 `{providerId: 'dsh-model-manager', modelId: 'alias:' + name}`；客户端按 kind 显示“删除别名 @name”，不得把它当作真实目录模型访问 Provider profile。before 保存完整别名配置，after 表示删除；references／choices／referenceChanges 延续现有形状。counts 仅统计真实模型目录变化，别名删除不减少任何 Provider 的模型数量。
+- 纯规划器逐一定位规范化配置中的 @name 引用：auto.main／simple／normal／complex、preferences、roles、vision.target、未来 overrides.session／nextTurn；宿主默认及 Subagent 范围识别受管理 Provider 的 alias:name。未来覆盖缺失与显式存在分别保留；进行中 active 快照不纳入迁移。未知字段保留但不解释为新的可执行引用。
+- 普通选择引用提供已加载真实模型替换和允许时的清除选项；启用 AUTO 的必填三档、宿主默认只能替换。原生 Subagent 范围可移除该别名入口，结果须通过宿主约束。替换后按现有真实参数校验规则处理不兼容档位，不静默降档；清除目标同时移除 reasoningEffort／tier／thinking，保留独立输出上限及未知字段。旧主模型清除选项明确提示旧 AUTO 入口回退宿主默认；宿主默认若也引用该别名，须先另选真实默认模型。
+- vision.target 和 roles.vision.target 单独提供原生图片模型替换选项。当前视觉目标有效且与删除别名无关时，清除旧视觉兜底只改该兜底；当前辅助目标使用该别名且已开启时，“关闭辅助并清除相关目标”与别名删除同组，enabled=false。辅助已关闭时清除遗留目标不额外改变其他视觉字段。用户选取消则不应用。必须处理全部引用，不能仅跳过其中一个字段后删除别名。
+- `/catalog-preview` 接受新输入；`/catalog-resolve` 仍使用服务端产生的 opaque 选项 id，不接受任意路径写入；`/catalog-apply` 整体执行别名删除和引用变更；`/catalog-restore` 整体恢复。现有 token 作废、信任栅栏、revision／目录／覆盖指纹检查、串行完整写集备份、安全回滚和恢复限制不变，未确认选项不给默认清理。新备份仍 version=3、origin=manual，记录完整别名原值及相关 namespace／未来覆盖，旧备份兼容不变。
+- 别名卡片不再直接 delete 草稿键，点击后进入独立预览。其他未保存插件草稿必须保存或放弃，再重新预览；引用选项变化仅重算差异。视觉目标及旧兜底在辅助关闭时仍显示，失效目标加入标注原因的当前值选项，必须显式修改才清除；当前目标清除时若仍有旧兜底，显示并要求明确处理，不暗中继续使用。普通模型选择器同样保留失效当前值，防止空白误导。
+- 本次日常配置拟应用：删除 deepseek-v4-1，清除旧 auto.main 与旧 roles.vision 的同名目标及依赖档位，保留 main 的独立输出上限／未知字段；保持当前 vision.enabled／policy／glm-5-3-flash 和新 AUTO 三档。应用时以新预览的实时引用为准，发现额外引用必须先解决，不套用调查时的旧 revision。
+
+验收覆盖隐藏旧主模型报错、无引用、全部使用位置、关闭后的视觉残留、无效下拉选项、必填项阻止、图片能力限制、无关视觉保留、真实目录计数不变、参数与未知字段保留、草稿保护、并发拒绝、失败回滚、同生命周期恢复及生产客户端冒烟。按 typecheck → build → 全量 test 验证，并在 development 专用页面操作删除／恢复；日常应用前独立预览完整写集，不修改凭据，不改历史及进行中请求。实测证据与未完成事项写入 V1-COVERAGE。
+
 ## 模型生命周期与统一操作预览（0.8.0，2026-10-10）
 
 对应 SPEC F001／F004／F007／F009／F010，基线 0.7.0，目标 0.8.0。本节经用户“可以，实现吧”明确确认后实现；规划模块为 catalog-state／catalog-types，目录桥接为 service／official-host，页面为 catalog-panel。与后文历史官方契约冲突时，本节替代“到其他页面调整冲突”“模型键设置本身阻止删除”及“只能同 Provider 迁移”的相关规则；官网识别、六页三轮、临时参数、严格证据和取消／截止机制不变。

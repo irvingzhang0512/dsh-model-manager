@@ -7,6 +7,7 @@ export type CatalogOperation =
   | { kind: 'add'; model: ModelRef; name?: string; image?: boolean; contextWindow?: number; maxTokens?: number }
   | { kind: 'rename'; model: ModelRef; name: string }
   | { kind: 'remove'; model: ModelRef }
+  | { kind: 'removeAlias'; name: string }
 export interface CatalogProfile {
   providerId: string; ns: string; path: string[]; models: HostModel[]
   explicit: boolean; overrides?: Record<string, Record<string, unknown>>; minimumModels: number
@@ -15,7 +16,7 @@ export interface CatalogProfile {
 }
 export interface CatalogState extends OfficialState { profiles: CatalogProfile[]; records: ModelRecord[] }
 export interface CatalogIntent {
-  id: string; kind: 'add' | 'rename' | 'remove' | 'update' | 'migrate'; model: ModelRef
+  id: string; kind: 'add' | 'rename' | 'remove' | 'update' | 'migrate' | 'removeAlias'; model: ModelRef
   value?: HostModel; oldIds?: string[]; evidence?: OfficialEvidence[]; officialDiff?: OfficialDiff
   protectedName?: boolean
 }

@@ -76,6 +76,90 @@ async function fixture(explicit = true, pi = false, absentUser = false) {
   return { raw, rev, call, prepare, runtime, get, disposed, backupPath, analyses: () => analyses, mode: (value: string) => { outputMode = value }, fail: (ns: string) => { failureNamespace = ns; failureOnce = true } }
 }
 
+describe('别名删除宿主完整事务', () => {
+  async function preview(f: Awaited<ReturnType<typeof fixture>>) {
+    const first = await f.call('catalog-preview', { operations: [{ kind: 'removeAlias', name: 'main' }] })
+    expect(first.status, JSON.stringify(first.json)).toBe(200)
+    expect(first.json.selected).toEqual([])
+    expect(first.json.counts.every((c: any) => c.before === c.after && !c.operationCount)).toBe(true)
+    const op = first.json.operations[0]
+    const resolved = await f.call('catalog-resolve', { token: first.json.token, selected: [op.id], resolutions: op.choices.map((c: any) => ({ id: c.id, optionId: c.options.some((o: any) => o.optionId === 'clear') ? 'clear' : modelKey({ providerId: 'reader', modelId: 'reader' }) })) })
+    expect(resolved.status, JSON.stringify(resolved.json)).toBe(200)
+    expect(resolved.json.operations[0].blockedReasons).toEqual([])
+    return resolved.json
+  }
+  it('隐藏旧主模型、旧视觉引用可一次删除和完整恢复，实际模型与无关视觉保留', async () => {
+    const f = await fixture(false, true)
+    f.raw['dsh-model-manager'].auto.main = { target: '@main', tier: 'high', maxOutputTokens: 77, custom: 'keep' }
+    f.raw['dsh-model-manager'].auto.roles.vision = { enabled: false, target: '@main', tier: 'auto' }
+    f.raw['dsh-model-manager'].vision = { enabled: true, policy: 'native-first', target: { providerId: 'reader', modelId: 'image' } }
+    const original = structuredClone(f.raw), p = await preview(f)
+    expect(f.raw).toEqual(original)
+    const a = await f.call('catalog-apply', { token: p.token, selected: p.selected })
+    expect(a.status, JSON.stringify(a.json)).toBe(200)
+    expect(a.json.snapshot.config.aliases.main).toBeUndefined(); expect(a.json.snapshot.config.auto.main).toEqual({ maxOutputTokens: 77, custom: 'keep' })
+    expect(a.json.snapshot.config.vision).toEqual(original['dsh-model-manager'].vision)
+    expect(f.raw['llm-deepseek']).toEqual(original['llm-deepseek']); expect(f.raw['llm-pi-ai']).toEqual(original['llm-pi-ai'])
+    expect(f.analyses()).toBe(0)
+    const backup = JSON.parse(await readFile(f.backupPath(), 'utf8'))
+    expect(backup.writes.map((w: any) => w.ns)).toEqual(['dsh-model-manager'])
+    expect((await f.call('catalog-restore', { backupId: a.json.backupId })).status).toBe(200)
+    expect(f.raw).toEqual(original)
+    f.disposed.forEach(dispose => dispose())
+  })
+  it('未处理引用不可绕过 apply，跨站及非法输入拒绝，preview 不修改设置', async () => {
+    const f = await fixture(); f.raw['dsh-model-manager'].auto.main.target = '@main'
+    const original = structuredClone(f.raw)
+    const p = await f.call('catalog-preview', { operations: [{ kind: 'removeAlias', name: 'main' }] })
+    expect((await f.call('catalog-apply', { token: p.json.token, selected: [p.json.operations[0].id] })).status).toBe(400)
+    expect((await f.call('catalog-preview', { operations: [{ kind: 'removeAlias', name: 'main' }] }, { origin: 'https://evil.invalid' })).status).toBe(403)
+    expect((await f.call('catalog-preview', { operations: [{ kind: 'removeAlias', name: 'main', force: true }] })).status).toBe(400)
+    expect(f.raw).toEqual(original); f.disposed.forEach(dispose => dispose())
+  })
+  it('宿主默认及范围更改同组备份；后续写失败回滚别名删除', async () => {
+    const f = await fixture()
+    f.raw['agent-default-model'] = { provider: 'dsh-model-manager', model: 'alias:main', custom: 'keep' }
+    f.raw['subagent-model-selection'].allowedModels = [{ provider: 'dsh-model-manager', model: 'alias:main' }, { provider: 'deepseek-official', model: 'pro' }]
+    const original = structuredClone(f.raw), p = await preview(f)
+    f.fail('agent-default-model')
+    const a = await f.call('catalog-apply', { token: p.token, selected: p.selected })
+    expect(a.status).toBe(400); expect(a.json.error).toContain('回滚'); expect(f.raw).toEqual(original)
+    const next = await preview(f), applied = await f.call('catalog-apply', { token: next.token, selected: next.selected })
+    expect(applied.status, JSON.stringify(applied.json)).toBe(200)
+    expect(f.raw['agent-default-model']).toEqual({ provider: 'reader', model: 'reader', custom: 'keep' })
+    expect(f.raw['subagent-model-selection'].allowedModels).toEqual([{ provider: 'deepseek-official', model: 'pro' }])
+    expect((await f.call('catalog-restore', { backupId: applied.json.backupId })).status).toBe(200); expect(f.raw).toEqual(original)
+    f.disposed.forEach(dispose => dispose())
+  })
+  it('未来 session／nextTurn 引用清理整体备份恢复；并发覆盖变化拒绝', async () => {
+    const f = await fixture()
+    for (const scope of ['session', 'nextTurn']) expect((await f.call('overrides', { sessionId: 'alias-test', scope, selection: { target: '@main', maxOutputTokens: 11 } }, {}, 'PUT')).status).toBe(200)
+    const path = join(resolveDataDir(), 'overrides.json'), original = JSON.parse(await readFile(path, 'utf8'))
+    const p = await preview(f)
+    expect(p.operations[0].references.filter((r: any) => r.path.startsWith('overrides.'))).toHaveLength(2)
+    const a = await f.call('catalog-apply', { token: p.token, selected: p.selected })
+    expect(a.status, JSON.stringify(a.json)).toBe(200)
+    expect(JSON.parse(await readFile(path, 'utf8'))['alias-test']).toEqual({ session: { maxOutputTokens: 11 }, nextTurn: { maxOutputTokens: 11 } })
+    expect((await f.call('catalog-restore', { backupId: a.json.backupId })).status).toBe(200)
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(original)
+    const stale = await preview(f)
+    await f.call('overrides', { sessionId: 'alias-test', scope: 'nextTurn', selection: { target: { providerId: 'reader', modelId: 'reader' } } }, {}, 'PUT')
+    expect((await f.call('catalog-apply', { token: stale.token, selected: stale.selected })).status).toBe(409)
+    expect(f.raw['dsh-model-manager'].aliases.main).toBeDefined(); f.disposed.forEach(dispose => dispose())
+  })
+  it('后续 revision 编辑拒绝 apply 和 restore，不覆盖后续配置', async () => {
+    const f = await fixture(), p = await preview(f)
+    f.rev['dsh-model-manager']++
+    expect((await f.call('catalog-apply', { token: p.token, selected: p.selected })).status).toBe(409)
+    const next = await preview(f), applied = await f.call('catalog-apply', { token: next.token, selected: next.selected })
+    expect(applied.status).toBe(200)
+    f.raw['dsh-model-manager'].reliability.maxAttempts = 1; f.rev['dsh-model-manager']++
+    expect((await f.call('catalog-restore', { backupId: applied.json.backupId })).status).toBe(409)
+    expect(f.raw['dsh-model-manager'].reliability.maxAttempts).toBe(1); expect(f.raw['dsh-model-manager'].aliases.main).toBeUndefined()
+    f.disposed.forEach(dispose => dispose())
+  })
+})
+
 describe('官方同步宿主完整写集', () => {
   it('缺少必填字段的格式错误经 SSE 明确反馈，不提供结果或写配置', async () => {
     const f = await fixture(), original = structuredClone(f.raw), revisions = structuredClone(f.rev)
