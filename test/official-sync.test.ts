@@ -240,7 +240,7 @@ describe('完整清单比较与迁移', () => {
     original.config.models[key] = { capability: { image: 'yes' }, tiers: { low: 'low' } }
     original.config.aliases.entry = { candidates: [old, { ...old, modelId: 'old-vision' }, target, { providerId: 'third-party', modelId: 'old-fast' }], efforts: { [key]: 'high' } }
     original.config.auto.evaluator = old; original.config.auto.simple.target = old; original.config.auto.main.target = old
-    original.config.auto.roles.coding.target = old; original.config.auto.preferences.code = { target: old }; original.config.vision.target = old
+    original.config.auto.roles.coding.target = old; original.config.auto.preferences = { code: { target: old } }; original.config.vision.target = old
     original.config.official = { analyzer: old, sources: { models: 'historical' } }
     original.defaultModel = { provider: old.providerId, model: old.modelId, other: 'keep' }
     original.subagents = { enabled: true, allowedModels: [{ provider: old.providerId, model: old.modelId }, { provider: target.providerId, model: target.modelId }] }

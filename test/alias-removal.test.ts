@@ -37,12 +37,12 @@ describe('别名删除引用处理', () => {
   it('所有配置与未来覆盖引用均展示，未处理任意一项不能删除', () => {
     const state = fixture()
     for (const key of ['simple', 'normal', 'complex'] as const) state.config.auto[key].target = '@deepseek-v4-1'
-    state.config.auto.preferences.review = { target: '@deepseek-v4-1' }; state.config.auto.roles.search.target = '@deepseek-v4-1'
+    state.config.auto.preferences = { review: { target: '@deepseek-v4-1' } }; state.config.auto.roles.search.target = '@deepseek-v4-1'
     state.overrides.s = { session: { target: '@deepseek-v4-1', maxOutputTokens: 123 }, nextTurn: { target: '@deepseek-v4-1' } }
     state.defaultModel = { provider: 'dsh-model-manager', model: 'alias:deepseek-v4-1', custom: 'keep' }
     state.subagents = { enabled: false, allowedModels: [{ provider: 'dsh-model-manager', model: 'alias:deepseek-v4-1' }] }
     const first = planCatalog(state, intents(state)), picked = resolutions(first, path => path === 'agent-default-model.model' ? modelKey(text) : 'clear')
-    expect(first.operations[0].references).toHaveLength(9)
+    expect(first.operations[0].references).toHaveLength(8)
     expect(planCatalog(state, intents(state), picked.slice(1)).after).toEqual(state)
     const next = planCatalog(state, intents(state), picked)
     expect(next.operations[0].blockedReasons).toEqual([]); expect(next.after.defaultModel).toEqual({ provider: 'p', model: 'text', custom: 'keep' })

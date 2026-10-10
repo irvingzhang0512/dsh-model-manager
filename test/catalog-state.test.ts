@@ -15,6 +15,24 @@ function resolveBy(plan: ReturnType<typeof planCatalog>, pick: (choice: typeof p
   return plan.operations.flatMap(o => o.choices.flatMap(c => { const optionId = pick(c); return optionId ? [{ id: c.id, optionId }] : [] }))
 }
 describe('真实目录生命周期与视觉删除', () => {
+  it('停用偏好不阻止删除模型、别名或被官方迁移改写，原生范围仍检查', () => {
+    const state = fixture()
+    state.config.auto.preferences = { coding: { target: ref('old-fast') }, search: { target: '@legacy' } }
+    state.config.aliases.legacy = { candidates: [ref('old-fast')] }
+    const preferences = structuredClone(state.config.auto.preferences)
+    const alias = planCatalog(state, manualIntents([{ kind: 'removeAlias', name: 'legacy' }], state))
+    expect(alias.operations[0].blockedReasons).toEqual([])
+    expect(alias.after.config.auto.preferences).toEqual(preferences)
+    delete state.config.aliases.legacy
+    const deletion = planCatalog(state, remove(state, 'old-fast'))
+    expect(deletion.operations[0].blockedReasons).toEqual([])
+    expect(deletion.after.config.auto.preferences).toEqual(preferences)
+    const migrated = planCatalog(state, [{ id: 'merge', kind: 'migrate', model: ref('fast'), oldIds: ['old-fast'], value: { id: 'fast' } }])
+    expect(migrated.after.config.auto.preferences).toEqual(preferences)
+    state.subagents = { enabled: true, allowedModels: [{ provider: 'deepseek-official', model: 'old-fast' }] }
+    expect(catalogReferences(state, [ref('old-fast')]).map(r => r.path)).toEqual(['subagent-model-selection.allowedModels[0]'])
+    expect(planCatalog(state, remove(state, 'old-fast')).operations[0].blockedReasons.length).toBeGreaterThan(0)
+  })
   it('存在无关图片辅助模型不阻止删除其他模型，不变更视觉设置', () => {
     const state = fixture(); state.config.vision = { enabled: true, policy: 'native-first', target: ref('reader', 'other') }
     const p = planCatalog(state, remove(state, 'old-fast'))

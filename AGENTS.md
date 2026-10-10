@@ -14,7 +14,7 @@
 
 - 默认中文交流和维护文档。插件是独立 Git 仓库；修改前查看 `git status --short --branch`，保留已有改动。根仓库维护规范和 `.agents/skills/dsh-plugin-develop/SKILL.md` 仍适用。
 - 入口：`src/index.ts` 装配宿主接口和 HTTP 路由；`src/domain.ts` 定义 v3 配置与迁移；`src/adapter.ts` 执行受管理调用；`src/auto-router.ts` 只评估主任务；`src/official-sync.ts` 解析官方网页；`src/catalog-state.ts`／`catalog-types.ts` 规划目录操作与引用选择；`src/official-host.ts` 共用官方与手动事务；`src/client/` 是 Web 设置页。
-- DSH 原生 Subagent 决定任务拆分、模型选择、后台运行与结果回收。插件不注册固定角色委派工具；`subagent_fork` 继承父模型。页面通过 `subagent-model-selection` 宿主设置读写模型范围，变更对新会话生效。
+- DSH 原生 Subagent 决定任务拆分、模型选择、后台运行与结果回收。插件不注册固定角色委派工具；`subagent_fork` 继承父模型。模型范围统一在 DSH 官方设置配置，插件不注册 /subagents 路由或依赖 subagents 服务；目录事务仍检查并处理原生范围引用。旧 auto.preferences 只读停用，不生成或注入提示；clearLegacyPreferences 独立操作仅 unset 该字段，备份恢复保留原始值及存在状态，不删除 main／roles 或视觉兜底。
 - 不恢复 `fast/balanced/deep` 新配置入口。用户新选择只写模型实际公开的 `reasoningEffort`；旧值仅用于迁移。v1/v2 升 v3 必须保留模型、别名、视觉、手动覆盖、旧主模型及逐候选档位，并保持迁移幂等。新 AUTO 未启用时不能增加评估调用。
 - 官方同步按已确认 F007／F009 契约：从可配置 HTTPS 入口读取，实际链接和重定向限制入口 hostname；独立 LLM 根据原文证据识别动态清单，最多六页三轮，网页指令只作资料。完整性不足或冲突不提供可应用预览。仅迁移官方 Provider 的完整引用与模型键；应用检查 revision 和未来覆盖，备份完整写集，安全回滚／恢复，保留凭据、输出上限和未知字段。第三方同名模型不迁移。
 - 验证调用的证据与能力声明分开。网络错误或不确定结果不得自动写能力；图片临时提权必须恢复原声明。

@@ -1,7 +1,7 @@
 import { fromManagedId, managedId, mapSelectionEffort, modelKey, resolveSelection, validateConfig, type ModelRef, type Selection } from './domain.js'
 import { canonical, officialReferences, type HostModel } from './official-state.js'
 import { OFFICIAL_PROVIDER, type OfficialAnalysis, type OfficialDiff } from './official-types.js'
-import type { CatalogChoice, CatalogDiff, CatalogIntent, CatalogOperation, CatalogProfile, CatalogReference, CatalogResolution, CatalogState } from './catalog-types.js'
+import type { CatalogChoice, CatalogDiff, CatalogIntent, ModelCatalogIntent, CatalogOperation, CatalogProfile, CatalogReference, CatalogResolution, CatalogState } from './catalog-types.js'
 import { planAliasRemoval } from './alias-removal.js'
 
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b)
@@ -11,6 +11,11 @@ export function manualIntents(input: unknown, state: CatalogState): CatalogInten
   if (!Array.isArray(input) || !input.length || input.length > 100) throw new Error('请输入 1–100 项目录操作')
   const seen = new Set<string>()
   return input.map((item: CatalogOperation) => {
+    if (item?.kind === 'clearLegacyPreferences') {
+      if (input.length !== 1 || Object.keys(item).some(key => key !== 'kind')) throw new Error('旧分工偏好清理须单独提交且不能包含其他字段')
+      if (!Object.hasOwn(state.config.auto, 'preferences')) throw new Error('无需清理旧分工偏好')
+      return { id: 'clearLegacyPreferences', kind: item.kind, path: 'auto.preferences' }
+    }
     if (item?.kind === 'removeAlias') {
       if (typeof item.name !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(item.name) || !Object.hasOwn(state.config.aliases, item.name) || Object.keys(item).some(key => !['kind', 'name'].includes(key))) throw new Error('别名删除操作无效或别名不存在')
       const model = { providerId: 'dsh-model-manager', modelId: `alias:${item.name}` }, key = modelKey(model)
@@ -57,7 +62,6 @@ function visitRefs(state: CatalogState, callback: (ref: ModelRef, path: string, 
   if (state.config.auto.evaluator) visit(state.config.auto.evaluator, 'auto.evaluator')
   if (state.config.official?.analyzer) visit(state.config.official.analyzer, 'official.analyzer')
   for (const field of ['main', 'simple', 'normal', 'complex'] as const) selection(state.config.auto[field], `auto.${field}`)
-  for (const [key, value] of Object.entries(state.config.auto.preferences)) selection(value, `auto.preferences.${key}`)
   for (const [key, value] of Object.entries(state.config.auto.roles)) selection(value, `auto.roles.${key}`)
   if (isRef(state.config.vision.target)) visit(state.config.vision.target, 'vision.target')
   for (const [id, override] of Object.entries(state.overrides)) { selection(override.session, `overrides.${id}.session`); selection(override.nextTurn, `overrides.${id}.nextTurn`) }
@@ -86,7 +90,6 @@ function visualRefs(state: CatalogState, value?: ModelRef | string): ModelRef[] 
 function selections(state: CatalogState): { value: Selection; path: string }[] {
   return [
     ...(['main', 'simple', 'normal', 'complex'] as const).map(key => ({ value: state.config.auto[key], path: `auto.${key}` })),
-    ...Object.entries(state.config.auto.preferences).map(([key, value]) => ({ value, path: `auto.preferences.${key}` })),
     ...Object.entries(state.config.auto.roles).map(([key, value]) => ({ value, path: `auto.roles.${key}` })),
     ...Object.entries(state.overrides).flatMap(([key, value]) => ['session', 'nextTurn'].flatMap(field => (value as any)[field] ? [{ value: (value as any)[field] as Selection, path: `overrides.${key}.${field}` }] : [])),
   ]
@@ -104,8 +107,8 @@ export function catalogReferences(state: CatalogState, models: ModelRef[]): Cata
   }
   return result
 }
-export function officialIntents(state: CatalogState, analysis: OfficialAnalysis): CatalogIntent[] {
-  const result: CatalogIntent[] = [], handled = new Set<string>(), profile = state.profiles.find(p => p.providerId === OFFICIAL_PROVIDER)
+export function officialIntents(state: CatalogState, analysis: OfficialAnalysis): ModelCatalogIntent[] {
+  const result: ModelCatalogIntent[] = [], handled = new Set<string>(), profile = state.profiles.find(p => p.providerId === OFFICIAL_PROVIDER)
   if (!profile) throw new Error('DSH 未加载可写 DeepSeek 官方目录')
   const add = (modelId: string, field: OfficialDiff['field'], value: HostModel | undefined, oldIds: string[] = [], evidence = analysis.completenessEvidence) => {
     const current = profile.models.find(m => m.id === modelId)
@@ -152,7 +155,7 @@ export function planCatalog(before: CatalogState, intents: CatalogIntent[], reso
     if (!picked) diff.blockedReasons.push(`请解决配置冲突：${path}`)
     return structuredClone(picked ? picked.value : a)
   }
-  const officialFields = (target: HostModel, intent: CatalogIntent, diff: CatalogDiff, userFields: Set<string>) => {
+  const officialFields = (target: HostModel, intent: ModelCatalogIntent, diff: CatalogDiff, userFields: Set<string>) => {
     for (const [field, value] of Object.entries(intent.value ?? {})) {
       if (field !== 'id' && target[field] !== undefined && !same(target[field], value) && (userFields.has(field) || field === 'name' && intent.protectedName)) {
         const picked = choice(diff, `official-field:${field}`, 'conflict', `${intent.model.modelId}.${field}`, [{ optionId: 'local', label: `保留本地值：${canonical(target[field])}`, value: target[field], source: 'user' }, { optionId: 'official', label: `采用官方值：${canonical(value)}`, value, source: 'official' }])
@@ -162,6 +165,13 @@ export function planCatalog(before: CatalogState, intents: CatalogIntent[], reso
     }
   }
   for (const intent of intents) {
+    if (intent.kind === 'clearLegacyPreferences') {
+      if (intents.length !== 1) throw new Error('旧分工偏好清理须单独提交')
+      const diff: CatalogDiff = { id: intent.id, kind: intent.kind, path: intent.path, before: structuredClone(state.config.auto.preferences), after: null, references: [], attachedSettings: [], conflicts: [], choices: [], blockedReasons: [] }
+      operations.push(diff)
+      if (!selected || selected.includes(diff.id)) delete state.config.auto.preferences
+      continue
+    }
     if (intent.kind === 'removeAlias') {
       const { diff, working } = planAliasRemoval(state, intent, intents, choice)
       operations.push(diff)

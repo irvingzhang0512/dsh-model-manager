@@ -40,7 +40,7 @@ export interface ManagerConfig {
   models: Record<string, ModelSettings>
   official?: { sourceUrl?: string; analyzer?: ModelRef; checkedAt?: string; sources?: Record<string, string> }
   /** main/roles 仅供旧配置迁移和已有会话读取。 */
-  auto: { enabled: boolean; evaluator?: ModelRef; simple: Selection; normal: Selection; complex: Selection; preferences: Record<string, Selection>; main: Selection; roles: Record<Role, RoleSettings> }
+  auto: { enabled: boolean; evaluator?: ModelRef; simple: Selection; normal: Selection; complex: Selection; preferences?: Record<string, Selection>; main: Selection; roles: Record<Role, RoleSettings> }
   vision: { enabled: boolean; policy: VisionPolicy; target?: ModelRef | string }
   /** 全局默认兜底策略；别名可用 reliability 覆盖个别字段。 */
   reliability: { maxAttempts: number; retryTransient: boolean; parameterDowngrade: boolean }
@@ -110,7 +110,7 @@ export function probeSuggestions(verifications: Verification[]): ProbeSuggestion
 export const DEFAULT_CONFIG: ManagerConfig = {
   version: 3, aliases: {}, models: {},
   auto: {
-    enabled: false, simple: {}, normal: {}, complex: {}, preferences: {},
+    enabled: false, simple: {}, normal: {}, complex: {},
     main: {},
     roles: {
       search: { tier: 'low' },
@@ -282,9 +282,9 @@ function migrateModelTiers(settings: ModelSettings | undefined): ModelSettings {
 export function migrateConfig(input: unknown): ManagerConfig {
   const raw = input as { version?: number; aliases?: Record<string, ModelRef[] | AliasConfig>; models?: Record<string, ModelSettings>; official?: ManagerConfig['official']; auto?: Selection | { main?: Selection; roles?: Record<string, RoleSettings>; enabled?: boolean; evaluator?: ModelRef; simple?: Selection; normal?: Selection; complex?: Selection; preferences?: Record<string, Selection> }; roles?: Record<string, RoleSettings>; vision?: ManagerConfig['vision']; reliability?: { maxAttempts?: number; retryTransient?: boolean; parameterDowngrade?: boolean; longContextCandidates?: ModelRef[] } }
   if (![1, 2, 3].includes(raw?.version ?? 0)) throw new Error('不支持的配置版本')
-  const current = raw.auto && 'main' in raw.auto ? raw.auto : undefined
+  const current = raw.auto && typeof raw.auto === 'object' && (raw.version !== 1 || 'main' in raw.auto) ? raw.auto as Partial<ManagerConfig['auto']> : undefined
   const legacyMain = current?.main ?? (raw.version === 1 ? raw.auto as Selection : undefined) ?? {}
-  const legacyRoles = current?.roles ?? raw.roles ?? {}
+  const legacyRoles: Partial<Record<Role, RoleSettings>> = current?.roles ?? raw.roles ?? {}
   const aliases: Record<string, AliasConfig> = {}
   for (const [name, value] of Object.entries(raw.aliases ?? {})) {
     if (Array.isArray(value)) aliases[name] = { candidates: value }
@@ -297,13 +297,12 @@ export function migrateConfig(input: unknown): ManagerConfig {
   for (const [key, settings] of Object.entries(raw.models ?? {})) models[key] = migrateModelTiers(settings)
   const roles: Record<Role, RoleSettings> = { ...structuredClone(DEFAULT_CONFIG.auto.roles) }
   for (const role of Object.keys(roles) as Role[]) if (legacyRoles[role]) roles[role] = migrateSelectionTiers(structuredClone(legacyRoles[role])) as RoleSettings
-  const preferences = current?.preferences ?? Object.fromEntries(Object.entries(roles).filter(([, value]) => value.target).map(([role, value]) => [role, value]))
   return {
     version: 3, aliases, models, official: raw.official,
     ...((input as ManagerConfig)?.catalogMetadata ? { catalogMetadata: structuredClone((input as ManagerConfig).catalogMetadata) } : {}),
     auto: { enabled: current?.enabled ?? false, evaluator: current?.evaluator,
       simple: migrateSelectionTiers(current?.simple), normal: migrateSelectionTiers(current?.normal ?? legacyMain), complex: migrateSelectionTiers(current?.complex ?? legacyMain),
-      preferences: structuredClone(preferences), main: migrateSelectionTiers(legacyMain), roles },
+      ...(current && Object.hasOwn(current, 'preferences') ? { preferences: structuredClone(current.preferences) } : {}), main: migrateSelectionTiers(legacyMain), roles },
     vision: raw.vision ?? { enabled: false, policy: 'native-first' },
     reliability,
   }

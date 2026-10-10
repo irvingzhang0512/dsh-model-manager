@@ -117,7 +117,7 @@ describe('宿主装配', () => {
     expect(toolNames).toContain('model_manager_inspect_image')
     expect(prompts).toContain('dsh-model-manager')
     expect(routes.map(route => route.path)).toEqual([
-      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/subagents', '/api/model-manager/catalog-preview', '/api/model-manager/catalog-resolve', '/api/model-manager/catalog-apply', '/api/model-manager/catalog-restore', '/api/model-manager/official-preview', '/api/model-manager/official-apply', '/api/model-manager/official-restore', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/recommend', '/api/model-manager/overrides',
+      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/catalog-preview', '/api/model-manager/catalog-resolve', '/api/model-manager/catalog-apply', '/api/model-manager/catalog-restore', '/api/model-manager/official-preview', '/api/model-manager/official-apply', '/api/model-manager/official-restore', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/recommend', '/api/model-manager/overrides',
     ])
     expect(new Set(routes.map(route => route.path)).size).toBe(routes.length)
     for (const dispose of disposers.reverse()) dispose()

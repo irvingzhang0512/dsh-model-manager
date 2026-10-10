@@ -12,18 +12,19 @@ import { resolveDataDir } from '../src/service.ts'
 let temporary: string | undefined
 afterEach(async () => { vi.unstubAllGlobals(); vi.useRealTimers(); if (temporary) await rm(temporary, { recursive: true, force: true }); delete process.env.DSH_HOME })
 
-async function fixture(explicit = true, pi = false, absentUser = false) {
+async function fixture(explicit = true, pi = false, absentUser = false, legacy = false) {
   temporary = await mkdtemp(join(tmpdir(), 'dmm-official-')); process.env.DSH_HOME = temporary
   const old = { providerId: 'deepseek-official', modelId: 'old-fast' }
   const config = structuredClone(DEFAULT_CONFIG)
+  if (legacy) config.auto.preferences = { research: { target: '@missing', extra: { nested: 'preserve' } } as any }
   config.aliases.main = { candidates: [old], efforts: { [modelKey(old)]: 'high' } }
   config.models[modelKey(old)] = { capability: { image: 'yes' } }
   const originalModels = [{ id: 'old-fast', name: 'old', maxTokens: 99, custom: 'keep' }, { id: 'pro', name: 'pro' }]
   const raw: Record<string, any> = { 'dsh-model-manager': config, 'llm-deepseek': { apiKeyEnv: 'PRIVATE_KEY', ...(explicit ? { models: originalModels } : {}) }, 'agent-default-model': { provider: 'reader', model: 'reader' }, 'subagent-model-selection': { enabled: true, allowedModels: [{ provider: old.providerId, model: old.modelId }] } }
   if (pi) raw['llm-pi-ai'] = { providers: { reader: { apiKeyEnv: 'PRIVATE_PI_KEY', modelOverrides: { reader: { maxTokens: 77, custom: 'keep' } } } } }
   const rev: Record<string, number> = Object.fromEntries(Object.keys(raw).map(ns => [ns, 1]))
-  const routes = new Map<string, Function>(), disposed: Function[] = []
-  let failureNamespace = '', failureOnce = false, outputMode = 'normal', analyses = 0
+  const routes = new Map<string, Function>(), disposed: Function[] = [], prompts: (() => string)[] = [], hooks = new Map<string, Function>()
+  let failureNamespace = '', failureOnce = false, outputMode = 'normal', analyses = 0, managedAdapter: any
   const get = (ns: string) => structuredClone(ns === 'llm-deepseek' ? { ...raw[ns], models: raw[ns].models ? raw[ns].models.map(({ custom: _custom, ...model }: any) => model) : originalModels } : raw[ns])
   const settings = {
     get, register: () => ({ watch: () => () => {} }),
@@ -46,7 +47,7 @@ async function fixture(explicit = true, pi = false, absentUser = false) {
     listProviders: () => [{ id: 'deepseek-official' }, { id: 'reader' }], listConfigurableProviders: () => pi ? [{ provider: 'reader', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'reader'] }] : [],
     listModels: async (provider: string) => provider === 'reader' ? (pi ? (raw['llm-pi-ai'].providers.reader.models ?? [{ id: 'reader', name: 'reader' }, { id: 'image', name: 'image' }]).map((m: any) => ({ ...m, ...raw['llm-pi-ai'].providers.reader.modelOverrides?.[m.id] })) : [{ id: 'reader', name: 'reader' }]) : get('llm-deepseek').models,
     resolveModelInfo: async (provider: string, id: string) => provider === 'reader' ? { id, name: pi ? raw['llm-pi-ai'].providers.reader.models?.find((m: any) => m.id === id)?.name ?? raw['llm-pi-ai'].providers.reader.modelOverrides?.[id]?.name ?? id : 'reader', inputModalities: id === 'image' ? ['text', 'image'] : ['text'], reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } } : { id, name: id, reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] }, ...get('llm-deepseek').models.find((model: any) => model.id === id) },
-    registerAdapter: () => () => {},
+    registerAdapter: (_providers: string[], adapter: any) => { managedAdapter = adapter; return () => {} },
     stream: vi.fn(async function* (options: any) {
       analyses++
       const page = JSON.parse(options.messages[1].content[0].text).pages[0]
@@ -58,7 +59,7 @@ async function fixture(explicit = true, pi = false, absentUser = false) {
     }),
   }
   vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['fast', 'pro'], ['old-fast']))))
-  const ctx = { settings, llm: runtime, tools: { register: () => () => {} }, subagents: {}, attachments: {}, systemPrompt: { section: () => () => {} }, webServer: { register: (route: any) => { if (routes.has(route.path)) throw Error('duplicate route'); routes.set(route.path, route.handler); return () => {} } }, on: () => () => {}, effect: (fn: Function) => { const dispose = fn(); if (typeof dispose === 'function') disposed.push(dispose) }, logger: { error: () => {} } }
+  const ctx = { settings, llm: runtime, tools: { register: () => () => {} }, attachments: {}, systemPrompt: { section: (s: any) => { prompts.push(s.text); return () => {} } }, webServer: { register: (route: any) => { if (routes.has(route.path)) throw Error('duplicate route'); routes.set(route.path, route.handler); return () => {} } }, on: (name: string, fn: Function) => { hooks.set(name, fn); return () => {} }, effect: (fn: Function) => { const dispose = fn(); if (typeof dispose === 'function') disposed.push(dispose) }, logger: { error: () => {} } }
   apply(ctx as never)
   await new Promise(resolve => setTimeout(resolve, 15))
   const prepare = (path: string, value: unknown, headers: Record<string, string> = {}, method = 'POST') => {
@@ -73,8 +74,81 @@ async function fixture(explicit = true, pi = false, absentUser = false) {
     const dir = join(resolveDataDir(), 'catalog-backups')
     return existsSync(dir) ? join(dir, readdirSync(dir).find(file => /^[0-9a-f-]{36}\.json$/.test(file)) ?? 'missing.json') : join(resolveDataDir(), 'official-sync-backup.json')
   }
-  return { raw, rev, call, prepare, runtime, get, disposed, backupPath, analyses: () => analyses, mode: (value: string) => { outputMode = value }, fail: (ns: string) => { failureNamespace = ns; failureOnce = true } }
+  return { raw, rev, call, prepare, runtime, get, disposed, routes, prompts, hooks, managedAdapter, backupPath, analyses: () => analyses, mode: (value: string) => { outputMode = value }, fail: (ns: string) => { failureNamespace = ns; failureOnce = true } }
 }
+
+describe('旧分工偏好独立清理事务', () => {
+  const input = { operations: [{ kind: 'clearLegacyPreferences' }] }
+  it('父入口为 AUTO 时 fork 延续父任务已选模型及原生参数，不再次评估', async () => {
+    const f = await fixture(), chosen = { providerId: 'deepseek-official', modelId: 'pro' }
+    f.managedAdapter.service.saveAutoDecision('parent', 1, { grade: 'normal', candidates: [chosen], selection: { target: chosen }, reason: 'test', fallback: false })
+    const parentOptions = { provider: 'dsh-model-manager', model: 'auto', reasoningEffort: 'high', maxTokens: 33 }
+    const child = await f.hooks.get('agent/request')!({ agent: { session: { id: 'fork', header: { parentSession: 'parent' } } }, turn: 1 }, async () => parentOptions)
+    expect(child).toEqual({ ...parentOptions, model: managedId(chosen) })
+    expect(f.managedAdapter.service.isDelegatedSession('fork')).toBe(true)
+    expect(f.runtime.stream).not.toHaveBeenCalled(); f.disposed.forEach(dispose => dispose())
+  })
+  it.each([false, true])('清理仅 unset 历史字段，完整备份并恢复；空对象=%s', empty => fixture(true, false, false, true).then(async f => {
+    if (empty) f.raw['dsh-model-manager'].auto.preferences = {}
+    f.raw['dsh-model-manager'].auto.custom = { untouched: true }
+    const original = structuredClone(f.raw)
+    const p = await f.call('catalog-preview', input)
+    expect(p.status, JSON.stringify(p.json)).toBe(200)
+    expect(p.json).toMatchObject({ writesPlugin: true, counts: [], selected: [] })
+    expect(p.json.operations[0]).not.toHaveProperty('model')
+    expect(f.raw).toEqual(original)
+    expect(f.runtime.stream).not.toHaveBeenCalled()
+    const a = await f.call('catalog-apply', { token: p.json.token, selected: ['clearLegacyPreferences'] })
+    expect(a.status, JSON.stringify(a.json)).toBe(200)
+    expect(a.json.snapshot.config.auto).not.toHaveProperty('preferences')
+    expect(a.json.snapshot.catalogBackupId).toBe(a.json.backupId)
+    const expected = structuredClone(original); delete expected['dsh-model-manager'].auto.preferences
+    expect(f.raw).toEqual(expected)
+    const backup = JSON.parse(await readFile(f.backupPath(), 'utf8'))
+    expect(backup.writes).toHaveLength(1)
+    expect(backup.writes[0]).toMatchObject({ ns: 'dsh-model-manager', fields: [{ path: ['auto', 'preferences'], before: original['dsh-model-manager'].auto.preferences, had: true }] })
+    expect(backup.writes[0].fields).toHaveLength(1)
+    expect((await f.call('catalog-restore', { backupId: a.json.backupId })).status).toBe(200)
+    expect(f.raw).toEqual(original)
+    expect(f.prompts.map(p => p()).join('')).not.toContain('research')
+    f.disposed.forEach(dispose => dispose())
+  }))
+  it('缺失、混合、重复、未知输入和跨站均拒绝；取消不修改', async () => {
+    const f = await fixture()
+    expect((await f.call('catalog-preview', input)).json.error).toContain('无需清理')
+    f.raw['dsh-model-manager'].auto.preferences = {}
+    const original = structuredClone(f.raw)
+    for (const operations of [[...input.operations, ...input.operations], [...input.operations, { kind: 'removeAlias', name: 'main' }], [{ kind: 'clearLegacyPreferences', model: {} }]]) expect((await f.call('catalog-preview', { operations })).status).toBe(400)
+    expect((await f.call('catalog-preview', input, { origin: 'https://evil.invalid' })).status).toBe(403)
+    const p = await f.call('catalog-preview', input)
+    expect((await f.call('catalog-apply', { token: p.json.token, selected: [] })).status).toBe(400)
+    expect(f.raw).toEqual(original); f.disposed.forEach(dispose => dispose())
+  })
+  it('后续 revision 拒绝清理与恢复，写失败保留原值', async () => {
+    const f = await fixture(true, false, false, true), original = structuredClone(f.raw)
+    const p = await f.call('catalog-preview', input); f.rev['dsh-model-manager']++
+    expect((await f.call('catalog-apply', { token: p.json.token, selected: ['clearLegacyPreferences'] })).status).toBe(409)
+    const next = await f.call('catalog-preview', input); f.fail('dsh-model-manager')
+    expect((await f.call('catalog-apply', { token: next.json.token, selected: ['clearLegacyPreferences'] })).status).toBe(400)
+    expect(f.raw).toEqual(original)
+    const final = await f.call('catalog-preview', input)
+    const a = await f.call('catalog-apply', { token: final.json.token, selected: ['clearLegacyPreferences'] })
+    expect(a.status).toBe(200); f.rev['dsh-model-manager']++
+    expect((await f.call('catalog-restore', { backupId: a.json.backupId })).status).toBe(409)
+    expect(f.raw['dsh-model-manager'].auto).not.toHaveProperty('preferences')
+    f.disposed.forEach(dispose => dispose())
+  })
+  it('无需 subagents 注入且不注册重复路由、不注入偏好；原生子任务保留显式参数', async () => {
+    const f = await fixture(true, false, false, true)
+    expect(f.routes.has('/api/model-manager/subagents')).toBe(false)
+    expect(f.prompts.map(p => p()).join('')).not.toContain('分工')
+    await f.call('overrides', { sessionId: 'child', scope: 'session', selection: { target: { providerId: 'reader', modelId: 'reader' } } }, {}, 'PUT')
+    const selected = { provider: 'dsh-model-manager', model: managedId({ providerId: 'deepseek-official', modelId: 'pro' }), reasoningEffort: 'high' }
+    const result = await f.hooks.get('agent/request')!({ agent: { session: { id: 'child', header: { parentSession: 'parent' } } }, turn: 1 }, async () => selected)
+    expect(result).toEqual(selected); expect(f.runtime.stream).not.toHaveBeenCalled()
+    f.disposed.forEach(dispose => dispose())
+  })
+})
 
 describe('别名删除宿主完整事务', () => {
   async function preview(f: Awaited<ReturnType<typeof fixture>>) {

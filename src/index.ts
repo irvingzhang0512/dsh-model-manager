@@ -6,7 +6,6 @@ import type {} from '@deepseek-ai/dsh-session'
 import type { LlmRuntime, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
@@ -21,10 +20,10 @@ import { registerOfficialSync } from './official-host.js'
 import { recommendAuto } from './recommend-auto.js'
 
 export const name = 'dsh-model-manager'
-export const inject = ['llm', 'settings', 'tools', 'subagents', 'attachments', 'webServer', 'systemPrompt']
+export const inject = ['llm', 'settings', 'tools', 'attachments', 'webServer', 'systemPrompt']
 export const Config = z.any<ManagerConfig>()
 
-type Host = Context & { llm: LlmRuntime; settings: SettingsProvider; tools: ToolRuntime; subagents: SubagentRuntime; attachments: AttachmentStore; webServer: WebServer; systemPrompt: SystemPrompt }
+type Host = Context & { llm: LlmRuntime; settings: SettingsProvider; tools: ToolRuntime; attachments: AttachmentStore; webServer: WebServer; systemPrompt: SystemPrompt }
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -167,8 +166,7 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
   ctx.effect(() => ctx.systemPrompt.section({ name: 'dsh-model-manager', order: 350,
     text: () => {
       const config = service.snapshot().config
-      const preferred = Object.entries(config.auto.preferences).filter(([, value]) => value.target).map(([duty, value]) => `${duty}：${typeof value.target === 'string' ? value.target : `${value.target!.providerId}/${value.target!.modelId}`}`)
-      return [preferred.length ? `使用 DSH 原生 subagent 执行独立任务时，可参考这些模型偏好（非强制）：${preferred.join('；')}。` : '',
+      return [
         config.vision.enabled ? '当消息中出现 [图片附件 ID] 时，使用 model_manager_inspect_image 针对具体问题查看原图；不要根据占位文字猜测图片内容。' : ''].filter(Boolean).join('\n')
     },
   }), 'dsh-model-manager: prompt')
@@ -252,28 +250,6 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     try { await service.refresh(); json(res, 200, { ...service.snapshot(), nativeRevision: ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision }) }
     catch (err) { error(res, err) }
   } }), 'dsh-model-manager: refresh route')
-
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/subagents', handler: async (req, res) => {
-    const namespace = 'subagent-model-selection'
-    const revision = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision
-    if (req.method === 'GET') { json(res, 200, { revision, value: ctx.settings.get(namespace) ?? { enabled: false, allowedModels: [] } }); return }
-    if (req.method !== 'PUT') { res.setHeader('Allow', 'GET, PUT'); json(res, 405, { error: '方法不允许' }); return }
-    if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
-    try {
-      const input = await body(req) as { revision: number; enabled: boolean; allowedModels: { provider: string; model: string }[] }
-      if (revision === undefined || input.revision !== revision) throw new Error('SETTINGS_CONFLICT')
-      if (typeof input.enabled !== 'boolean' || !Array.isArray(input.allowedModels) || input.enabled && !input.allowedModels.length) throw new Error('启用子 Agent 模型选择时至少选择一个模型')
-      const keys = new Set<string>()
-      for (const route of input.allowedModels) {
-        if (!service.model({ providerId: route.provider, modelId: route.model })) throw new Error(`子 Agent 模型尚未加载：${route.provider}/${route.model}`)
-        const key = `${route.provider}\0${route.model}`
-        if (keys.has(key)) throw new Error('子 Agent 模型重复')
-        keys.add(key)
-      }
-      await ctx.settings.mutate(namespace, [{ op: 'set', path: ['enabled'], value: input.enabled }, { op: 'set', path: ['allowedModels'], value: input.allowedModels }], revision)
-      json(res, 200, { revision: ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision, value: ctx.settings.get(namespace) })
-    } catch (err) { error(res, err) }
-  } }), 'dsh-model-manager: subagents route')
 
   registerOfficialSync(ctx, service)
 

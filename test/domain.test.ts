@@ -72,6 +72,21 @@ describe('模型配置', () => {
 })
 
 describe('v3 配置迁移', () => {
+  it.each([1, 2, 3])('v%s 显式历史偏好原值保留、缺失不生成、清理后不复活', version => {
+    const stored = { ...structuredClone(DEFAULT_CONFIG), version }
+    stored.auto.preferences = { duty: { target: '@gone', custom: { intact: true } } as any }
+    const migrated = migrateConfig(stored)
+    expect(migrated.auto.preferences).toEqual(stored.auto.preferences)
+    expect(migrateConfig(migrated)).toEqual(migrated)
+    delete migrated.auto.preferences
+    expect(migrateConfig(migrated).auto).not.toHaveProperty('preferences')
+    expect(migrateConfig({ ...stored, auto: { ...stored.auto, preferences: undefined } }).auto.preferences).toBeUndefined()
+  })
+  it.each([2, 3])('v%s 部分 auto 分节没有 main 时仍保留显式历史偏好', version => {
+    const preferences = { duty: { target: '@gone', custom: 'keep' } }
+    expect(migrateConfig({ version, auto: { preferences } }).auto.preferences).toEqual(preferences)
+    expect(migrateConfig({ version, auto: {} }).auto).not.toHaveProperty('preferences')
+  })
   it('v1 别名、长上下文候选与角色偏好迁移成 v3，旧主模型保留', () => {
     const v1 = {
       version: 1,
@@ -90,7 +105,8 @@ describe('v3 配置迁移', () => {
     expect(v3.aliases[LONG_CONTEXT_ALIAS]).toEqual({ candidates: [{ providerId: 'p', modelId: 'big' }] })
     expect(v3.auto.main).toEqual({ target: { providerId: 'p', modelId: 'a' }, tier: 'balanced' })
     expect(v3.auto.normal.target).toEqual(v3.auto.main.target)
-    expect(v3.auto.preferences.coding.target).toEqual({ providerId: 'p', modelId: 'c' })
+    expect(v3.auto.preferences).toBeUndefined()
+    expect(v3.auto.roles.coding.target).toEqual({ providerId: 'p', modelId: 'c' })
     expect(v3.reliability).toEqual({ maxAttempts: 2, retryTransient: false, parameterDowngrade: true })
     expect(() => validateConfig(v3)).not.toThrow()
     expect(migrateConfig(v3)).toEqual(v3)

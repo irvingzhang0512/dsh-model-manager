@@ -1,5 +1,34 @@
 # 架构契约（v3）
 
+## 子 Agent 配置入口移除与旧偏好清理（0.10.0）
+
+文档版本：2026-10-10；基线 0.9.0／`ddafc33142be0423c361ee474a0bd1f1ae4cd345`，对应 SPEC F002／F003／F005／F009。用户审阅具体文档后回复“继续”明确确认，已按该版实现；实现状态：已实现。此节替代下文关于偏好提示、六标签页及插件 /subagents 路由的旧规则；历史版本契约与验证保留。配置仍为 v3，目标包版本 0.10.0。
+
+### 页面、运行与引用边界
+
+- 移除“子 Agent”标签页及分工偏好编辑器；保留五个标签页，在使用指引说明原生模型范围到 DSH 官方设置配置。删除 /api/model-manager/subagents GET／PUT 的注册、未使用的 SubagentRuntime 类型、subagents 服务注入及对应包依赖。systemPrompt 仍用于视觉提示，仅移除其中分工偏好文本。
+- 原生 subagent 的启动、模型选择、后台运行和回收继续由 DSH 提供。保留现有父子会话识别及受管理请求隔离：子任务不评估 AUTO、不继承主任务临时覆盖，fork 继承父模型；父入口为 AUTO 时延续父任务已经选定的执行模型，不重新评估。
+- auto.preferences 成为可选历史字段，保留显式值及未知键；缺失时不物化，旧 roles 也不生成 preferences。删除／迁移引用访问器不再将它作为有效使用引用，也不修改其历史值。auto.main／roles、视觉、别名候选、宿主默认、原生 subagent-model-selection.allowedModels 和未来覆盖继续按既有使用规则处理。
+
+### 独立清理接口和类型
+
+- CatalogOperation 增加 `{kind: 'clearLegacyPreferences'}`，只允许 operations 数组包含这一项，拒绝未知键、混合或重复操作；字段不存在时返回 400，提示“无需清理旧分工偏好”。空对象属于存在的字段，可清理。不要求加载可写模型 Provider，不调用网页或 LLM。
+- CatalogIntent／CatalogDiff 增加配置清理分支：kind 为 clearLegacyPreferences，稳定 id 为 clearLegacyPreferences，path 为 auto.preferences；不携带 model。既有目录分支继续要求 model，不把配置目标伪装成 Provider／Model。before 展示历史偏好完整内容，after 为 null（表示字段移除）；references／attachedSettings／conflicts／choices／blockedReasons 沿用现有结构，清理分支为空列表。实际删除与缺失状态以事务写集记录为准，不用 null 写入设置。
+- POST /api/model-manager/catalog-preview 输入为 `{operations: [{kind: 'clearLegacyPreferences'}]}`；返回 CatalogPreview，origin=manual、writesPlugin=true、counts=[]，清理项默认未选中。用户明确勾选后应用；catalog-resolve 沿用 token／selected／resolutions 协议，清理不产生可选冲突项。配置清理独立于模型目录规划，所有 model 访问和统计先按 kind 分支。
+- POST /api/model-manager/catalog-apply 使用现有 `{token, selected}`；成功继续返回 applied／backupId／backupAt／完整 snapshot。catalog-restore 使用现有 `{backupId}` 和完整 snapshot。无新增路由；原模型、别名、官方接口及旧备份兼容保持。
+
+### 写集、备份与交互
+
+- 清理只构造 dsh-model-manager 分节 `['auto', 'preferences']` 的 unset 写操作，不能写整个 auto，也不能因规范化迁移写入默认层。保存原始 user 字段值及存在状态，备份沿用 version=3／origin=manual；使用既有 token 作废、信任栅栏、串行事务、revision／指纹检查和安全回滚／恢复。预览、失败和取消不删除配置；应用与恢复保留所有其他字段、原生 Subagent 设置和凭据。
+- AUTO 页仅在已保存 snapshot 中字段存在时显示停用卡片及内容；有未保存插件草稿时阻止预览／应用／恢复，提示先保存或放弃再重新预览。独立预览不修改草稿；仅明确勾选并应用才清理。错误持久显示，旧 token 不继续应用。
+- 成功后刷新完整状态并移除停用卡片；沿用最近目录操作备份发现机制，即使字段消失、切换标签或重开页面仍能发现恢复入口。恢复显示原始历史内容，但不重新启用提示；后续设置已变化或重启导致 revision 不匹配时按既有规则保守拒绝恢复。
+
+### 验证与交付
+
+覆盖迁移幂等、字段存在／缺失／空对象／未知键、旧角色不再生成偏好、不注入提示、五标签页、旧路由和依赖移除；清理取消／应用／恢复／重复输入／混合操作／草稿保护／冲突／失败回滚；历史偏好不阻止模型与别名删除且不被官方迁移改写；原生有效引用仍需解决；子任务隔离、AUTO 不重复评估及 fork 继承。依次 typecheck、build、全量 test 和生产客户端冒烟，再在 development 专用页面及会话实测；不以模拟测试冒充真实原生链路验收。
+
+本版确认后完成开发，typecheck、build、15 文件 228 项测试及 development 页面清理／恢复通过；真实原生 Subagent 调用尚待验收，详见 V1-COVERAGE。同步当前说明、AGENTS、CHANGELOG、V1-COVERAGE 和受影响的维护 Skill；插件独立提交后同步完整版本锁，安装快照仅由脚本生成，只重启 development、不自动推送。未完成真实调用／完整巡检单列，verified=false 保留。
+
 ## 2026-10-10 临时分析时限（0.7.0）
 
 对应 SPEC F007／F009，2026-10-10 用户明确回复“确认这版，继续实现”后开发。本节替代原固定每轮 60 秒，覆盖分析时限、临时参数及相关进度契约；配置 v3 不变。

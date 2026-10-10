@@ -114,9 +114,10 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
   const fingerprint = (state: CatalogState) => canonical([state.profiles, service.snapshot().models])
   const present = (state: CatalogState, intents: CatalogIntent[], origin: CatalogPreview['origin'], choices: CatalogResolution[] = [], selected?: string[]): CatalogPreview => {
     const plan = planCatalog(state, intents, choices, selected)
-    const picked = selected ?? plan.operations.filter(o => o.kind !== 'remove' && o.kind !== 'removeAlias' && !o.blockedReasons.length).map(o => o.id)
+    const cleanup = intents.some(i => i.kind === 'clearLegacyPreferences')
+    const picked = selected ?? plan.operations.filter(o => o.kind !== 'remove' && o.kind !== 'removeAlias' && o.kind !== 'clearLegacyPreferences' && !o.blockedReasons.length).map(o => o.id)
     const simulated = planCatalog(state, intents, choices, picked)
-    return { token: randomUUID(), origin, fetchedAt: new Date().toISOString(), operations: plan.operations, selected: picked, writesPlugin: origin === 'official' || !same(state.config, simulated.after.config), counts: state.profiles.map(p => ({ providerId: p.providerId, before: p.models.length, after: simulated.after.profiles.find(q => q.providerId === p.providerId)!.models.length, operationCount: plan.operations.filter(o => o.model.providerId === p.providerId && picked.includes(o.id) && !o.blockedReasons.length).length })), revisions: revisions(), catalogFingerprint: fingerprint(state), overridesFingerprint: service.futureOverridesFingerprint() }
+    return { token: randomUUID(), origin, fetchedAt: new Date().toISOString(), operations: plan.operations, selected: picked, writesPlugin: cleanup || origin === 'official' || !same(state.config, simulated.after.config), counts: cleanup ? [] : state.profiles.map(p => ({ providerId: p.providerId, before: p.models.length, after: simulated.after.profiles.find(q => q.providerId === p.providerId)!.models.length, operationCount: plan.operations.filter(o => o.kind !== 'clearLegacyPreferences' && o.model.providerId === p.providerId && picked.includes(o.id) && !o.blockedReasons.length).length })), revisions: revisions(), catalogFingerprint: fingerprint(state), overridesFingerprint: service.futureOverridesFingerprint() }
   }
   const buildWrites = (before: OfficialState, after: OfficialState): Write[] => {
     const result: Write[] = []
@@ -142,6 +143,12 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
     return [...grouped.values()]
   }
   const catalogWrites = (before: CatalogState, after: CatalogState): Write[] => {
+    if (Object.hasOwn(before.config.auto, 'preferences') && !Object.hasOwn(after.config.auto, 'preferences')) {
+      const ns = 'dsh-model-manager', desc = ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === ns)
+      if (!desc) throw new Error('设置分节不可写：dsh-model-manager')
+      const path = ['auto', 'preferences'], value = at(desc.user, path)
+      return [{ ns, revision: desc.revision, fields: [{ path, before: structuredClone(value), had: value !== undefined, after: undefined }] }]
+    }
     const writes = buildWrites(before, after)
     for (const profile of before.profiles.filter(p => p.ns === 'llm-pi-ai')) {
       const next = after.profiles.find(p => p.providerId === profile.providerId)!

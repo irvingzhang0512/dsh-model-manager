@@ -24,6 +24,16 @@ function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: s
 }
 
 describe('受管理请求', () => {
+  it('子任务绕过 AUTO 评估与主覆盖，保留选定模型和推理强度', async () => {
+    const config = structuredClone(DEFAULT_CONFIG)
+    config.auto.enabled = true; config.auto.main.target = { providerId: 'provider-b', modelId: 'text' }
+    const { adapter, calls, service } = harness(config)
+    service.isDelegatedSession = () => true
+    service.activeSelection = () => ({ target: { providerId: 'provider-b', modelId: 'text' } }) as any
+    for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), sessionId: 'child', messages: [], reasoningEffort: 'low' } as any)) { /* drain */ }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ provider: 'provider-a', model: 'text', reasoningEffort: 'low' })
+  })
   it('新旧标识在解析、准备和直接调用中指向相同实际模型', async () => {
     const { adapter, calls } = harness()
     const legacy = Buffer.from(JSON.stringify([model.providerId, model.modelId])).toString('base64url')

@@ -1,3 +1,11 @@
+## 2026-10-10 子 Agent 入口移除与旧偏好清理（0.10.0）
+
+- 确认依据：用户审阅 SPEC F002／F003／F005／F009 和具体架构／配置文档后回复“继续”，按同版实现。配置仍 v3；旧 preferences 停用但不自动删除，保留 main／roles 与视觉兜底。
+- 自动验证：typecheck、build、15 个测试文件 228 项通过，包含生产客户端 bundle 冒烟。覆盖显式／缺失／空对象／部分 auto 分节迁移及幂等、旧角色不生成偏好、无重复路由／服务依赖／提示、配置清理无虚构模型、单字段原值与未知键备份恢复、非法／混合／重复输入、跨站、取消／未选择拒绝、revision 冲突／写失败、草稿保护／持久错误、官方范围引用保留和历史偏好不阻止删除／不被迁移。父 AUTO 决策延续到 fork 模型及原生参数、普通子任务显式模型与推理强度隔离由假宿主／适配器回归验证，不等同真实原生调用。
+- development GUI（DSH 0.1.5-rc.2、3082）：实际五个标签页且没有子 Agent 配置页；已有空 preferences 显示停用卡片。预览项默认未勾选、无模型计数，取消后 settings.yaml SHA-256 未变。明确勾选并应用成功，卡片消失，GET 确认 preferences 缺失、目录仍 4 个且备份可发现；点击“恢复最近操作”成功，字段和卡片恢复，偏好保持停用。截图在私有 .local/reports/subagent-preferences-0.10.0-restored.png。
+- 开发环境只有 browser-session 凭据记录，没有 DeepSeek 模型凭据，当前执行环境 DEEPSEEK_API_KEY 未配置。实际文字验证返回 rejected／error，不能用于证明真实原生子 Agent 成功。未导入日常凭据、未发起假称成功的原生会话；专用会话真实 subagent／fork、完整 AUTO／图片工具仍待验收，verified=false 保留。
+- 页面恢复后，停止 development 并恢复测试前原始 settings.yaml 文本，SHA-256 回到 2A57C3A71031B684EA273CC4B398B926CFFA0C23D72EBD0355C6E71B49AF5F33；重新启动 development，PID 21168。没有修改或重启日常／maintenance；测试事务备份及单次验证证据保留供核对。完整周期巡检继续待办，本次只局部同步。
+
 # 验收清单
 
 ## 2026-10-10 别名删除引用处理（0.9.0）

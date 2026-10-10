@@ -63,30 +63,3 @@ export function AutoTab({ draft, models, aliases, edit, notify }: Props) {
     <details className="dmm-guide"><summary>生效规则</summary><p>只在模型选择器选中 AUTO 时评估主任务。本轮工具调用复用同一次结果。子 Agent 使用 DSH 原生模型选择。旧配置在启用新 AUTO 前继续沿用旧主模型。</p></details>
   </>
 }
-
-type SubagentSettings = { revision?: number; value: { enabled: boolean; allowedModels: { provider: string; model: string }[] } }
-export function SubagentsTab({ draft, models, aliases, edit, notify }: Props) {
-  const [state, setState] = useState<SubagentSettings>()
-  const [busy, setBusy] = useState(false)
-  const load = async () => { try { setState(await request('/subagents')) } catch (error) { notify('error', String(error)) } }
-  useEffect(() => { void load() }, [])
-  const save = async () => {
-    if (!state) return
-    setBusy(true)
-    try { setState(await request('/subagents', { method: 'PUT', body: JSON.stringify({ ...state.value, revision: state.revision }) })); notify('success', '已保存；新会话生效。') }
-    catch (error) { notify('error', String(error)) }
-    finally { setBusy(false) }
-  }
-  return <div className="dmm-card"><strong>DSH 原生 Subagent 模型选择</strong><p className="dmm-muted">主 Agent 可以为每个子任务选择不同模型和推理档位；修改模型范围仅对新会话生效。</p>
-    {!state ? <button onClick={() => void load()}>读取当前设置</button> : <>
-      <label><input type="checkbox" checked={state.value.enabled} onChange={event => setState(current => current && { ...current, value: { ...current.value, enabled: event.target.checked } })} />允许为子 Agent 选择模型</label>
-      <div className="dmm-grid">{models.map(model => { const selected = state.value.allowedModels.some(item => item.provider === model.providerId && item.model === model.modelId)
-        return <label key={key(model)}><input type="checkbox" checked={selected} onChange={event => setState(current => current && { ...current, value: { ...current.value, allowedModels: event.target.checked ? [...current.value.allowedModels, { provider: model.providerId, model: model.modelId }] : current.value.allowedModels.filter(item => item.provider !== model.providerId || item.model !== model.modelId) } })} />{model.name} · {model.providerId}</label> })}</div>
-      <div className="dmm-row"><button className="dmm-primary" disabled={busy} onClick={() => void save()}>保存子 Agent 设置</button><button disabled={busy} onClick={() => void load()}>重新读取</button></div>
-    </>}
-    <details className="dmm-guide"><summary>分工偏好（可选）</summary><p>偏好会提示主 Agent，任务名称和数量仍由它决定。</p>
-      {Object.entries(draft.auto.preferences).map(([duty, preference]) => <div className="dmm-row" key={duty}><input value={duty} onChange={event => edit(next => { const value = next.auto.preferences[duty]; delete next.auto.preferences[duty]; if (event.target.value) next.auto.preferences[event.target.value] = value })} /><Pick value={preference.target} models={models} aliases={aliases} onChange={value => edit(next => { next.auto.preferences[duty].target = value })} /><button onClick={() => edit(next => { delete next.auto.preferences[duty] })}>移除</button></div>)}
-      <button onClick={() => edit(next => { let i = 1; while (next.auto.preferences[`任务${i}`]) i++; next.auto.preferences[`任务${i}`] = {} })}>添加偏好</button>
-    </details>
-  </div>
-}

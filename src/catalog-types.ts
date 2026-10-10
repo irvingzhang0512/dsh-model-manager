@@ -8,6 +8,7 @@ export type CatalogOperation =
   | { kind: 'rename'; model: ModelRef; name: string }
   | { kind: 'remove'; model: ModelRef }
   | { kind: 'removeAlias'; name: string }
+  | { kind: 'clearLegacyPreferences' }
 export interface CatalogProfile {
   providerId: string; ns: string; path: string[]; models: HostModel[]
   explicit: boolean; overrides?: Record<string, Record<string, unknown>>; minimumModels: number
@@ -15,20 +16,22 @@ export interface CatalogProfile {
   addConstraints?: { missing: string[]; declared: boolean; defaultContextWindow?: number; defaultMaxTokens?: number }
 }
 export interface CatalogState extends OfficialState { profiles: CatalogProfile[]; records: ModelRecord[] }
-export interface CatalogIntent {
+export interface ModelCatalogIntent {
   id: string; kind: 'add' | 'rename' | 'remove' | 'update' | 'migrate' | 'removeAlias'; model: ModelRef
   value?: HostModel; oldIds?: string[]; evidence?: OfficialEvidence[]; officialDiff?: OfficialDiff
   protectedName?: boolean
 }
+export type CatalogIntent = ModelCatalogIntent | { id: string; kind: 'clearLegacyPreferences'; path: 'auto.preferences'; model?: never; officialDiff?: never }
 export interface CatalogOption { optionId: string; label: string; value?: unknown; source?: string }
 export interface CatalogChoice { id: string; kind: 'replacement' | 'vision' | 'cleanup' | 'parameter' | 'conflict'; path: string; options: CatalogOption[]; resolution?: string }
 export interface CatalogReference { path: string; type: 'usage' | 'attached'; chain?: string[] }
-export interface CatalogDiff {
-  id: string; kind: CatalogIntent['kind']; model: ModelRef; before: unknown; after: unknown
+interface CatalogDiffFields {
+  id: string; before: unknown; after: unknown
   references: CatalogReference[]; attachedSettings: string[]; conflicts: CatalogChoice[]; choices: CatalogChoice[]
   blockedReasons: string[]; evidence?: OfficialEvidence[]
   referenceChanges?: { path: string; before: unknown; after: unknown }[]
 }
+export type CatalogDiff = CatalogDiffFields & ({ kind: ModelCatalogIntent['kind']; model: ModelRef } | { kind: 'clearLegacyPreferences'; path: 'auto.preferences'; model?: never })
 export interface CatalogResolution { id: string; optionId: string }
 export interface CatalogPreview {
   token: string; origin: 'manual' | 'official'; fetchedAt: string; operations: CatalogDiff[]; selected: string[]

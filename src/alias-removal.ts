@@ -1,6 +1,6 @@
 import { mapSelectionEffort, modelKey, validateConfig, type ModelRef, type Selection } from './domain.js'
 import { canonical } from './official-state.js'
-import type { CatalogChoice, CatalogDiff, CatalogIntent, CatalogOption, CatalogState } from './catalog-types.js'
+import type { CatalogChoice, CatalogDiff, CatalogIntent, ModelCatalogIntent, CatalogOption, CatalogState } from './catalog-types.js'
 
 type Choose = (diff: CatalogDiff, suffix: string, kind: CatalogChoice['kind'], path: string, options: CatalogOption[]) => CatalogOption | undefined
 export function clearSelectionTarget(selection: Selection): void {
@@ -8,7 +8,7 @@ export function clearSelectionTarget(selection: Selection): void {
 }
 
 /** 别名是逻辑入口；只删除明确选择的引用，绝不删除候选真实模型。 */
-export function planAliasRemoval(state: CatalogState, intent: CatalogIntent, intents: CatalogIntent[], choose: Choose): { diff: CatalogDiff; working: CatalogState } {
+export function planAliasRemoval(state: CatalogState, intent: ModelCatalogIntent, intents: CatalogIntent[], choose: Choose): { diff: CatalogDiff; working: CatalogState } {
   const name = intent.model.modelId.slice('alias:'.length), alias = `@${name}`, working = structuredClone(state)
   const diff: CatalogDiff = { id: intent.id, kind: 'removeAlias', model: intent.model, before: structuredClone(state.config.aliases[name]), after: null, references: [], attachedSettings: [], conflicts: [], choices: [], blockedReasons: [] }
   const records = working.records.filter(record => record.providerId !== 'dsh-model-manager' && record.loaded && !intents.some(i => i.kind === 'remove' && modelKey(i.model) === modelKey(record)))
@@ -29,7 +29,6 @@ export function planAliasRemoval(state: CatalogState, intent: CatalogIntent, int
     else { selection.target = structuredClone(picked.value as ModelRef); parameter(selection, selection.target, path) }
   }
   for (const grade of ['main', 'simple', 'normal', 'complex'] as const) ordinary(working.config.auto[grade], `auto.${grade}`, grade !== 'main' && working.config.auto.enabled)
-  for (const [key, selection] of Object.entries(working.config.auto.preferences)) ordinary(selection, `auto.preferences.${key}`)
   for (const [key, selection] of Object.entries(working.config.auto.roles)) if (key !== 'vision') ordinary(selection, `auto.roles.${key}`)
   for (const [session, override] of Object.entries(working.overrides)) for (const scope of ['session', 'nextTurn'] as const) if (override[scope]) ordinary(override[scope]!, `overrides.${session}.${scope}`)
 

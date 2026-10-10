@@ -1,16 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { AutoTab, SubagentsTab } from './auto-tabs.js'
+import { AutoTab } from './auto-tabs.js'
 import { DEFAULT_OFFICIAL_URL, DEFAULT_ANALYSIS_TIMEOUT_SECONDS, officialAnalysisTimeout, predictedModelCount, type OfficialPreview, type OfficialProgress } from '../official-types.js'
 import { readOfficialStream } from './official-stream.js'
 import { OfficialProgressStatus } from './official-progress.js'
-import { AliasRemovalManager, CatalogManager, CatalogPreviewPanel, catalogRequest, type CatalogEditor } from './catalog-panel.js'
+import { AliasRemovalManager, LegacyPreferencesManager, CatalogManager, CatalogPreviewPanel, catalogRequest, type CatalogEditor } from './catalog-panel.js'
 import type { CatalogCapability, CatalogResolution } from '../catalog-types.js'
 import type { AliasReliability, ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
 
 export const inject = ['slots']
 type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities?: CatalogCapability[]; catalogBackupId?: string; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
-type Tab = '模型' | '别名与兜底' | 'AUTO 自动选模型' | '子 Agent' | '视觉' | '日志'
-const tabs: Tab[] = ['模型', '别名与兜底', 'AUTO 自动选模型', '子 Agent', '视觉', '日志']
+type Tab = '模型' | '别名与兜底' | 'AUTO 自动选模型' | '视觉' | '日志'
+const tabs: Tab[] = ['模型', '别名与兜底', 'AUTO 自动选模型', '视觉', '日志']
 const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明' }
 type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
 type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[]; nativeRevision?: number }
@@ -476,9 +476,9 @@ function ManagerSection() {
     <h2>模型管理</h2>
     <details className="dmm-guide">
       <summary>这个插件是干什么的？（点开查看说明）</summary>
-      <p>查看已加载模型及能力，配置别名、AUTO 自动选模型和视觉辅助。子 Agent 模型选择使用 DSH 原生设置。</p>
+      <p>查看已加载模型及能力，配置别名、AUTO 自动选模型和视觉辅助。子 Agent 模型范围请到 DSH 官方设置配置。</p>
       <ul className="dmm-steps">
-        <li><strong>推荐顺序</strong>：核对模型 → 配置别名 → 配置 AUTO 的评估模型与三个执行档 → 按需配置子 Agent 和视觉辅助。</li>
+        <li><strong>推荐顺序</strong>：核对模型 → 配置别名 → 配置 AUTO 的评估模型与三个执行档 → 按需配置视觉辅助；子 Agent 使用 DSH 官方设置。</li>
         <li><strong>模型选择</strong>：选具体模型或 @别名直接使用；选 AUTO 才会逐轮评估任务等级。</li>
         <li><strong>看不到刚导入的模型</strong>：目录只代表宿主已加载的模型，点「刷新目录」即可，不必重启 DSH。</li>
       </ul>
@@ -593,8 +593,10 @@ function ManagerSection() {
         <p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却；本轮明确指定的参数不会被静默降级。上下文溢出只尝试内置别名 @long-context 的候选。</p>
       </div>
     </>}
-    {tab === 'AUTO 自动选模型' && <AutoTab draft={draft} models={snapshot.models} aliases={aliases} edit={edit} notify={notify} />}
-    {tab === '子 Agent' && <SubagentsTab draft={draft} models={snapshot.models} aliases={aliases} edit={edit} notify={notify} />}
+    {tab === 'AUTO 自动选模型' && <>
+      <AutoTab draft={draft} models={snapshot.models} aliases={aliases} edit={edit} notify={notify} />
+      <LegacyPreferencesManager config={snapshot.config} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
+    </>}
     {tab === '视觉' && <VisionSection draft={draft} models={snapshot.models} aliases={aliases} edit={edit} />}
     {tab === '日志' && <div className="dmm-card"><p className="dmm-muted">查看实际使用的模型、AUTO 选择和看图结果，排查调用失败。</p><button onClick={() => void request('/logs').then(result => setLogs(result.events)).catch(error => notify('error', String(error)))}>刷新日志</button>
       {logs.map((event, index) => <div className="dmm-log-row" key={index}>{event.time ? new Date(String(event.time)).toLocaleString() : '时间未知'} · <strong>{event.action === 'auto-evaluation' ? 'AUTO 评估' : String(event.action ?? '执行调用')}</strong> · {String(event.provider ?? '')}/{String(event.model ?? '')} · {String(event.status ?? '完成')} · {event.durationMs == null ? '耗时未知' : `${event.durationMs} ms`}
