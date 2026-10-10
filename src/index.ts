@@ -9,6 +9,7 @@ import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
+import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_CONFIG, LONG_CONTEXT_ALIAS, managedId, migrateConfig, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Selection, type Verification } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
@@ -20,10 +21,10 @@ import { registerOfficialSync } from './official-host.js'
 import { recommendAuto } from './recommend-auto.js'
 
 export const name = 'dsh-model-manager'
-export const inject = ['llm', 'settings', 'tools', 'attachments', 'webServer', 'systemPrompt']
-export const Config = z.any<ManagerConfig>()
+export const inject = ['llm', 'settings', 'tools', 'attachments', 'webServer', 'systemPrompt', 'credentials']
+export const Config: z<ManagerConfig> = z.any<ManagerConfig>()
 
-type Host = Context & { llm: LlmRuntime; settings: SettingsProvider; tools: ToolRuntime; attachments: AttachmentStore; webServer: WebServer; systemPrompt: SystemPrompt }
+type Host = Context & { llm: LlmRuntime; settings: SettingsProvider; tools: ToolRuntime; attachments: AttachmentStore; webServer: WebServer; systemPrompt: SystemPrompt; credentials: CredentialProvider }
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })

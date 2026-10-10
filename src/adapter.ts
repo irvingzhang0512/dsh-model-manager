@@ -154,7 +154,7 @@ export class ManagedAdapter extends LlmAdapter {
       const model = models.find(item => modelKey(item) === modelKey(candidate))
       if (!model) continue
       tried.add(modelKey(candidate))
-      const nativeImage = config.models[modelKey(candidate)]?.capability?.image ?? model.nativeImage
+      const nativeImage = model.nativeImage
       const route = allImages.length && config.vision.enabled ? visionRoute(config.vision.policy, nativeImage, !!config.vision.target) : nativeImage === 'yes' ? 'native' : allImages.length ? historicalOnly ? 'history' : 'error' : 'native'
       if (route === 'error') throw new Error('当前模型不支持图片，且视觉辅助不可用')
       const aliasEffort = typeof chosen.target === 'string' ? config.aliases[chosen.target.slice(1)]?.efforts?.[modelKey(candidate)] : undefined

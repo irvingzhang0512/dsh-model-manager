@@ -123,21 +123,19 @@ describe('v3 配置迁移', () => {
 })
 
 describe('探测建议', () => {
-  it('图片识别通过同时建议写宿主和插件声明', () => {
+  it('图片识别通过只建议写宿主原生声明', () => {
     const suggestions = probeSuggestions([evidence('image', 'accepted', 'observed')])
     expect(suggestions).toEqual([
       { field: 'hostImage', value: 'yes', confidence: 'high', reason: expect.stringContaining('正确识别') },
-      { field: 'pluginImage', value: 'yes', confidence: 'high', reason: expect.stringContaining('正确识别') },
     ])
   })
-  it('图片答错只建议插件声明为不支持，且置信度低', () => {
+  it('图片答错不生成否定能力建议', () => {
     const suggestions = probeSuggestions([evidence('image', 'accepted', 'not-observed')])
-    expect(suggestions).toHaveLength(1)
-    expect(suggestions[0]).toMatchObject({ field: 'pluginImage', value: 'no', confidence: 'low' })
+    expect(suggestions).toEqual([])
   })
-  it('图片请求被拒只建议插件声明为不支持', () => {
+  it('图片请求被拒不生成否定能力建议', () => {
     const suggestions = probeSuggestions([evidence('image', 'rejected', undefined, 'unsupported image input')])
-    expect(suggestions).toEqual([{ field: 'pluginImage', value: 'no', confidence: 'low', reason: expect.stringContaining('unsupported image input') }])
+    expect(suggestions).toEqual([])
   })
   it('网络错误和取消不产生任何建议', () => {
     expect(probeSuggestions([evidence('image', 'network-error'), evidence('tools', 'cancelled')])).toEqual([])

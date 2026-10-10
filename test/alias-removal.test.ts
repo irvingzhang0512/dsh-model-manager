@@ -17,7 +17,7 @@ const resolutions = (plan: ReturnType<typeof planCatalog>, pick: (path: string) 
 
 describe('别名删除引用处理', () => {
   it('无引用删除只删完整别名配置，不删除模型或其他别名', () => {
-    const state = fixture(); state.config.aliases.keep = { candidates: [text] }; state.config.models[modelKey(text)] = { capability: { image: 'no' } }
+    const state = fixture(); state.config.aliases.keep = { candidates: [text] }; state.config.models[modelKey(text)] = { capability: { contextWindow: 64000 } }
     const next = planCatalog(state, intents(state))
     expect(next.operations[0].blockedReasons).toEqual([]); expect(next.after.config.aliases).not.toHaveProperty('deepseek-v4-1')
     expect(next.after.config.aliases.keep).toEqual(state.config.aliases.keep); expect(next.after.profiles).toEqual(state.profiles); expect(next.after.config.models).toEqual(state.config.models)

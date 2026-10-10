@@ -6,7 +6,6 @@ export type Role = 'search' | 'coding' | 'review' | 'strong' | 'vision'
 
 export interface ModelRef { providerId: string; modelId: string }
 export interface CapabilityOverride {
-  image?: Support
   thinking?: Support
   contextWindow?: number
   maxOutputTokens?: number
@@ -39,6 +38,7 @@ export interface ManagerConfig {
   aliases: Record<string, AliasConfig>
   models: Record<string, ModelSettings>
   official?: { sourceUrl?: string; analyzer?: ModelRef; checkedAt?: string; sources?: Record<string, string> }
+  parameterCompletion?: { searchCredentialName?: string; [key: string]: unknown }
   /** main/roles 仅供旧配置迁移和已有会话读取。 */
   auto: { enabled: boolean; evaluator?: ModelRef; simple: Selection; normal: Selection; complex: Selection; preferences?: Record<string, Selection>; main: Selection; roles: Record<Role, RoleSettings> }
   vision: { enabled: boolean; policy: VisionPolicy; target?: ModelRef | string }
@@ -75,8 +75,8 @@ export interface Verification {
 /** 上下文溢出兜底使用的内置保留别名。 */
 export const LONG_CONTEXT_ALIAS = 'long-context'
 
-/** 探测可写入的配置位置：宿主声明（写 llm-pi-ai）或插件声明（写本插件配置）。 */
-export type ProbeField = 'hostImage' | 'pluginImage'
+/** 探测建议只写宿主原生声明。 */
+export type ProbeField = 'hostImage'
 
 export interface ProbeSuggestion {
   field: ProbeField
@@ -97,11 +97,6 @@ export function probeSuggestions(verifications: Verification[]): ProbeSuggestion
     if (item.status === 'accepted' && item.behavior === 'observed') {
       const reason = '图片探测通过：模型正确识别了探测图的颜色'
       suggestions.push({ field: 'hostImage', value: 'yes', confidence: 'high', reason })
-      suggestions.push({ field: 'pluginImage', value: 'yes', confidence: 'high', reason })
-    } else if (item.status === 'accepted' && item.behavior === 'not-observed') {
-      suggestions.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片探测未通过：${item.detail ?? '模型未识别出探测图颜色'}` })
-    } else if (item.status === 'rejected') {
-      suggestions.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片请求被拒绝：${item.detail ?? '宿主或模型拒绝了图片参数'}` })
     }
   }
   return suggestions
@@ -142,8 +137,9 @@ export function fromManagedId(id: string): ModelRef {
     } else {
       // 旧会话保留原标识；只解码，不改写宿主选择或历史记录。
       if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error()
-      const bytes = Buffer.from(id, 'base64url')
-      if (bytes.toString('base64url') !== id) throw new Error()
+      const binary = atob(id.replace(/-/g, '+').replace(/_/g, '/'))
+      if (btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') !== id) throw new Error()
+      const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
       raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
     }
     if (!Array.isArray(raw) || raw.length !== 2 || raw.some(v => typeof v !== 'string' || !v)) throw new Error()
@@ -261,6 +257,8 @@ function migrateSelectionTiers(selection: Selection | undefined): Selection {
 }
 
 function migrateModelTiers(settings: ModelSettings | undefined): ModelSettings {
+  settings = structuredClone(settings ?? {})
+  if (settings.capability && typeof settings.capability === 'object') delete (settings.capability as Record<string, unknown>).image
   if (!settings?.tiers) return settings ?? {}
   const tiers: Partial<Record<'low' | 'high' | 'max', string>> = {}
   const legacyTiers = { ...settings.legacyTiers }
@@ -299,6 +297,7 @@ export function migrateConfig(input: unknown): ManagerConfig {
   for (const role of Object.keys(roles) as Role[]) if (legacyRoles[role]) roles[role] = migrateSelectionTiers(structuredClone(legacyRoles[role])) as RoleSettings
   return {
     version: 3, aliases, models, official: raw.official,
+    ...((input as ManagerConfig)?.parameterCompletion !== undefined ? { parameterCompletion: structuredClone((input as ManagerConfig).parameterCompletion) } : {}),
     ...((input as ManagerConfig)?.catalogMetadata ? { catalogMetadata: structuredClone((input as ManagerConfig).catalogMetadata) } : {}),
     auto: { enabled: current?.enabled ?? false, evaluator: current?.evaluator,
       simple: migrateSelectionTiers(current?.simple), normal: migrateSelectionTiers(current?.normal ?? legacyMain), complex: migrateSelectionTiers(current?.complex ?? legacyMain),
@@ -314,6 +313,9 @@ function isValidRef(ref: unknown): ref is ModelRef {
 
 export function validateConfig(config: ManagerConfig): void {
   if (config.version !== 3) throw new Error('不支持的配置版本')
+  if (config.parameterCompletion !== undefined && (!config.parameterCompletion || typeof config.parameterCompletion !== 'object' || Array.isArray(config.parameterCompletion))) throw new Error('搜索凭据配置无效')
+  if (config.parameterCompletion?.searchCredentialName !== undefined && (typeof config.parameterCompletion.searchCredentialName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.parameterCompletion.searchCredentialName))) throw new Error('搜索凭据引用名无效')
+  for (const settings of Object.values(config.models)) if (settings?.capability && Object.hasOwn(settings.capability, 'image')) throw new Error('插件图片声明已停用，不能创建或修改')
   if (config.catalogMetadata !== undefined) {
     if (!config.catalogMetadata || typeof config.catalogMetadata !== 'object' || Array.isArray(config.catalogMetadata)) throw new Error('模型来源元数据无效')
     for (const value of Object.values(config.catalogMetadata)) if (!value || typeof value !== 'object' || Array.isArray(value) || value.origin !== undefined && !['manual', 'official'].includes(value.origin) || value.customName !== undefined && typeof value.customName !== 'boolean') throw new Error('模型来源元数据无效')

@@ -7,7 +7,7 @@ import { DEFAULT_ANALYSIS_TIMEOUT_SECONDS, officialAnalysisTimeout } from './off
 const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
 
 // 适配器未响应 abort 时，也不能让预览一直等待 next() 或清理 return()。
-async function* abortableStream<T>(source: AsyncIterable<T>, signal: AbortSignal): AsyncGenerator<T> {
+export async function* abortableStream<T>(source: AsyncIterable<T>, signal: AbortSignal): AsyncGenerator<T> {
   signal.throwIfAborted()
   const iterator = source[Symbol.asyncIterator]()
   let abort!: () => void, exhausted = false

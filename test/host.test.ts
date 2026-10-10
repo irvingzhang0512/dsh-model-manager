@@ -117,7 +117,7 @@ describe('宿主装配', () => {
     expect(toolNames).toContain('model_manager_inspect_image')
     expect(prompts).toContain('dsh-model-manager')
     expect(routes.map(route => route.path)).toEqual([
-      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/catalog-preview', '/api/model-manager/catalog-resolve', '/api/model-manager/catalog-apply', '/api/model-manager/catalog-restore', '/api/model-manager/official-preview', '/api/model-manager/official-apply', '/api/model-manager/official-restore', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/recommend', '/api/model-manager/overrides',
+      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/catalog-preview', '/api/model-manager/catalog-resolve', '/api/model-manager/catalog-apply', '/api/model-manager/catalog-restore', '/api/model-manager/parameter-search-credential', '/api/model-manager/model-parameter-preview', '/api/model-manager/official-preview', '/api/model-manager/official-apply', '/api/model-manager/official-restore', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/recommend', '/api/model-manager/overrides',
     ])
     expect(new Set(routes.map(route => route.path)).size).toBe(routes.length)
     for (const dispose of disposers.reverse()) dispose()
@@ -164,7 +164,7 @@ describe('宿主装配', () => {
     expect(result.status).toBe(200)
     expect(asked).toEqual(['image'])
     expect(payload.verifications[0]).toMatchObject({ kind: 'image', status: 'accepted', behavior: 'observed' })
-    expect(payload.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high', 'pluginImage:yes:high'])
+    expect(payload.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high'])
     // 探测后的最新 revision 必须回传：调用方随后写宿主声明时用它，才不会带过期 token。
     expect(payload.nativeRevision).toBe(23)
   })
@@ -223,7 +223,7 @@ describe('宿主装配', () => {
     expect(result.elevated).toBe(true)
     expect(result.restoreFailed).toBe(false)
     expect(result.notes).toEqual([])
-    expect(result.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high', 'pluginImage:yes:high'])
+    expect(result.suggestions.map(item => `${item.field}:${item.value}:${item.confidence}`)).toEqual(['hostImage:yes:high'])
   })
   it('探测恢复宿主声明时写回原值而不是固定值', async () => {
     const model = { providerId: 'p', modelId: 'm', name: 'm' }

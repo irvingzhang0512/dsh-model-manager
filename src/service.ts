@@ -8,6 +8,7 @@ import { DEFAULT_CONFIG, mergeSelection, migrateConfig, modelKey, resolveSelecti
 import type { AutoDecision } from './auto-router.js'
 import { canonical, type FutureOverrides } from './official-state.js'
 import type { CatalogCapability } from './catalog-types.js'
+import { legacyImageOverrides, preserveLegacyImages, preserveUnknownConfig } from './legacy-image.js'
 
 /**
  * 宿主设置服务拒绝过期 revision 时抛出的冲突错误（`SettingsConflictError`，`code` 固定为 `SETTINGS_CONFLICT`）。
@@ -202,6 +203,7 @@ export class ModelManagerService {
   private initialization?: Promise<void>
   private catalogBackupId?: string
   private catalogBackupWritesPlugin?: boolean
+  private parameterBackupId?: string
   constructor(private readonly bridge: ModelBridge, private readonly dataDir: string, private readonly settings?: SettingsProvider) {}
 
   init(): Promise<void> { return this.initialization ??= this.initialize() }
@@ -221,7 +223,11 @@ export class ModelManagerService {
     if (savedOverrides) for (const [session, value] of Object.entries(savedOverrides)) this.overrides.set(session, value)
     const savedCache = await readJsonWithBackup<Record<string, { answer: string; at: number }>>(join(this.dataDir, 'vision-cache.json'))
     if (savedCache) for (const [key, value] of Object.entries(savedCache)) if (value.at > Date.now() - 7 * 86400000) this.visionCache.set(key, value)
-    const latest = await readJsonWithBackup<{ manual?: string }>(join(this.dataDir, 'catalog-backups', 'latest.json'))
+    const latest = await readJsonWithBackup<{ manual?: string; parameter?: string }>(join(this.dataDir, 'catalog-backups', 'latest.json'))
+    if (latest?.parameter && /^[0-9a-f-]{36}$/.test(latest.parameter)) {
+      const backup = await readJsonWithBackup<{ status: string }>(join(this.dataDir, 'catalog-backups', `${latest.parameter}.json`))
+      if (backup?.status === 'applied') this.parameterBackupId = latest.parameter
+    }
     if (latest?.manual && /^[0-9a-f-]{36}$/.test(latest.manual)) {
       const backup = await readJsonWithBackup<{ status: string; writes: { ns: string }[] }>(join(this.dataDir, 'catalog-backups', `${latest.manual}.json`))
       if (backup?.status === 'applied') { this.catalogBackupId = latest.manual; this.catalogBackupWritesPlugin = backup.writes.some(w => w.ns === 'dsh-model-manager') }
@@ -229,12 +235,15 @@ export class ModelManagerService {
   }
 
   onCatalogBackup(id: string, origin: string, status: string, writesPlugin: boolean): void {
+    if (origin === 'parameter' && status === 'applied') this.parameterBackupId = id
+    if (id === this.parameterBackupId && status === 'restored') this.parameterBackupId = undefined
     if (origin === 'manual' && status === 'applied') { this.catalogBackupId = id; this.catalogBackupWritesPlugin = writesPlugin }
     else if (id === this.catalogBackupId && status === 'restored') { this.catalogBackupId = undefined; this.catalogBackupWritesPlugin = undefined }
   }
-  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities: CatalogCapability[]; catalogBackupId?: string; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
+  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; legacyImageOverrideCount: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
     return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models), hostDefault: this.hostDefault(),
       catalogCapabilities: this.bridge.catalogCapabilities?.() ?? [], catalogBackupId: this.catalogBackupId, catalogBackupWritesPlugin: this.catalogBackupWritesPlugin,
+      parameterBackupId: this.parameterBackupId, legacyImageOverrideCount: legacyImageOverrides(this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.user).length,
       verifications: [...this.verification.values()].map(value => ({ ...structuredClone(value), stale: value.signature !== this.signature(value.model, value.kind) })) }
   }
 
@@ -254,7 +263,10 @@ export class ModelManagerService {
     validateConfig(next)
     if (revision !== this.revision) throw new Error('SETTINGS_CONFLICT')
     if (this.settings) {
-      await this.settings.replace('dsh-model-manager', next, revision)
+      const raw = this.settings.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.user
+      const stored = preserveUnknownConfig(this.config, next, raw)
+      preserveLegacyImages(stored, raw)
+      await this.settings.replace('dsh-model-manager', stored, revision)
       this.revision = this.settings.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.revision ?? revision + 1
     } else this.revision++
     this.config = structuredClone(next)

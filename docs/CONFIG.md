@@ -1,8 +1,8 @@
 # 配置说明（v3）
 
-## 智能补全模型参数（文档版 model-parameters-20261010-v2，待确认／待实现）
+## 智能补全模型参数（文档版 model-parameters-20261010-v2，已实现 0.11.0）
 
-对应 SPEC F011／F001／F006／F009 和架构同版契约，基线 0.10.0，规划功能版本 0.11.0；本版具体文档尚待明确确认，以下入口尚未实现。配置版本仍为 v3。
+对应 SPEC F011／F001／F006／F009 和架构同版契约，基线 0.10.0，功能版本 0.11.0；用户回复“好，按照设计文档修改并开发吧”确认本版，已按以下契约实现。配置版本仍为 v3。
 
 新增可选 `parameterCompletion?: {searchCredentialName?: string}`，只保存搜索凭据引用名。字段缺失时有效使用 `WEB_SEARCH_API_KEY`，不在启动／迁移／普通保存时补写 section 或默认名；显式值必须匹配 `^[A-Za-z_][A-Za-z0-9_]*$`，空字符串／null／非字符串拒绝。页面“搜索凭据引用”独立保存到宿主同名分节，通过 revision/CAS 仅 set 该叶字段；“使用默认”仅 unset 该叶字段，若原 section 无其他键则 unset 整个空 section，未知 section 键保留。已有插件草稿仍保留，草稿与该已保存字段基线同步，后续全局保存不能覆盖刚更新引用。
 
@@ -18,9 +18,9 @@ Key 由 DSH Credentials resolve 获取，浏览器只显示引用名与是否可
 
 备份仍在 profile 隔离数据目录 catalog-backups，每次 parameter 操作独立 UUID、完整原值与存在状态、选中字段、分析证据和写后版本；最近 parameter 指针独立于 manual／official。恢复按既有完整写集和版本校验，拒绝覆盖后续编辑及跨重启 revision 不匹配；历史格式不补造新的参数写集。保存／分析参数不污染真实验证证据，真实请求与页面验证结果单独记录。
 
-## 插件图片声明退役（model-parameters-20261010-v2，待确认／待实现）
+## 插件图片声明退役（model-parameters-20261010-v2，已实现 0.11.0）
 
-对应 SPEC F012 及架构同版章节，用户要求移除图片卡片中的“插件图片声明”；本版具体文档尚待明确确认。原生图片 input／inputModalities、上下文 contextWindow、模型最大输出 maxTokens、推理档位及 wire 映射 reasoningEfforts 都进入搜索补全，当前值不是已核实证据；查到不同值可选校正，未证实值保留原值。maxTokens 的请求默认影响与默认不选规则保持。
+对应 SPEC F012 及架构同版章节，用户要求移除图片卡片中的“插件图片声明”；用户已明确确认本版，已实现于 0.11.0。原生图片 input／inputModalities、上下文 contextWindow、模型最大输出 maxTokens、推理档位及 wire 映射 reasoningEfforts 都进入搜索补全，当前值不是已核实证据；查到不同值可选校正，未证实值保留原值。maxTokens 的请求默认影响与默认不选规则保持。
 
 退役路径只有 `models[modelKey].capability.image`；任何旧值都不影响 AUTO、图片路由或视觉候选资格。不移除整个 capability、models、tiers／legacyTiers，不修改 vision 开关／策略／目标；thinking／contextWindow／maxOutputTokens 及未知能力属性仍按已有契约保留。模型原生声明是唯一原生图片能力来源，辅助功能仍是独立组合能力。
 

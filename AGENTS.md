@@ -17,6 +17,7 @@
 - DSH 原生 Subagent 决定任务拆分、模型选择、后台运行与结果回收。插件不注册固定角色委派工具；`subagent_fork` 继承父模型。模型范围统一在 DSH 官方设置配置，插件不注册 /subagents 路由或依赖 subagents 服务；目录事务仍检查并处理原生范围引用。旧 auto.preferences 只读停用，不生成或注入提示；clearLegacyPreferences 独立操作仅 unset 该字段，备份恢复保留原始值及存在状态，不删除 main／roles 或视觉兜底。
 - 不恢复 `fast/balanced/deep` 新配置入口。用户新选择只写模型实际公开的 `reasoningEffort`；旧值仅用于迁移。v1/v2 升 v3 必须保留模型、别名、视觉、手动覆盖、旧主模型及逐候选档位，并保持迁移幂等。新 AUTO 未启用时不能增加评估调用。
 - 官方同步按已确认 F007／F009 契约：从可配置 HTTPS 入口读取，实际链接和重定向限制入口 hostname；独立 LLM 根据原文证据识别动态清单，最多六页三轮，网页指令只作资料。完整性不足或冲突不提供可应用预览。仅迁移官方 Provider 的完整引用与模型键；应用检查 revision 和未来覆盖，备份完整写集，安全回滚／恢复，保留凭据、输出上限和未知字段。第三方同名模型不迁移。
+- 智能补全按已确认 F011／F012：model-parameters／parameter-analysis／parameter-catalog 独立搜索与字段校验，parameter-panel 提供选择，复用 catalog 事务；新增协议或字段前核对宿主公开契约。模型图片能力只用 nativeImage，旧 capability.image 只留原始层供独立清理／恢复，普通保存保留未知嵌套键。模型最大输出默认不选，建议与真实调用证据分开。
 - 验证调用的证据与能力声明分开。网络错误或不确定结果不得自动写能力；图片临时提权必须恢复原声明。
 - 生命周期按 F010：API ID 与显示名称分离，手动目录只操作宿主公开可写 Provider。普通引用允许用户明确跨 Provider 替换，图片引用单独检查原生图片声明；官方自动目标仍限官方 Provider。图片辅助的存在不阻止删除无关模型，附属设置可明确清理。预览、冲突选择、应用与恢复共用完整写集及版本检查，不能清空无关插件草稿或把 effective 默认层写成用户层；跨重启 revision 不匹配时保守拒绝恢复。
 - 代码修改后依次运行 `npm run typecheck`、`npm run build`、`npm test`，然后做客户端冒烟。安装到 web profile 并重启 DSH 后使用专用会话检查 AUTO、视觉和原生 Subagent；完成验证后再更新兼容性记录与安装快照。

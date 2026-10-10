@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ManagedAdapter, VisionRegistry } from '../src/adapter.ts'
-import { DEFAULT_CONFIG, managedId, type ModelRecord } from '../src/domain.ts'
+import { DEFAULT_CONFIG, managedId, modelKey, type ModelRecord } from '../src/domain.ts'
 
 const model: ModelRecord = { providerId: 'provider-a', modelId: 'text', name: 'Text', nativeImage: 'no', reasoningEfforts: [{ id: 'low', name: 'Low' }], source: 'host', loaded: true }
 const fallbackModel: ModelRecord = { ...model, providerId: 'provider-b' }
@@ -24,6 +24,14 @@ function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: s
 }
 
 describe('受管理请求', () => {
+  it.each(['yes', 'no', 'unknown', false, { invalid: true }])('旧图片声明 %j 不覆盖宿主原生图片', async legacy => {
+    const config = structuredClone(DEFAULT_CONFIG), native = { ...model, nativeImage: 'yes' as const }
+    config.models[modelKey(native)] = { capability: { image: legacy } } as any
+    const { adapter, calls } = harness(config, undefined, [native])
+    const image = { type: 'image', attachment: { attachmentId: 'legacy-test', mediaType: 'image/png', bytes: 1 } }
+    for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(native), messages: [{ id: 'm', role: 'user', source: { kind: 'user' }, content: [image] }] } as any)) { /* drain */ }
+    expect(calls[0].messages[0].content[0].type).toBe('image')
+  })
   it('子任务绕过 AUTO 评估与主覆盖，保留选定模型和推理强度', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
     config.auto.enabled = true; config.auto.main.target = { providerId: 'provider-b', modelId: 'text' }

@@ -3,6 +3,7 @@ import { canonical, officialReferences, type HostModel } from './official-state.
 import { OFFICIAL_PROVIDER, type OfficialAnalysis, type OfficialDiff } from './official-types.js'
 import type { CatalogChoice, CatalogDiff, CatalogIntent, ModelCatalogIntent, CatalogOperation, CatalogProfile, CatalogReference, CatalogResolution, CatalogState } from './catalog-types.js'
 import { planAliasRemoval } from './alias-removal.js'
+import { validateParameterModel, object } from './model-parameters.js'
 
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b)
 const isRef = (value: unknown): value is ModelRef => !!value && typeof (value as ModelRef).providerId === 'string' && typeof (value as ModelRef).modelId === 'string'
@@ -11,6 +12,11 @@ export function manualIntents(input: unknown, state: CatalogState): CatalogInten
   if (!Array.isArray(input) || !input.length || input.length > 100) throw new Error('请输入 1–100 项目录操作')
   const seen = new Set<string>()
   return input.map((item: CatalogOperation) => {
+    if (item?.kind === 'clearLegacyImageOverrides') {
+      if (input.length !== 1 || Object.keys(item).some(key => key !== 'kind')) throw new Error('旧图片声明清理须单独提交')
+      if (!state.legacyImages?.length) throw new Error('无需清理旧图片声明')
+      return { id: 'clearLegacyImageOverrides', kind: item.kind, path: 'models.*.capability.image' }
+    }
     if (item?.kind === 'clearLegacyPreferences') {
       if (input.length !== 1 || Object.keys(item).some(key => key !== 'kind')) throw new Error('旧分工偏好清理须单独提交且不能包含其他字段')
       if (!Object.hasOwn(state.config.auto, 'preferences')) throw new Error('无需清理旧分工偏好')
@@ -165,6 +171,12 @@ export function planCatalog(before: CatalogState, intents: CatalogIntent[], reso
     }
   }
   for (const intent of intents) {
+    if (intent.kind === 'clearLegacyImageOverrides') {
+      if (intents.length !== 1) throw new Error('旧图片声明清理须单独提交')
+      operations.push({ id: intent.id, kind: intent.kind, path: intent.path, before: structuredClone(state.legacyImages), after: null, references: [], attachedSettings: [], conflicts: [], choices: [], blockedReasons: [] })
+      if (!selected || selected.includes(intent.id)) state.legacyImages = []
+      continue
+    }
     if (intent.kind === 'clearLegacyPreferences') {
       if (intents.length !== 1) throw new Error('旧分工偏好清理须单独提交')
       const diff: CatalogDiff = { id: intent.id, kind: intent.kind, path: intent.path, before: structuredClone(state.config.auto.preferences), after: null, references: [], attachedSettings: [], conflicts: [], choices: [], blockedReasons: [] }
@@ -202,8 +214,55 @@ export function planCatalog(before: CatalogState, intents: CatalogIntent[], reso
       else {
         const target = p.models.find(m => m.id === intent.model.modelId)!
         if (intent.officialDiff) officialFields(target, intent, diff, new Set(p.userFields?.[target.id] ?? Object.keys(target)))
-        else Object.assign(target, intent.value)
-        if (intent.kind === 'rename' || intent.value?.name !== undefined && same(target.name, intent.value.name)) { working.config.catalogMetadata ??= {}; working.config.catalogMetadata[key] = { ...working.config.catalogMetadata[key], customName: intent.kind === 'rename' } }
+        else {
+          const compat = intent.parameter && object(intent.value?.compat) ? { ...(object(target.compat) ? target.compat : {}), ...intent.value.compat } : undefined
+          Object.assign(target, intent.value)
+          if (compat) target.compat = compat
+        }
+        if (intent.kind === 'rename' || intent.value?.name !== undefined && same(target.name, intent.value.name)) { working.config.catalogMetadata ??= {}; working.config.catalogMetadata[key] = { ...working.config.catalogMetadata[key], customName: intent.kind === 'rename' || intent.parameterNameBasis === 'knowledge' } }
+        if (intent.parameter) {
+          const record = working.records.find(r => modelKey(r) === key)!
+          const defaults: Record<string, unknown> = working.parameterModels?.[key] ?? {}
+          const effective = { ...defaults, ...target, contextWindow: target.contextWindow ?? record.contextWindow, maxTokens: target.maxTokens ?? record.defaultMaxTokens, compat: { ...(object(p.effective?.compat) ? p.effective.compat : {}), ...(object(defaults.compat) ? defaults.compat : {}), ...(object(target.compat) ? target.compat : {}) } }
+          try { validateParameterModel(effective, p.ns, working.parameterApis?.[key] ?? String(p.effective?.api ?? 'unknown')) } catch (error) { diff.blockedReasons.push((error as Error).message) }
+          const input = target[p.ns === 'llm-deepseek' ? 'inputModalities' : 'input']
+          if (Array.isArray(input)) record.nativeImage = input.includes('image') ? 'yes' : 'no'
+          if (intent.value?.reasoningEfforts !== undefined) record.reasoningEfforts = object(target.reasoningEfforts) ? Object.keys(target.reasoningEfforts).map(id => ({ id, name: id })) : []
+          if (typeof target.contextWindow === 'number') record.contextWindow = target.contextWindow
+          if (typeof target.maxTokens === 'number') record.defaultMaxTokens = target.maxTokens
+          const settings = working.config.models[key]
+          for (const [host, plugin] of [['contextWindow', 'contextWindow'], ['maxTokens', 'maxOutputTokens']] as const) if (intent.value?.[host] !== undefined && settings?.capability?.[plugin] !== undefined && !same(settings.capability[plugin], target[host])) {
+            const picked = choice(diff, `override:${plugin}`, 'conflict', `models.${key}.capability.${plugin}`, [{ optionId: 'clear', label: '移除冲突的插件覆盖，采用宿主值' }])
+            if (!picked) diff.blockedReasons.push(`请处理宿主字段与插件覆盖冲突：${plugin}`)
+            else delete settings.capability[plugin]
+          }
+          for (const visual of visualSelections(working)) if (visualRefs(working, visual.value).some(ref => modelKey(ref) === key) && record.nativeImage !== 'yes') {
+            const targets = working.records.filter(r => modelKey(r) !== key && r.nativeImage === 'yes')
+            const picked = choice(diff, `vision:${visual.path}`, 'vision', visual.path, [{ optionId: 'disable', label: '关闭视觉辅助并清除该目标', value: 'disable' }, ...targets.map(r => ({ optionId: modelKey(r), label: `${r.name} · ${r.providerId}`, value: { providerId: r.providerId, modelId: r.modelId } }))])
+            if (!picked) diff.blockedReasons.push(`图片目标失去原生图片声明：${visual.path}`)
+            else if (picked.value === 'disable') { working.config.vision.enabled = false; visual.clear() } else visual.replace(picked.value as ModelRef)
+          }
+          if (intent.value?.reasoningEfforts !== undefined) {
+            const options = [{ optionId: 'default', label: '使用模型默认，清除旧推理选择' }, ...record.reasoningEfforts.map(e => ({ optionId: e.id, label: e.name, value: e.id }))]
+            for (const [name, alias] of Object.entries(working.config.aliases)) if (alias.candidates.some(r => modelKey(r) === key) && alias.efforts?.[key] && !record.reasoningEfforts.some(e => e.id === alias.efforts![key])) {
+              const picked = choice(diff, `alias-parameter:${name}`, 'parameter', `aliases.${name}.efforts.${key}`, options)
+              if (!picked) diff.blockedReasons.push(`别名 ${name} 的推理档位不兼容`)
+              else if (picked.value === undefined) delete alias.efforts[key]; else alias.efforts[key] = picked.value as string
+            }
+            for (const field of ['tiers', 'legacyTiers'] as const) for (const [tier, effort] of Object.entries(settings?.[field] ?? {})) if (effort !== 'auto' && !record.reasoningEfforts.some(e => e.id === effort)) {
+              const picked = choice(diff, `mapping:${field}:${tier}`, 'parameter', `models.${key}.${field}.${tier}`, options)
+              if (!picked) diff.blockedReasons.push(`旧档位映射不兼容：${field}.${tier}`)
+              else if (picked.value === undefined) delete (settings![field] as Record<string, string>)[tier]; else (settings![field] as Record<string, string>)[tier] = picked.value as string
+            }
+            for (const { value, path } of selections(working)) if (visualRefs(working, value.target).some(ref => modelKey(ref) === key)) {
+              try { mapSelectionEffort(record, settings, value) } catch {
+                const picked = choice(diff, `parameter:${path}`, 'parameter', `${path}.推理档位`, options)
+                if (!picked) diff.blockedReasons.push(`已有推理选择不兼容：${path}`)
+                else { delete value.reasoningEffort; delete value.tier; delete value.thinking; if (picked.value !== undefined) value.reasoningEffort = picked.value as string }
+              }
+            }
+          }
+        }
       }
     } else {
       const oldRefs = (intent.kind === 'migrate' ? intent.oldIds ?? [] : [intent.model.modelId]).map(modelId => ({ providerId: intent.model.providerId, modelId }))

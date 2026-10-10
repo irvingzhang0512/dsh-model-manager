@@ -62,6 +62,7 @@ async function fixture(explicit = true, pi = false, absentUser = false, legacy =
   const ctx = { settings, llm: runtime, tools: { register: () => () => {} }, attachments: {}, systemPrompt: { section: (s: any) => { prompts.push(s.text); return () => {} } }, webServer: { register: (route: any) => { if (routes.has(route.path)) throw Error('duplicate route'); routes.set(route.path, route.handler); return () => {} } }, on: (name: string, fn: Function) => { hooks.set(name, fn); return () => {} }, effect: (fn: Function) => { const dispose = fn(); if (typeof dispose === 'function') disposed.push(dispose) }, logger: { error: () => {} } }
   apply(ctx as never)
   await new Promise(resolve => setTimeout(resolve, 15))
+  await managedAdapter.service.init()
   const prepare = (path: string, value: unknown, headers: Record<string, string> = {}, method = 'POST') => {
     const result = { status: 0, body: '', writableEnded: false, destroyed: false, headersSent: false }
     const res = Object.assign(new EventEmitter(), result, { writeHead(status: number) { this.status = status; this.headersSent = true }, setHeader() {}, write(chunk: string) { this.body += chunk; return true }, end(chunk = '') { this.body += chunk; this.writableEnded = true } })
@@ -335,7 +336,7 @@ describe('官方同步宿主完整写集', () => {
     expect(f.raw['llm-deepseek']).toMatchObject({ apiKeyEnv: 'PRIVATE_KEY' }); expect(f.raw['llm-deepseek'].models[0]).toMatchObject({ maxTokens: 99, custom: 'keep' })
     expect(f.raw['agent-default-model']).toMatchObject({ model: 'fast', other: 'keep' }); expect(f.raw['subagent-model-selection'].allowedModels[0].model).toBe('fast')
     expect((await f.call('overrides', {}, {}, 'GET')).status).toBe(400) // 需要 sessionId，不误读其他会话。
-    expect(result.json.snapshot.config.models[modelKey({ providerId: 'deepseek-official', modelId: 'fast' })]).toEqual({ capability: { image: 'yes' } })
+    expect(result.json.snapshot.config.models[modelKey({ providerId: 'deepseek-official', modelId: 'fast' })]).toEqual({ capability: {} })
     expect(managedId(result.json.snapshot.config.aliases.main.candidates[0])).toBe('deepseek-official/fast')
     const fresh = await f.call('official-preview', { sourceUrl: source, analyzer: { providerId: 'reader', modelId: 'reader' } })
     expect(fresh.json.diffs).toEqual([])
@@ -346,7 +347,8 @@ describe('官方同步宿主完整写集', () => {
     expect(Object.hasOwn(f.raw['llm-deepseek'], 'models')).toBe(explicit)
     expect(f.raw['agent-default-model'].model).toBe('old-fast'); expect(f.raw['subagent-model-selection'].allowedModels[0].model).toBe('old-fast')
     expect(managedId(restored.json.snapshot.config.aliases.main.candidates[0])).toBe('deepseek-official/old-fast')
-    expect(restored.json.snapshot.config.models[modelKey({ providerId: 'deepseek-official', modelId: 'old-fast' })]).toEqual({ capability: { image: 'yes' } })
+    expect(restored.json.snapshot.config.models[modelKey({ providerId: 'deepseek-official', modelId: 'old-fast' })]).toEqual({ capability: {} })
+    expect(f.raw['dsh-model-manager'].models[modelKey({ providerId: 'deepseek-official', modelId: 'old-fast' })]).toEqual({ capability: { image: 'yes' } })
     expect((await f.call('official-restore')).status).toBe(409)
   })
   it('settings revision 与未来覆盖变化拒绝应用；编造证据不写配置', async () => {

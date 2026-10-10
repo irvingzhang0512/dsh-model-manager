@@ -137,7 +137,7 @@ describe('宿主桥接与版本控制', () => {
       await service.saveVerification({ model, kind: 'image', status: 'rejected', checkedAt: '2026-01-01', signature: service.signature(model), requestCount: 1 })
       expect(service.snapshot().verifications[0].stale).toBe(false)
       const updated = structuredClone(DEFAULT_CONFIG)
-      updated.models['["p","m"]'] = { capability: { image: 'yes' } }
+      updated.models['["p","m"]'] = { capability: { contextWindow: 64000 } }
       await service.update(updated, 0)
       expect(service.snapshot().verifications[0].stale).toBe(true)
     } finally { await rm(dir, { recursive: true, force: true }) }

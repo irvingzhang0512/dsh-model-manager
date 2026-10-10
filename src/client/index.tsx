@@ -6,12 +6,14 @@ import { OfficialProgressStatus } from './official-progress.js'
 import { AliasRemovalManager, LegacyPreferencesManager, CatalogManager, CatalogPreviewPanel, catalogRequest, type CatalogEditor } from './catalog-panel.js'
 import type { CatalogCapability, CatalogResolution } from '../catalog-types.js'
 import type { AliasReliability, ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
+import { probeSuggestions } from '../domain.js'
+import { ParameterPanel } from './parameter-panel.js'
 
 export const inject = ['slots']
-type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities?: CatalogCapability[]; catalogBackupId?: string; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
+type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities?: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; legacyImageOverrideCount?: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
 type Tab = '模型' | '别名与兜底' | 'AUTO 自动选模型' | '视觉' | '日志'
 const tabs: Tab[] = ['模型', '别名与兜底', 'AUTO 自动选模型', '视觉', '日志']
-const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明', pluginImage: '插件图片声明' }
+const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明' }
 type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
 type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[]; nativeRevision?: number }
 /** 探测/验证结果弹出框：有建议时渲染勾选列表，无建议/失败/批量总结时渲染证据与说明。 */
@@ -25,7 +27,7 @@ type ProbeDialog = {
   notes?: string[]
   verifications?: Verification[]
   failure?: string
-  applied?: { hostApplied: number; pluginCount: number; skipped: number }
+  applied?: { hostApplied: number; skipped: number }
 }
 type Support = 'yes' | 'no' | 'unknown'
 const supportLabels: Record<Support, string> = { yes: '支持', no: '不支持', unknown: '未知' }
@@ -38,39 +40,39 @@ function asSnapshot(value: any): Snapshot {
 }
 
 const style = `
-.dmm-root{padding:20px;max-width:1100px;color:var(--dsw-alias-text-primary,#222)}
-.dmm-root h2{margin:0 0 6px;font-size:20px}.dmm-muted{color:var(--dsw-alias-text-secondary,#666);font-size:12px}
+.dmm-root{padding:20px;max-width:1100px;color:var(--dsw-alias-label-primary,#222)}
+.dmm-root h2{margin:0 0 6px;font-size:20px}.dmm-muted{color:var(--dsw-alias-label-secondary,#666);font-size:12px}
 .dmm-tabs{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0}.dmm-tabs button,.dmm-root button,.dmm-composer{font:inherit}
-.dmm-tabs button,.dmm-root button{border:1px solid var(--dsw-alias-border-primary,#ccc);border-radius:7px;background:var(--dsw-alias-fill-surface,#fff);color:inherit;padding:6px 10px;cursor:pointer}
-.dmm-tabs button[aria-selected=true],.dmm-root button.dmm-primary{background:var(--dsw-alias-brand-primary,#356dde);color:#fff;border-color:transparent}
+.dmm-tabs button,.dmm-root button{border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:7px;background:var(--dsw-alias-bg-layer-2,#fff);color:inherit;padding:6px 10px;cursor:pointer}
+.dmm-tabs button[aria-selected=true],.dmm-root button.dmm-primary{background:var(--dsw-alias-brand-primary,#356dde);color:var(--dsw-alias-label-primary-foreground,#fff);border-color:transparent}
 .dmm-root button:disabled{cursor:not-allowed;opacity:.5}
-.dmm-card{border:1px solid var(--dsw-alias-border-primary,#ddd);border-radius:10px;padding:14px;margin:10px 0;background:var(--dsw-alias-fill-surface,#fff)}
-.dmm-group{border:1px solid var(--dsw-alias-border-primary,#ddd);border-radius:10px;margin:10px 0;background:var(--dsw-alias-fill-surface,#fff)}
+.dmm-card{border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:10px;padding:14px;margin:10px 0;background:var(--dsw-alias-bg-layer-2,#fff)}
+.dmm-group{border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:10px;margin:10px 0;background:var(--dsw-alias-bg-layer-2,#fff)}
 .dmm-group-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:10px 14px;cursor:pointer;user-select:none}
-.dmm-group-body{border-top:1px solid var(--dsw-alias-border-primary,#eee);padding:4px 14px 10px}
-.dmm-badge{font-size:12px;border-radius:6px;padding:2px 7px;background:var(--dsw-alias-fill-canvas,#f0f2f5)}
+.dmm-group-body{border-top:1px solid var(--dsw-alias-border-l2,#eee);padding:4px 14px 10px}
+.dmm-badge{font-size:12px;border-radius:6px;padding:2px 7px;background:var(--dsw-alias-bg-layer-1,#f0f2f5)}
 .dmm-badge-warn{color:#b42318;background:rgba(180,35,24,.08)}
 .dmm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.dmm-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:8px 0}
-.dmm-root input:not([type=checkbox]),.dmm-root select,.dmm-root textarea{font:inherit;background:var(--dsw-alias-fill-canvas,#fff);color:inherit;border:1px solid var(--dsw-alias-border-primary,#bbb);border-radius:6px;padding:6px;min-width:110px}
+.dmm-root input:not([type=checkbox]),.dmm-root select,.dmm-root textarea{font:inherit;background:var(--dsw-alias-bg-layer-1,#fff);color:inherit;border:1px solid var(--dsw-alias-border-l2,#bbb);border-radius:6px;padding:6px;min-width:110px}
 .dmm-root input[type=checkbox]{width:16px;height:16px;margin:0 6px 0 0;vertical-align:middle;accent-color:var(--dsw-alias-brand-primary,#356dde)}
-.dmm-switch-row{display:flex;align-items:center;justify-content:space-between;gap:14px}.dmm-switch-row strong{display:block}.dmm-switch-row input{flex:none}.dmm-log-row{border-bottom:1px solid var(--dsw-alias-border-primary,#ddd);padding:8px 0}.dmm-log-row:last-child{border-bottom:0}
+.dmm-switch-row{display:flex;align-items:center;justify-content:space-between;gap:14px}.dmm-switch-row strong{display:block}.dmm-switch-row input{flex:none}.dmm-log-row{border-bottom:1px solid var(--dsw-alias-border-l2,#ddd);padding:8px 0}.dmm-log-row:last-child{border-bottom:0}
 .dmm-root textarea{width:100%;min-height:100px}.dmm-root label{font-size:13px}.dmm-error{color:#b42318}.dmm-composer{border:0;background:transparent;color:inherit;cursor:pointer;font-size:12px}
 .dmm-dirty{color:#b54708;font-size:12px}
 .dmm-empty{border-style:dashed;text-align:center}
 .dmm-modal-mask{position:fixed;inset:0;z-index:9998;background:rgba(15,23,42,.4);display:flex;align-items:center;justify-content:center;padding:20px}
-.dmm-modal{background:var(--dsw-alias-fill-surface,#fff);color:var(--dsw-alias-text-primary,#222);border:1px solid var(--dsw-alias-border-primary,#ccc);border-radius:12px;padding:16px;width:min(620px,94vw);max-height:82vh;overflow:auto;box-shadow:0 16px 48px rgba(0,0,0,.28)}
+.dmm-modal{background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#222);border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:12px;padding:16px;width:min(620px,94vw);max-height:82vh;overflow:auto;box-shadow:0 16px 48px rgba(0,0,0,.28)}
 .dmm-modal h3{margin:0 0 6px;font-size:16px}
 .dmm-note{color:#b54708;font-size:12px;margin:6px 0}
-.dmm-actions{position:sticky;bottom:0;z-index:6;display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:16px;padding:10px 12px;border:1px solid var(--dsw-alias-border-primary,#ddd);border-radius:10px;background:var(--dsw-alias-fill-surface,#fff);box-shadow:0 -6px 16px rgba(0,0,0,.07)}
+.dmm-actions{position:sticky;bottom:0;z-index:6;display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:16px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:10px;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:0 -6px 16px rgba(0,0,0,.07)}
 .dmm-toasts{position:fixed;right:18px;bottom:18px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:min(380px,90vw)}
-.dmm-toast{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:9px;font-size:13px;line-height:1.45;background:var(--dsw-alias-fill-surface,#fff);border:1px solid var(--dsw-alias-border-primary,#ccc);box-shadow:0 8px 24px rgba(0,0,0,.18);color:var(--dsw-alias-text-primary,#222)}
+.dmm-toast{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:9px;font-size:13px;line-height:1.45;background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-l2,#ccc);box-shadow:0 8px 24px rgba(0,0,0,.18);color:var(--dsw-alias-label-primary,#222)}
 .dmm-toast-success{border-color:#2f855a}.dmm-toast-error{border-color:#b42318}.dmm-toast-info{border-color:var(--dsw-alias-brand-primary,#356dde)}
 .dmm-root .dmm-toast button{border:0;background:transparent;color:inherit;cursor:pointer;font-size:15px;line-height:1;padding:0 2px}
 .dmm-steps{margin:6px 0;padding-left:20px;list-style:disc}.dmm-steps li{margin:5px 0;font-size:13px;line-height:1.65}
-.dmm-hint{border-left:3px solid var(--dsw-alias-brand-primary,#356dde);background:var(--dsw-alias-fill-canvas,#f6f7f9);border-radius:0 8px 8px 0;padding:8px 12px;margin:8px 0;font-size:12px;color:var(--dsw-alias-text-secondary,#555);line-height:1.7}
+.dmm-hint{border-left:3px solid var(--dsw-alias-brand-primary,#356dde);background:var(--dsw-alias-bg-layer-1,#f6f7f9);border-radius:0 8px 8px 0;padding:8px 12px;margin:8px 0;font-size:12px;color:var(--dsw-alias-label-secondary,#555);line-height:1.7}
 .dmm-composer summary{cursor:pointer;user-select:none}
 .dmm-popcard{padding:10px 12px;box-shadow:0 10px 28px rgba(0,0,0,.14)}
-.dmm-guide{background:var(--dsw-alias-fill-canvas,#f7f8fa);border:1px solid var(--dsw-alias-border-primary,#e3e6eb);border-radius:10px;padding:12px 14px;margin:10px 0}
+.dmm-guide{background:var(--dsw-alias-bg-layer-1,#f7f8fa);border:1px solid var(--dsw-alias-border-l2,#e3e6eb);border-radius:10px;padding:12px 14px;margin:10px 0}
 .dmm-guide>strong{display:block;font-size:14px;margin-bottom:6px}
 .dmm-guide p{margin:6px 0;font-size:13px;line-height:1.7}
 .dmm-guide .dmm-steps{margin:6px 0 2px}
@@ -364,21 +366,7 @@ function ManagerSection() {
       setPreview({ title: `验证建议：${model?.name ?? ref.modelId}`, model, suggestions, checked: suggestions.map(item => item.confidence === 'high'), verifications: [result.verification] })
     } else notify('success', `验证完成：${kind} ${result.verification.status}${result.verification.behavior ? ` / ${result.verification.behavior}` : ''}。`)
   }
-  const imageSuggestions = (verifications: Verification[]): ProbeSuggestion[] => {
-    const result: ProbeSuggestion[] = []
-    for (const item of verifications) {
-      if (item.kind !== 'image') continue
-      if (item.status === 'accepted' && item.behavior === 'observed') {
-        result.push({ field: 'hostImage', value: 'yes', confidence: 'high', reason: '图片验证通过：模型正确识别了探测图的颜色' })
-        result.push({ field: 'pluginImage', value: 'yes', confidence: 'high', reason: '图片验证通过：模型正确识别了探测图的颜色' })
-      } else if (item.status === 'accepted' && item.behavior === 'not-observed') {
-        result.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片验证未通过：${item.detail ?? '模型未识别出探测图颜色'}` })
-      } else if (item.status === 'rejected') {
-        result.push({ field: 'pluginImage', value: 'no', confidence: 'low', reason: `图片请求被拒绝：${item.detail ?? '宿主或模型拒绝了图片参数'}` })
-      }
-    }
-    return result
-  }
+  const imageSuggestions = probeSuggestions
   const refreshOfficial = async () => {
     setCatalogEditor(null); setOfficialError('')
     officialAbort.current?.abort()
@@ -433,7 +421,6 @@ function ManagerSection() {
     if (!chosen.length) { notify('info', '没有勾选任何结论。'); return }
     setBusy(true)
     let hostApplied = 0, skipped = 0
-    const pluginChosen = chosen.filter(item => item.field !== 'hostImage')
     try {
       if (chosen.some(item => item.field === 'hostImage')) {
         if (preview.model.nativeEditable && snapshot.nativeRevision !== undefined) {
@@ -442,15 +429,7 @@ function ManagerSection() {
           hostApplied++
         } else skipped++
       }
-      if (pluginChosen.length) edit(next => {
-        const key = JSON.stringify([preview.model!.providerId, preview.model!.modelId])
-        next.models[key] ??= {}
-        next.models[key].capability ??= {}
-        for (const item of pluginChosen) {
-          if (item.field === 'pluginImage') next.models[key].capability!.image = item.value
-        }
-      })
-      setPreview({ ...preview, title: '已应用结论', suggestions: [], checked: [], applied: { hostApplied, pluginCount: pluginChosen.length, skipped } })
+      setPreview({ ...preview, title: '已应用结论', suggestions: [], checked: [], applied: { hostApplied, skipped } })
     } catch (error) { setPreview(current => current && { ...current, failure: String(error) }) }
     finally { setBusy(false) }
   }
@@ -463,8 +442,7 @@ function ManagerSection() {
   const resetFilter = () => { setModelFilter(''); setProviderFilter('') }
   const filtering = !!(keyword || providerFilter)
   const currentSupport = (model: ModelRecord, field: ProbeField): Support => {
-    if (field === 'hostImage') return model.nativeImage
-    return draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'
+    return model.nativeImage
   }
   /** 按 Provider 分组；组默认全部收起（点组头展开）；筛选生效时只显示匹配的组并全部展开。 */
   const attention = (group: ModelRecord[]) => group.some(model => snapshot.verifications.some(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId && (item.stale || item.status === 'rejected' || item.status === 'network-error')))
@@ -518,6 +496,7 @@ function ManagerSection() {
       <CatalogManager backupWritesPlugin={snapshot.catalogBackupWritesPlugin} backupId={snapshot.catalogBackupId} externalBusy={busy} models={snapshot.models} capabilities={snapshot.catalogCapabilities ?? []} editor={catalogEditor} setEditor={editor => { setCatalogEditor(editor); setOfficial(null); setOfficialChecked([]); document.getElementById('dmm-catalog-editor')?.scrollIntoView({ block: 'nearest' }) }} dirty={dirty} notify={notify} onApplied={value => {
         const next = asSnapshot(value); setSnapshot(next); if (!dirty) setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config'))
       }} />
+      <ParameterPanel models={snapshot.models} config={snapshot.config} revision={snapshot.revision} defaultModel={snapshot.hostDefault} backupId={snapshot.parameterBackupId} manualBackupId={snapshot.catalogBackupId} legacyCount={snapshot.legacyImageOverrideCount ?? 0} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); if (!dirty) setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} onCredentialSaved={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(current => current && { ...current, parameterCompletion: structuredClone(next.config.parameterCompletion) }); setOfficial(null); setOfficialChecked([]) }} />
       <details className="dmm-guide">
         <summary>这一页是干什么的？（点开查看说明）</summary>
         <p>按 Provider 分组列出宿主已加载的模型，核对并修正能力声明、实测验证。组默认全部收起，点组头展开：</p>
@@ -560,7 +539,6 @@ function ManagerSection() {
                 <button disabled={busy} onClick={() => { setBusy(true); void verifyOne({ providerId: model.providerId, modelId: model.modelId }, 'image').catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证图片</button>
                 <button disabled={busy} onClick={() => { setBusy(true); void verifyOne({ providerId: model.providerId, modelId: model.modelId }, 'tools').catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证工具</button>
               </div>
-              <div className="dmm-row"><label>插件图片声明 <select value={draft.models[JSON.stringify([model.providerId, model.modelId])]?.capability?.image ?? 'unknown'} onChange={event => edit(next => { const key = JSON.stringify([model.providerId, model.modelId]); next.models[key] ??= {}; next.models[key].capability ??= {}; next.models[key].capability!.image = event.target.value as 'yes' | 'no' | 'unknown' })}><option value="unknown">未知</option><option value="yes">支持</option><option value="no">不支持</option></select></label></div>
             </div>)}
           </div>}
         </div>
@@ -615,7 +593,7 @@ function ManagerSection() {
       <div className="dmm-modal" role="dialog" aria-modal="true" aria-label={preview.title} onClick={event => event.stopPropagation()}>
         <h3>{preview.title}</h3>
         {preview.failure && <p className="dmm-error">{preview.failure}</p>}
-        {preview.applied && <p className="dmm-note">已应用：宿主声明 {preview.applied.hostApplied} 项、插件声明 {preview.applied.pluginCount} 项{preview.applied.skipped ? `，${preview.applied.skipped} 项因宿主不可写被跳过` : ''}。{preview.applied.pluginCount ? '插件声明需再点页面底部「保存设置」落盘。' : ''}</p>}
+        {preview.applied && <p className="dmm-note">已应用：宿主声明 {preview.applied.hostApplied} 项{preview.applied.skipped ? `，${preview.applied.skipped} 项因宿主不可写被跳过` : ''}。</p>}
         {!preview.failure && !preview.applied && preview.suggestions.length > 0 && <p className="dmm-muted">以下是真实请求得出的结论，高置信项已默认勾选。勾选后点「应用选中项」：「宿主原生图片声明」立即写入宿主，「插件声明」需再点页面底部「保存设置」。</p>}
         {!preview.failure && !preview.applied && preview.suggestions.length === 0 && (preview.verifications?.length || 0) > 0 && <p className="dmm-muted">本次请求没有产生可直接写入的结论，以下是原始验证证据：</p>}
         {preview.elevated && <p className="dmm-note">该模型宿主声明为「不支持」，宿主会把图片替换成文字占位，因此探测期间已临时把声明提为「支持」实测，测完已恢复原声明——此处的「支持」结论来自图片真实到达模型的实测。</p>}

@@ -6,19 +6,24 @@ import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { SettingsProvider, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { Context } from '@deepseek-ai/cordis'
+import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { analyzeOfficial, officialUrl } from './official-sync.js'
 import { DEFAULT_OFFICIAL_URL, OFFICIAL_PROVIDER, officialAnalysisTimeout, type OfficialPreview, type OfficialProgress } from './official-types.js'
 import { canonical, type FutureOverrides, type HostModel, type OfficialState } from './official-state.js'
 import { manualIntents, officialIntents, planCatalog } from './catalog-state.js'
 import type { CatalogIntent, CatalogPreview, CatalogResolution, CatalogState } from './catalog-types.js'
-import { migrateConfig, validateConfig, type ManagerConfig, type ModelRef } from './domain.js'
+import { migrateConfig, validateConfig, fromManagedId, type ManagerConfig, type ModelRef } from './domain.js'
 import { isSettingsConflict, ModelManagerService, resolveDataDir } from './service.js'
+import { legacyImageOverrides, cleanLegacyImages } from './legacy-image.js'
+import { readParameterCatalog } from './parameter-catalog.js'
+import { describeParameterTargets, defaultParameterFields, parameterIntents, setField, type ParameterAnalysis, type ModelParameterPreview } from './model-parameters.js'
+import { analyzeModelParameters, createParameterSearch, platformOfficialHosts } from './parameter-analysis.js'
 
-interface Host { llm: LlmRuntime; settings: SettingsProvider; webServer: WebServer; effect: Context['effect'] }
+interface Host { llm: LlmRuntime; settings: SettingsProvider; credentials?: CredentialProvider; webServer: WebServer; effect: Context['effect'] }
 type Field = { path: string[]; before: unknown; had: boolean; after: unknown }
 type Write = { ns: string; revision: number; fields: Field[]; appliedRevision?: number; reverted?: boolean }
 interface Backup {
-  version: 2 | 3; backupId?: string; origin?: 'manual' | 'official'; selected?: string[]; resolutions?: CatalogResolution[]; token: string; sourceUrl?: string; analyzer?: ModelRef; reasoningEffort?: string; analysisTimeoutSeconds?: number; pages?: OfficialPreview['pages']; at: string
+  version: 2 | 3; backupId?: string; origin?: CatalogPreview['origin']; selected?: string[]; selectedFields?: string[]; parameterAnalysis?: ParameterAnalysis; resolutions?: CatalogResolution[]; token: string; sourceUrl?: string; analyzer?: ModelRef; reasoningEffort?: string; analysisTimeoutSeconds?: number; pages?: OfficialPreview['pages']; at: string
   status: 'prepared' | 'applying' | 'applied' | 'rolled-back' | 'recovery-required' | 'restored'
   writes: Write[]; overrides?: { before: FutureOverrides; after: FutureOverrides; appliedFingerprint?: string; reverted?: boolean }
 }
@@ -51,7 +56,7 @@ function preserveRaw(before: unknown, after: unknown, raw: unknown): unknown {
 
 export function registerOfficialSync(ctx: Host, service: ModelManagerService): void {
   let preview: OfficialPreview | undefined, generation = 0, analysisAbort: AbortController | undefined
-  let catalog: { view: CatalogPreview; state: CatalogState; intents: CatalogIntent[]; resolutions: CatalogResolution[] } | undefined
+  let catalog: { view: CatalogPreview | ModelParameterPreview; state: CatalogState; intents: CatalogIntent[]; resolutions: CatalogResolution[]; parameterAnalysis?: ParameterAnalysis; selectedFields?: string[] } | undefined
   let writesQueue = Promise.resolve()
   const file = join(resolveDataDir(), 'official-sync-backup.json')
   const backupDir = join(resolveDataDir(), 'catalog-backups')
@@ -101,23 +106,25 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       const ns = entry?.settingsNs ?? 'llm-deepseek', path = [...entry?.settingsPath ?? []]
       const effective = at(get(ns), path) as Record<string, unknown> | undefined
       const user = at(raw(ns), path) as Record<string, unknown> | undefined
+      const baseProfile = at(descriptors.find(d => d.ns === ns)?.base, path) as Record<string, unknown> | undefined
       const explicit = Array.isArray(effective?.models) && (ns === 'llm-deepseek' || !!effective.models.length)
       const list = explicit ? effective!.models as HostModel[] : (await ctx.llm.listModels(capability.providerId)).map(model => ({ id: model.id }))
       const original = Array.isArray(user?.models) ? user.models as HostModel[] : []
       const overrides = (user?.modelOverrides ?? effective?.modelOverrides) as Record<string, Record<string, unknown>> | undefined
       const models = list.map(model => ({ ...structuredClone(model), ...(!explicit ? structuredClone(overrides?.[model.id] ?? {}) : {}), ...structuredClone(original.find(m => m.id === model.id) ?? {}) }))
       const addConstraints = ns === 'llm-pi-ai' ? { missing: [...(entry?.declared && !effective?.api ? ['api（Provider 协议）'] : []), ...(entry?.declared && !effective?.baseURL ? ['baseURL（Provider 端点）'] : []), ...(entry?.error ? [entry.error] : [])], declared: entry?.declared ?? false, defaultContextWindow: effective?.defaultContextWindow as number | undefined, defaultMaxTokens: effective?.defaultMaxTokens as number | undefined } : undefined
-      profiles.push({ providerId: capability.providerId, ns, path, models, explicit, overrides, addConstraints, userFields: Object.fromEntries(models.map(model => [model.id, Object.keys(original.find(m => m.id === model.id) ?? overrides?.[model.id] ?? {})])), minimumModels: capability.minimumModels })
+      const modelSettings = (value?: Record<string, unknown>) => structuredClone(Object.fromEntries(Object.entries(value ?? {}).filter(([k]) => ['models', 'modelOverrides', 'defaultContextWindow', 'defaultMaxTokens', 'defaultInput', 'compat'].includes(k))))
+      profiles.push({ providerId: capability.providerId, ns, path, models, explicit, overrides, addConstraints, effective: { ...modelSettings(effective), ...(effective?.api ? { api: effective.api } : {}) }, user: modelSettings(user), base: modelSettings(baseProfile), userFields: Object.fromEntries(models.map(model => [model.id, Object.keys(original.find(m => m.id === model.id) ?? overrides?.[model.id] ?? {})])), minimumModels: capability.minimumModels })
     }
-    return { ...base, profiles, records: service.snapshot().models, models: profiles.find(p => p.providerId === OFFICIAL_PROVIDER)?.models ?? base.models }
+    return { ...base, profiles, records: service.snapshot().models, legacyImages: legacyImageOverrides(raw('dsh-model-manager')), models: profiles.find(p => p.providerId === OFFICIAL_PROVIDER)?.models ?? base.models }
   }
   const fingerprint = (state: CatalogState) => canonical([state.profiles, service.snapshot().models])
   const present = (state: CatalogState, intents: CatalogIntent[], origin: CatalogPreview['origin'], choices: CatalogResolution[] = [], selected?: string[]): CatalogPreview => {
     const plan = planCatalog(state, intents, choices, selected)
-    const cleanup = intents.some(i => i.kind === 'clearLegacyPreferences')
-    const picked = selected ?? plan.operations.filter(o => o.kind !== 'remove' && o.kind !== 'removeAlias' && o.kind !== 'clearLegacyPreferences' && !o.blockedReasons.length).map(o => o.id)
+    const cleanup = intents.some(i => i.kind === 'clearLegacyPreferences' || i.kind === 'clearLegacyImageOverrides')
+    const picked = selected ?? plan.operations.filter(o => o.kind !== 'remove' && o.kind !== 'removeAlias' && o.model && !o.blockedReasons.length).map(o => o.id)
     const simulated = planCatalog(state, intents, choices, picked)
-    return { token: randomUUID(), origin, fetchedAt: new Date().toISOString(), operations: plan.operations, selected: picked, writesPlugin: cleanup || origin === 'official' || !same(state.config, simulated.after.config), counts: cleanup ? [] : state.profiles.map(p => ({ providerId: p.providerId, before: p.models.length, after: simulated.after.profiles.find(q => q.providerId === p.providerId)!.models.length, operationCount: plan.operations.filter(o => o.kind !== 'clearLegacyPreferences' && o.model.providerId === p.providerId && picked.includes(o.id) && !o.blockedReasons.length).length })), revisions: revisions(), catalogFingerprint: fingerprint(state), overridesFingerprint: service.futureOverridesFingerprint() }
+    return { token: randomUUID(), origin, fetchedAt: new Date().toISOString(), operations: plan.operations, selected: picked, writesPlugin: cleanup || origin === 'official' || !same(state.config, simulated.after.config), counts: cleanup ? [] : state.profiles.map(p => ({ providerId: p.providerId, before: p.models.length, after: simulated.after.profiles.find(q => q.providerId === p.providerId)!.models.length, operationCount: plan.operations.filter(o => o.model?.providerId === p.providerId && picked.includes(o.id) && !o.blockedReasons.length).length })), revisions: revisions(), catalogFingerprint: fingerprint(state), overridesFingerprint: service.futureOverridesFingerprint() }
   }
   const buildWrites = (before: OfficialState, after: OfficialState): Write[] => {
     const result: Write[] = []
@@ -143,6 +150,11 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
     return [...grouped.values()]
   }
   const catalogWrites = (before: CatalogState, after: CatalogState): Write[] => {
+    if (before.legacyImages?.length && !after.legacyImages?.length) {
+      const desc = ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')!
+      const path = ['models'], value = at(desc.user, path)
+      return [{ ns: desc.ns, revision: desc.revision, fields: [{ path, before: structuredClone(value), had: value !== undefined, after: cleanLegacyImages(desc.user) }] }]
+    }
     if (Object.hasOwn(before.config.auto, 'preferences') && !Object.hasOwn(after.config.auto, 'preferences')) {
       const ns = 'dsh-model-manager', desc = ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === ns)
       if (!desc) throw new Error('设置分节不可写：dsh-model-manager')
@@ -160,9 +172,13 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       const onlyNames = profile.models.length === next.models.length && profile.models.every((m, i) => {
         const { name: _a, ...a } = m, { name: _b, ...b } = next.models[i]; return same(a, b)
       })
-      if (!profile.explicit && onlyNames) {
+      const sameIds = profile.models.length === next.models.length && profile.models.every((m, i) => m.id === next.models[i].id)
+      if (!profile.explicit && (onlyNames || sameIds)) {
         const overrides = structuredClone(profile.overrides ?? {})
-        for (const model of next.models) if (!same(model.name, profile.models.find(m => m.id === model.id)?.name)) overrides[model.id] = { ...overrides[model.id], name: model.name }
+        for (const model of next.models) {
+          const prior = profile.models.find(m => m.id === model.id)!
+          for (const [key, value] of Object.entries(model)) if (key !== 'id' && !same(value, prior[key])) overrides[model.id] = { ...overrides[model.id], [key]: key === 'compat' ? { ...(overrides[model.id]?.compat as object ?? {}), ...(value as object) } : value }
+        }
         field([...profile.path, 'modelOverrides'], overrides)
       } else {
         field([...profile.path, 'models'], next.models)
@@ -254,8 +270,19 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       if (!current || input.token !== current.view.token || !Array.isArray(input.selected) || !Array.isArray(input.resolutions) || input.resolutions.some(r => !r || typeof r.id !== 'string' || typeof r.optionId !== 'string')) throw new Error('预览或处理选项无效')
       await ensureCurrent(current)
       const resolutions = input.resolutions as CatalogResolution[]
-      const view = present(current.state, current.intents, current.view.origin, resolutions, input.selected as string[])
-      catalog = { ...current, view, resolutions }; updateOfficial(); json(res, 200, preview?.catalog?.token === view.token ? preview : view)
+      if (input.selectedFields !== undefined && (!current.parameterAnalysis || !Array.isArray(input.selectedFields))) throw new Error('本预览不支持逐字段选择')
+      const selectedFields = (input.selectedFields ?? current.selectedFields) as string[] | undefined
+      const intents = current.parameterAnalysis ? parameterIntents(current.state, current.parameterAnalysis, selectedFields!) : current.intents
+      const ids = new Set(intents.map(i => i.id))
+      if (new Set(input.selected).size !== input.selected.length || input.selected.some(id => typeof id !== 'string' || !(current.parameterAnalysis ? current.parameterAnalysis.results.some(r => JSON.stringify([r.model.providerId, r.model.modelId]) === id) : ids.has(id)))) throw new Error('选中操作无效或重复')
+      const selected = current.parameterAnalysis && input.selectedFields !== undefined ? intents.map(i => i.id) : (input.selected as string[]).filter(id => ids.has(id))
+      if (!current.parameterAnalysis && (input.selected as string[]).some(id => !ids.has(id))) throw new Error('选中操作无效')
+      const validChoices = current.parameterAnalysis ? new Set(planCatalog(current.state, intents).operations.flatMap(o => o.choices.map(c => c.id))) : undefined
+      if (validChoices && (new Set(resolutions.map(r => r.id)).size !== resolutions.length || resolutions.some(r => !validChoices.has(r.id) && !current.view.operations.some(o => o.choices.some(c => c.id === r.id && c.options.some(option => option.optionId === r.optionId)))))) throw new Error('处理选项无效或重复')
+      const choices = validChoices ? resolutions.filter(r => validChoices.has(r.id)) : resolutions
+      const baseView = present(current.state, intents, current.view.origin, choices, selected)
+      const view = current.parameterAnalysis ? { ...baseView, parameterAnalysis: current.parameterAnalysis, selectedFields: selectedFields! } : baseView
+      catalog = { ...current, view, intents, resolutions: choices, selectedFields }; updateOfficial(); json(res, 200, preview?.catalog?.token === view.token ? preview : view)
     })
   })
   const applyCatalog = async (input: Record<string, unknown>, res: ServerResponse) => enqueue(async () => {
@@ -269,7 +296,8 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       if (blocked.length) throw new Error(blocked.join('；'))
       const after = simulated.after
       if (current.view.origin === 'official') after.config.official = { ...after.config.official, checkedAt: preview!.fetchedAt }
-      const backup: Backup = { version: 3, backupId: randomUUID(), origin: current.view.origin, selected: selected as string[], resolutions: current.resolutions, token: current.view.token, at: new Date().toISOString(), status: 'prepared', writes: catalogWrites(current.state, after), ...(!same(current.state.overrides, after.overrides) ? { overrides: { before: current.state.overrides, after: after.overrides } } : {}), ...(preview && current.view.origin === 'official' ? { sourceUrl: preview.sourceUrl, analyzer: preview.analyzer, reasoningEffort: preview.reasoningEffort, analysisTimeoutSeconds: preview.analysisTimeoutSeconds, pages: preview.pages } : {}) }
+      const backup: Backup = { version: 3, backupId: randomUUID(), origin: current.view.origin, selected: selected as string[], resolutions: current.resolutions, token: current.view.token, at: new Date().toISOString(), status: 'prepared', writes: catalogWrites(current.state, after), ...(current.parameterAnalysis ? { parameterAnalysis: current.parameterAnalysis, selectedFields: current.selectedFields } : {}), ...(!same(current.state.overrides, after.overrides) ? { overrides: { before: current.state.overrides, after: after.overrides } } : {}), ...(preview && current.view.origin === 'official' ? { sourceUrl: preview.sourceUrl, analyzer: preview.analyzer, reasoningEffort: preview.reasoningEffort, analysisTimeoutSeconds: preview.analysisTimeoutSeconds, pages: preview.pages } : {}) }
+      if (!backup.writes.length && !backup.overrides) throw new Error('没有选中有效修改')
       catalog = undefined; preview = undefined
       await transaction(backup, saveOverrides, false)
       json(res, 200, { applied: selected.length, backupId: backup.backupId, backupAt: backup.at, snapshot: fullSnapshot() })
@@ -290,6 +318,80 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
     json(res, 200, { restored: true, snapshot: fullSnapshot() })
   }
   register('catalog-restore', async (req, res) => { const input = await body(req); await enqueue(async () => restoreBackup(await readBackup(input.backupId), res)) })
+
+  register('parameter-search-credential', async (req, res) => {
+    const input = await body(req)
+    if (input.name !== undefined && (typeof input.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(input.name))) throw new Error('搜索凭据引用名无效')
+    await enqueue(async () => {
+      const ns = 'dsh-model-manager', desc = ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === ns)!
+      if (input.revision !== desc.revision) throw new Error('SETTINGS_CONFLICT')
+      const raw = at(desc.user, ['parameterCompletion']) as Record<string, unknown> | undefined
+      const name = input.name === 'WEB_SEARCH_API_KEY' ? undefined : input.name
+      const ops: SettingsPathOp[] = name === undefined ? raw && Object.keys(raw).every(k => k === 'searchCredentialName') ? [{ op: 'unset', path: ['parameterCompletion'] }] : [{ op: 'unset', path: ['parameterCompletion', 'searchCredentialName'] }] : [{ op: 'set', path: ['parameterCompletion', 'searchCredentialName'], value: name }]
+      await ctx.settings.mutate(ns, ops, desc.revision)
+      service.onSettingsChanged(ctx.settings.get(ns) as ManagerConfig)
+      generation++; analysisAbort?.abort(); preview = undefined; catalog = undefined
+      json(res, 200, { snapshot: fullSnapshot() })
+    })
+  })
+  register('model-parameter-preview', async (req, res) => {
+    const currentGeneration = ++generation
+    analysisAbort?.abort(); const abort = new AbortController(); analysisAbort = abort; preview = undefined; catalog = undefined
+    let streaming = false, timer: ReturnType<typeof setInterval> | undefined
+    const close = () => { if (!res.writableEnded) abort.abort() }; res.on?.('close', close)
+    const emit = (event: string, data: unknown) => { if (!res.destroyed && !res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`) }
+    try {
+      const input = await body(req), analysisTimeoutSeconds = officialAnalysisTimeout(input.analysisTimeoutSeconds)
+      if (!Array.isArray(input.models) || !input.models.length || input.models.length > 100 || input.models.some(m => !m || typeof m.providerId !== 'string' || typeof m.modelId !== 'string' || m.providerId === 'dsh-model-manager')) throw new Error('请选择 1–100 个已加载真实模型')
+      await service.refresh(); await service.flush()
+      const before = revisions(), overrides = service.futureOverridesFingerprint(), state = await readCatalogState(), startingFingerprint = fingerprint(state)
+      const targets = describeParameterTargets(state, await readParameterCatalog(state))
+      const selectedTargets = [...new Map((input.models as ModelRef[]).map(ref => [JSON.stringify([ref.providerId, ref.modelId]), targets.find(t => t.model.providerId === ref.providerId && t.model.modelId === ref.modelId)])).values()]
+      if (selectedTargets.some(t => !t)) throw new Error('存在未加载的目标模型')
+      state.parameterApis = Object.fromEntries(targets.map(t => [JSON.stringify([t.model.providerId, t.model.modelId]), t.api]))
+      state.parameterModels = Object.fromEntries(targets.map(t => {
+        const model: HostModel = { id: t.model.modelId }
+        for (const descriptor of t.fields.filter(d => d.writable)) {
+          const value = t.currentValues[descriptor.field.join('.')]
+          if (value !== undefined) setField(model, descriptor.field, value)
+        }
+        return [JSON.stringify([t.model.providerId, t.model.modelId]), model]
+      }))
+      let analyzer = input.analyzer === null || input.analyzer === undefined ? service.hostDefault() : input.analyzer as ModelRef
+      if ((input.analyzer === null || input.analyzer === undefined) && analyzer?.providerId === 'dsh-model-manager') {
+        try { analyzer = fromManagedId(analyzer.modelId) } catch { throw new Error('宿主默认分析模型须指向真实模型，不能使用 AUTO 或别名') }
+      }
+      if (!analyzer || typeof analyzer.providerId !== 'string' || typeof analyzer.modelId !== 'string' || analyzer.providerId === 'dsh-model-manager' || !service.model(analyzer)?.loaded) throw new Error('请选择已加载真实分析模型，或设置宿主默认模型')
+      if (input.reasoningEffort !== undefined && (typeof input.reasoningEffort !== 'string' || !input.reasoningEffort)) throw new Error('分析推理档位无效')
+      if (!same(before, revisions()) || overrides !== service.futureOverridesFingerprint()) throw new Error('SETTINGS_CONFLICT')
+      const credentialName = state.config.parameterCompletion?.searchCredentialName ?? 'WEB_SEARCH_API_KEY'
+      const officialHosts = new Map(targets.map(target => {
+        const profile = state.profiles.find(p => p.providerId === target.model.providerId)
+        let hostname: string | undefined
+        try { const url = new URL(String(at(get(profile!.ns), [...profile!.path, 'baseURL']))); if (url.protocol === 'https:') hostname = url.hostname } catch {}
+        return [JSON.stringify([target.model.providerId, target.model.modelId]), platformOfficialHosts(target.model.providerId, hostname)]
+      }))
+      const search = createParameterSearch(async () => {
+        if (!ctx.credentials) throw new Error('搜索凭据服务不可用')
+        const resolved = await ctx.credentials.resolve(credentialRef(credentialName))
+        if (!resolved?.value) throw new Error('搜索凭据未配置')
+        return resolved.value
+      }, target => officialHosts.get(JSON.stringify([target.model.providerId, target.model.modelId])) ?? [])
+      streaming = req.headers.accept?.includes('text/event-stream') ?? false
+      if (streaming) { res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive' }); timer = setInterval(() => { if (!res.destroyed && !res.writableEnded) res.write(': keepalive\n\n') }, 15_000); timer.unref() }
+      const parameterAnalysis = await analyzeModelParameters(ctx.llm, search, selectedTargets as NonNullable<typeof selectedTargets[number]>[], { analyzer, ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort as string } : {}), analysisTimeoutSeconds }, abort.signal, value => { if (streaming) emit('progress', value) })
+      abort.signal.throwIfAborted(); await service.refresh()
+      if (generation !== currentGeneration || !same(before, revisions()) || overrides !== service.futureOverridesFingerprint() || startingFingerprint !== fingerprint(await readCatalogState())) throw new Error('SETTINGS_CONFLICT：分析期间目录或引用发生变化，请重新分析')
+      const selectedFields = defaultParameterFields(parameterAnalysis), intents = parameterIntents(state, parameterAnalysis, selectedFields)
+      const view: ModelParameterPreview = { ...present(state, intents, 'parameter'), revisions: before, catalogFingerprint: startingFingerprint, parameterAnalysis, selectedFields }
+      const hasChanges = parameterAnalysis.results.some(r => r.status === 'ready' && r.suggestions.some(s => s.writable && s.value !== undefined && !same(s.currentValue, s.value)))
+      if (hasChanges) catalog = { view, state, intents, resolutions: [], parameterAnalysis, selectedFields }
+      else view.token = ''
+      if (streaming) { emit('result', view); res.end() } else json(res, 200, view)
+    } catch (failure) {
+      if (streaming) { emit('error', { error: abort.signal.aborted ? '分析已取消' : failure instanceof Error ? failure.message : '参数分析失败' }); res.end() } else throw failure
+    } finally { if (timer) clearInterval(timer); res.off?.('close', close); if (analysisAbort === abort) analysisAbort = undefined }
+  })
 
   register('official-preview', async (req, res) => {
     const currentGeneration = ++generation

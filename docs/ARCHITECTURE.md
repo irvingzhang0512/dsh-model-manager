@@ -1,8 +1,8 @@
 # 架构契约（v3）
 
-## 智能补全已有模型参数（文档版 model-parameters-20261010-v2，待确认／待实现）
+## 智能补全已有模型参数（文档版 model-parameters-20261010-v2，已实现 0.11.0）
 
-对应 SPEC F011 及 F001／F006／F009。本节基线 0.10.0／`5e33bec0bf1b66aeeac92a79cf86c2d7a3fd301b`，规划 0.11.0；尚无本功能源码，既有目录／官方事务继续按已实现契约运行。用户已要求实施计划，具体本版文档尚待明确确认。本节不改变原官方清单完整性、替代／迁移、原生 Subagent 或旧偏好停用规则。
+对应 SPEC F011 及 F001／F006／F009。本节基线 0.10.0／`5e33bec0bf1b66aeeac92a79cf86c2d7a3fd301b`，已实现 0.11.0；目录／官方事务复用既有已实现契约。用户审阅具体 v2 文档后回复“好，按照设计文档修改并开发吧”，确认本版并授权实现。本节不改变原官方清单完整性、替代／迁移、原生 Subagent 或旧偏好停用规则。
 
 ### 字段边界与来源
 
@@ -22,7 +22,7 @@
 
 ### 分析服务与搜索
 
-规划模块：`model-parameters.ts` 提供描述、结构校验与建议规划；`parameter-analysis.ts` 负责搜索／正文／独立 LLM；`client/parameter-panel.tsx` 提供目标选择、进度及字段预览。通过现有 official-host 的事务入口接入，不建立另一套无版本保护的直接写配置通路。
+实现模块：`model-parameters.ts` 提供描述、结构校验与建议规划；`parameter-analysis.ts` 负责搜索／正文／独立 LLM；`client/parameter-panel.tsx` 提供目标选择、进度及字段预览。parameter-catalog.ts 从当前已安装适配器的公开 Config／pi-ai 导出读取内置目录与原始推理映射；导出不可用时来源保持 unknown。冻结 currentValues 同时用于组合校验，不将继承 compat 隐式落盘。通过现有 official-host 的事务入口接入，不建立另一套无版本保护的直接写配置通路。
 
 - `describeParameterTargets(state, hostCatalog): ModelParameterTarget[]`：状态为原始与有效配置，hostCatalog 提供已安装原始目录／协议元数据，不含调用凭据；返回全部当前真实模型及其字段来源。
 - `validateParameterSuggestions(value: unknown, target: ModelParameterTarget, pages: OfficialPage[]): ParameterSuggestion[]`：逐字段解析、类型／协议／证据校验；非法建议导致该目标 failed，不生成其可应用字段，其他目标继续。合法未知项无 value，不构造更新。
@@ -43,6 +43,7 @@ LLM 输出固定 `{suggestions:[{field:string[], basis:'official'|'knowledge'|'u
 
 | Path | Method | 契约 |
 | --- | --- | --- |
+| `/api/model-manager/parameter-search-credential` | POST | `{revision:number,name?:string}`；独立保存合法凭据引用，默认名或省略仅 unset 引用叶及本次变空的 section；保留其他键，返回完整 snapshot。 |
 | `/api/model-manager/model-parameter-preview` | POST | `{models: ModelRef[], analyzer?: ModelRef|null, reasoningEffort?:string, analysisTimeoutSeconds?:number}`；先验证目标与参数并冻结原配置，再分析；Accept:text/event-stream 使用下述 SSE，未声明时返回同形状 JSON。 |
 | `/api/model-manager/catalog-resolve` | POST | 原 `{token,selected,resolutions}` 增加可选 `selectedFields:string[]`，仅 parameter origin 支持；缺省保持冻结默认／上次字段选择。未知／重复 id 拒绝，其他 origin 提交 selectedFields 拒绝。只重算、不搜索、不写配置；成功返回完整新预览并使旧 token 失效。 |
 | `/api/model-manager/catalog-apply` | POST | 原 `{token,selected}` 不变；使用 token 中已确认的字段集合和依赖选择，不能临时提交路径／值。返回既有 applied／backupId／backupAt／完整 snapshot。 |
@@ -50,7 +51,7 @@ LLM 输出固定 `{suggestions:[{field:string[], basis:'official'|'knowledge'|'u
 
 SSE 事件 progress／result／error 与 15 秒 keepalive；progress 含 stage（searching／reading／analyzing／planning）、model?、modelIndex、modelCount、searchCount、analysisCount，以及 analyzing 时 round／analysisStartedAt／analysisTimeoutSeconds。result 唯一终止并返回 ModelParameterPreview，不能借用官方 parser 的 analysis.complete 判定；断开连接／重新分析／effect 卸载取消作废旧任务与 token。单项失败记录到 result，整体取消／基线变化／全部无建议无有效 token；有建议但初始未选择可给 token，禁止空应用。正常全同值时展示 no-change，不提供应用 token。
 
-`ParameterSuggestion`：`{id:string, model:ModelRef, field:string[], currentValue?:unknown, currentSource:ParameterValueSource, value?:unknown, basis:'official'|'knowledge'|'unknown', reason:string, evidence:OfficialEvidence[], writable:boolean, blockedReason?:string, effect?:string}`。id 由服务端生成，仅 within token 有效；value 是合法模型内部字段值，客户端无通用编辑路径入口。
+`ParameterSuggestion`：`{id:string, model:ModelRef, field:string[], label?:string, currentValue?:unknown, currentSource:ParameterValueSource, value?:unknown, basis:'official'|'knowledge'|'unknown', reason:string, evidence:OfficialEvidence[], writable:boolean, blockedReason?:string, effect?:string}`。id 由服务端生成，仅 within token 有效；value 是合法模型内部字段值，客户端无通用编辑路径入口。
 
 `ParameterModelResult`：`{model:ModelRef,status:'ready'|'no-change'|'failed'|'unsupported',suggestions:ParameterSuggestion[],notes:string[]}`。`ModelParameterPreview` 在 CatalogPreview 基础增加 `parameterAnalysis:{analyzer,reasoningEffort?,analysisTimeoutSeconds,searchCount,analysisCount,results:ParameterModelResult[]}` 和 `selectedFields:string[]`；CatalogPreview.origin 扩为 manual／official／parameter，旧数据／客户端输入保持兼容。GET 完整 snapshot 增加可选 parameterBackupId，展示最近已应用参数操作；备份恢复始终按指定 id 与版本校验，不以页面记录绕过保护。
 
@@ -68,7 +69,7 @@ SSE 事件 progress／result／error 与 15 秒 keepalive；progress 含 stage�
 
 配置 v3 只新增可选 parameterCompletion.searchCredentialName，按 CONFIG 同版规则维护；旧配置不补空 section、不清理未知字段、不改已有模型参数或停用字段。失败回滚、坏备份 .bak、后续修改／跨重启拒绝恢复、完整响应与日志脱敏沿用 F010。实现后必须将来源判定、请求实际参数、老配置保存与恢复分别验证，不能用补全结果充当真实探测证据。
 
-## 插件图片声明退役与四项参数搜索（model-parameters-20261010-v2，待确认／待实现）
+## 插件图片声明退役与四项参数搜索（model-parameters-20261010-v2，已实现 0.11.0）
 
 对应 F012 及 F001／F003／F004／F006／F008／F009／F011，替代本节之前 v1 中“插件图片覆盖冲突同步”的未确认设计，其他全部模型参数范围、知识兜底及预览应用规则保持。原生图片 input／inputModalities、contextWindow、maxTokens、reasoningEfforts 都纳入每个目标的搜索要求；不能因为当前字段已存在而只搜图片或跳过容量／输出／档位。
 

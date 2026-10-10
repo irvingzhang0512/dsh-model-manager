@@ -17,7 +17,7 @@ export function candidateForGrade(config: ManagerConfig, models: ModelRecord[], 
     const eligible = refs.filter(ref => {
       const model = models.find(item => modelKey(item) === modelKey(ref))
       if (!model) return false
-      if (hasImage && !config.vision.enabled && (config.models[modelKey(ref)]?.capability?.image ?? model.nativeImage) !== 'yes') return false
+      if (hasImage && !config.vision.enabled && model.nativeImage !== 'yes') return false
       const toolEvidence = options.tools?.length ? verification?.(ref) : undefined
       if (toolEvidence && !toolEvidence.stale && toolEvidence.status === 'rejected') return false
       const contextWindow = config.models[modelKey(ref)]?.capability?.contextWindow ?? model.contextWindow
