@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-manager",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "DSH 模型能力、别名、AUTO 主模型选择与视觉辅助",
   "type": "module",
   "main": "./lib/index.js",

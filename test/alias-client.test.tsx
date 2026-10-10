@@ -1,13 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CONFIG } from '../src/domain.js'
 import { CatalogPreviewPanel } from '../src/client/catalog-panel.js'
-import { SelectModel, VisionSection } from '../src/client/index.js'
+import { AliasCard, SelectModel, VisionSection } from '../src/client/index.js'
 import type { CatalogPreview } from '../src/catalog-types.js'
 
 afterEach(() => vi.unstubAllGlobals())
 const nodes = (node: any): any[] => node === null || node === undefined || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...nodes(node.props?.children)]
 const text = (node: any): string => node === null || node === undefined || typeof node === 'boolean' ? '' : typeof node === 'object' ? Array.isArray(node) ? node.map(text).join('') : text(node.props?.children) : String(node)
 describe('别名删除与视觉清理界面', () => {
+  it('别名卡显示固定五次及完整结果规则，不再渲染旧策略控件', () => {
+    const draft = structuredClone(DEFAULT_CONFIG)
+    draft.aliases.flash = { candidates: [], reliability: { maxAttempts: 1, retryTransient: false, parameterDowngrade: true } }
+    const tree = AliasCard({ name: 'flash', draft, models: [], edit: vi.fn(), notify: vi.fn(), removeAlias: vi.fn() })
+    expect(text(tree)).toContain('最多调用 5 次'); expect(text(tree)).toContain('成功后显示完整回答')
+    expect(nodes(tree).filter(n => n.type === 'input' || n.type === 'select')).toEqual([])
+    expect(text(tree)).not.toContain('参数降级')
+  })
   it('失效别名和被图片筛选排除的真实模型保留选中值及原因，可显式清除', () => {
     const changed = vi.fn()
     for (const value of ['@removed', { providerId: 'p', modelId: 'missing' }]) {

@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ManagedAdapter, VisionRegistry } from '../src/adapter.ts'
 import { DEFAULT_CONFIG, managedId, modelKey, type ModelRecord } from '../src/domain.ts'
 
 const model: ModelRecord = { providerId: 'provider-a', modelId: 'text', name: 'Text', nativeImage: 'no', reasoningEfforts: [{ id: 'low', name: 'Low' }], source: 'host', loaded: true }
 const fallbackModel: ModelRecord = { ...model, providerId: 'provider-b' }
+afterEach(() => vi.useRealTimers())
 function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: string, request: any) => AsyncIterable<any>, records: ModelRecord[] = [model, fallbackModel]) {
   const calls: any[] = []
   const llm = {
@@ -123,19 +124,22 @@ describe('受管理请求', () => {
     expect(JSON.stringify(calls[0].messages)).toContain('[图片附件 tool-image]')
     expect(JSON.stringify(calls[0].messages)).not.toContain('"type":"image"')
   })
-  it('已有输出后失败不换模型重播', async () => {
+  it('别名已有半段输出后失败丢弃内容，切到下一候选', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
     config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }, { providerId: 'provider-b', modelId: 'text' }] }
-    const { adapter, calls } = harness(config, () => (async function* () {
-      yield { type: 'text-delta', index: 0, text: '半段' }
-      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', status: 503, message: 'failed' } } }
+    const { adapter, calls } = harness(config, provider => (async function* () {
+      if (provider === 'provider-a') {
+        yield { type: 'text-delta', index: 0, text: '半段' }
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_REQUEST', status: 400, message: 'failed' } } }
+      } else yield { type: 'finish', reason: { kind: 'stop' } }
     })())
     const output = []
     for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk)
-    expect(calls).toHaveLength(1)
-    expect(output.at(-1).reason.kind).toBe('error')
+    expect(calls).toHaveLength(2)
+    expect(output).toEqual([{ type: 'finish', reason: { kind: 'stop' } }])
   })
-  it('无输出的临时失败只重试一次，再按别名顺序切换', async () => {
+  it('别名临时故障最多五次，再按顺序切换', async () => {
+    vi.useFakeTimers()
     const config = structuredClone(DEFAULT_CONFIG)
     config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }, { providerId: 'provider-b', modelId: 'text' }] }
     const { adapter, calls } = harness(config, provider => (async function* () {
@@ -143,8 +147,9 @@ describe('受管理请求', () => {
       else yield { type: 'finish', reason: { kind: 'stop' } }
     })())
     const output = []
-    for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk)
-    expect(calls.map(call => call.provider)).toEqual(['provider-a', 'provider-a', 'provider-b'])
+    const task = (async () => { for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk) })()
+    await vi.runAllTimersAsync(); await task
+    expect(calls.map(call => call.provider)).toEqual([...Array(5).fill('provider-a'), 'provider-b'])
     expect(output.at(-1).reason.kind).toBe('stop')
   })
   it('传输异常在尚无输出时重试，出现部分文字后不重播', async () => {
@@ -202,7 +207,7 @@ describe('受管理请求', () => {
     expect(calls[1].messages[0].content[0].text).toContain('视觉辅助已关闭')
     expect(calls[1].messages[1].content[0].text).toBe('继续')
   })
-  it('上下文溢出只切到内置长上下文别名的候选', async () => {
+  it('具体模型上下文溢出仍使用内置长上下文候选', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
     config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }] }
     config.aliases['long-context'] = { candidates: [{ providerId: 'provider-b', modelId: 'text' }] }
@@ -211,19 +216,21 @@ describe('受管理请求', () => {
       else yield { type: 'finish', reason: { kind: 'stop' } }
     })())
     const output = []
-    for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk)
+    for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), messages: [] })) output.push(chunk)
     expect(calls.map(call => call.provider)).toEqual(['provider-a', 'provider-b'])
     expect(output.at(-1).reason.kind).toBe('stop')
   })
-  it('别名级兜底覆盖生效：放宽尝试次数', async () => {
+  it('退役的别名覆盖不限制新规则，具体模型全局策略仍保留', async () => {
+    vi.useFakeTimers()
     const config = structuredClone(DEFAULT_CONFIG)
     config.aliases.fast = { candidates: [{ providerId: 'provider-a', modelId: 'text' }, { providerId: 'provider-b', modelId: 'text' }], reliability: { maxAttempts: 3 } }
     const { adapter, calls } = harness(config, () => (async function* () {
       yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', status: 503, message: 'failed' } } }
     })())
     const output = []
-    for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk)
-    expect(calls).toHaveLength(3)
+    const task = (async () => { for await (const chunk of adapter.stream({ provider: 'dsh-model-manager', model: 'alias:fast', messages: [] })) output.push(chunk) })()
+    await vi.runAllTimersAsync(); await task
+    expect(calls).toHaveLength(10)
     expect(output.at(-1).reason.kind).toBe('error')
   })
   it('参数拒绝仅在允许时去掉推理参数并重试', async () => {

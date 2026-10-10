@@ -79,6 +79,39 @@ async function fixture(explicit = true, pi = false, absentUser = false, legacy =
 }
 
 describe('旧分工偏好独立清理事务', () => {
+  it('旧别名策略独立预览／清理／恢复、保存不复活及并发拒绝', async () => {
+    const f = await fixture()
+    f.raw['dsh-model-manager'].aliases.main.reliability = { maxAttempts: 'invalid', retryTransient: false, parameterDowngrade: { bad: true }, extra: 'preserve' }
+    f.managedAdapter.service.onSettingsChanged(f.get('dsh-model-manager'))
+    const original = structuredClone(f.raw)
+    expect(f.managedAdapter.service.snapshot().legacyAliasReliabilityCount).toBe(1)
+    expect(f.managedAdapter.service.snapshot().config.aliases.main).not.toHaveProperty('reliability')
+    const input = { operations: [{ kind: 'clearLegacyAliasReliability' }] }
+    const p = await f.call('catalog-preview', input)
+    expect(p.status, JSON.stringify(p.json)).toBe(200); expect(p.json.selected).toEqual([]); expect(f.raw).toEqual(original)
+    const selected = p.json.operations.map((o: any) => o.id)
+    const applied = await f.call('catalog-apply', { token: p.json.token, selected })
+    expect(applied.status, JSON.stringify(applied.json)).toBe(200)
+    expect(f.raw['dsh-model-manager'].aliases.main.reliability).toEqual({ extra: 'preserve' })
+    expect(applied.json.snapshot.legacyAliasReliabilityCount).toBe(0)
+    await f.managedAdapter.service.update(applied.json.snapshot.config, f.managedAdapter.service.snapshot().revision)
+    expect(f.raw['dsh-model-manager'].aliases.main.reliability).toEqual({ extra: 'preserve' })
+    // 后续保存会阻止旧备份覆盖；不强行恢复。
+    expect((await f.call('catalog-restore', { backupId: applied.json.backupId })).status).toBe(409)
+  })
+  it('旧别名策略完整恢复仍停用，过期清理预览不写入', async () => {
+    const input = { operations: [{ kind: 'clearLegacyAliasReliability' }] }
+    const g = await fixture()
+    g.raw['dsh-model-manager'].aliases.main.reliability = { maxAttempts: 2, unknown: ['keep'] }
+    g.managedAdapter.service.onSettingsChanged(g.get('dsh-model-manager'))
+    const before = structuredClone(g.raw), preview = await g.call('catalog-preview', input)
+    const done = await g.call('catalog-apply', { token: preview.json.token, selected: preview.json.operations.map((o: any) => o.id) })
+    expect(done.status, JSON.stringify(done.json)).toBe(200)
+    expect((await g.call('catalog-restore', { backupId: done.json.backupId })).status).toBe(200)
+    expect(g.raw).toEqual(before); expect(g.managedAdapter.service.snapshot().config.aliases.main).not.toHaveProperty('reliability')
+    const stale = await g.call('catalog-preview', input); g.rev['dsh-model-manager']++
+    expect((await g.call('catalog-apply', { token: stale.json.token, selected: stale.json.operations.map((o: any) => o.id) })).status).toBe(409)
+  })
   const input = { operations: [{ kind: 'clearLegacyPreferences' }] }
   it('父入口为 AUTO 时 fork 延续父任务已选模型及原生参数，不再次评估', async () => {
     const f = await fixture(), chosen = { providerId: 'deepseek-official', modelId: 'pro' }

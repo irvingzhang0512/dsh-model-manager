@@ -159,11 +159,12 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
   const service = new ModelManagerService(bridge, resolveDataDir(), ctx.settings)
   const vision = new VisionRegistry()
   const adapter = new ManagedAdapter(ctx.llm, service, vision)
+  ctx.effect(() => () => adapter.dispose(), 'dsh-model-manager: cancel active calls')
   let ready = false
   void service.init().then(() => { ready = true }).catch(err => ctx.logger?.error?.(`[dsh-model-manager] 初始化失败: ${String(err)}`))
   ctx.effect(() => scope.watch(next => service.onSettingsChanged(next)), 'dsh-model-manager: settings')
   ctx.effect(() => ctx.llm.registerAdapter([MANAGED_PROVIDER], adapter), 'dsh-model-manager: adapter')
-  ctx.effect(() => registerManagerTools({ tools: ctx.tools, llm: ctx.llm, attachments: ctx.attachments, service, vision }), 'dsh-model-manager: tools')
+  ctx.effect(() => registerManagerTools({ tools: ctx.tools, llm: ctx.llm, attachments: ctx.attachments, service, vision, adapter }), 'dsh-model-manager: tools')
   ctx.effect(() => ctx.systemPrompt.section({ name: 'dsh-model-manager', order: 350,
     text: () => {
       const config = service.snapshot().config

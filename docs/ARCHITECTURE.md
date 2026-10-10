@@ -1,5 +1,46 @@
 # 架构契约（v3）
 
+## 别名候选恢复（alias-failover-20261010-v1，已实现 0.12.0）
+
+对应 SPEC F002，基线 0.11.0／`89aac7b018ac8a123aa40b98ecabc153eeee9d40`，当前实现 0.12.0。用户审阅该版具体文档后回复“继续实现”确认；替代仅限最终逻辑目标为别名的旧兜底流程，不实现或授权其他待确认章节。配置仍为 v3，不新增运行依赖或可调持久参数。
+
+### 入口、快照与候选组
+
+- prepareCall／resolveModel 不再把首候选 resolveModelInfo 的失败等同于整个别名不可用：按顺序寻找能提供元数据的候选，冻结配置及目录；单个 resolve／参数／图片路由失败记录该候选原因，留给执行流程跳过。全部元数据不可用时明确返回聚合准备错误。空别名／无效逻辑 ID 仍直接拒绝。
+- stream 在本次有效 Selection／AUTO 决策选定后识别最终别名。直接 alias、chosen.target=@alias、AUTO 决策档的别名及视觉别名使用同一实现；该别名的 efforts 按 Provider＋Model 生效。覆盖到具体模型则走旧具体模型路径；子任务不重复触发 AUTO，其他隔离规则保留。
+- 固定 config、ModelRecord、去重后候选、GenerateOptions.messages／tools／参数和请求 ID；candidateIndex 为去重队列中的 1 起序号。重复 Provider＋Model 不重复进入；同平台不同模型不因认证错误跳过。候选不可用、原生图片不符且辅助不可用、档位／参数拒绝等均作为该候选失败继续，不修改声明、参数或设置。
+- 新别名队列仅使用其明确配置的候选；上下文溢出不设置 contextOnly，也不自动追加 @long-context。具体模型旧流程的重试／参数降级／上下文兜底保留；不得通过全局放宽旧 maxAttempts 冒充别名新规则。
+
+### 尝试、错误与终态
+
+- 每个候选使用独立 candidateAttempt=1..5，首次算一次；全局 attempt 仍统计实际调用数，仅用于日志，没有三次总预算。准备失败 candidateAttempt=0、不增加实际调用数；该候选只记录一次准备错误并进入下一候选。
+- 按结构化 code 判断，RATE_LIMIT、QUOTA、AUTH、INVALID_REQUEST、CONTEXT_WINDOW_EXCEEDED、BUFFER_LIMIT 等非临时错误立即切下一候选；没有匹配结构化码时，HTTP 408／5xx 或 NETWORK／TRANSPORT／TIMEOUT／SERVER 为临时故障。其他未知错误不在当前候选重试，仍切下一候选；不从 message 正则猜 HTTP 状态。已明确的非临时代码优先于 HTTP 状态。
+- 临时失败尚未满五次时，分别等待 500、1000、2000、4000 ms 再重试当前候选；退避无随机抖动。每次使用原始冻结参数，不进行参数降级。网络异常和缺少 finish 均丢弃本次输出；结构化抛出错误保留 code、status、requestId 等已验证事实，普通无结构 Error 沿用传输故障兼容判断。
+- 每次使用从调用者 signal 派生的 AbortController，解析／iterator.next／退避都与取消竞争；取消和 effect 释放清理 listener／timer 并尽力 abort／iterator.return，不等待不响应取消的上游。取消优先于重试、切换和提交，迟到 Promise 必须接收拒绝处理且不得恢复状态。
+- 仅 stop／tool-calls／max-tokens 为成功终态；没有 finish 的 EOF 生成 TRANSPORT，aborted 立即返回，不切候选。失败后不得转发原失败 finish 或失败内容；最终全部候选失败只发一个 error finish，failure.code=ALL_CANDIDATES_FAILED，message 按队列顺序聚合 Provider／Model、实际尝试次数、最后错误码及脱敏原因。取消返回一个 aborted finish，code=ABORTED。
+
+### 暂存与宿主提交
+
+- 每次尝试使用新的 StreamChunk[]，暂存全部输出及终态元数据；失败／重试／取消后销毁。没有宿主撤回接口，因此别名等待期间不逐字显示回答；不透传失败候选的 block-start、文本、推理、工具调用或 usage。已有历史工具结果仍在原冻结请求，不重执行整轮。
+- 暂存上限为 32 * 1024 * 1024 字节，每个将入队的 StreamChunk 按 UTF-8 JSON 序列化字节数累计（包含 usage、finish 和 replayState），超过时不入队、不成功提交，生成 BUFFER_LIMIT 并切下一候选。序列化无效也按该候选协议失败处理，不能转为成功或静默截断。
+- 收到正常 finish 后，保持该次原始顺序、块 index 和 replayState，一次提交缓存的块序列；继续使用现有工具名双向映射。提交之前及每次 yield 前检查取消，提交后不再启动任何候选。宿主看到的工具调用和 finish 仅属于同一次成功尝试，不能混合失败工具参数或响应元数据。
+- 对宿主只提交成功尝试的 usage；失败尝试的 usage 分开写逐次日志，不拼到成功 replayState。日志沿用 managedRequestId、logicalProvider／logicalModel、provider／model、attempt、route／effort、durationMs、status、failureCode／httpStatus／requestId／usage，新增 candidateIndex、candidateAttempt、failureMessage（脱敏）。准备失败新增 action=alias-candidate-preparation，candidateAttempt=0；日志不得存提示、图片字节、凭据和完整配置。
+
+### 旧别名策略清理契约
+
+- AliasReliability 的 maxAttempts／retryTransient／parameterDowngrade 退为原始层历史值；有效 AliasConfig 不读这三个叶值，也不以其类型／范围阻止加载、保存、目录事务或别名删除。普通 v1/v2/v3 迁移不自动写原始配置；全局 reliability 三项仍有具体模型运行语义，继续校验。
+- 在 CatalogOperation／CleanupIntent／CatalogDiff 增加 clearLegacyAliasReliability，操作输入固定 `{kind:'clearLegacyAliasReliability'}`。独立调用现有 POST catalog-preview 的 operations 数组；预览 origin=manual、writesPlugin=true，只产生一个 path=aliases 的清理组，before／after 列明原始三个叶值及别名名称，不修改候选和引用。未检测到旧叶键时无可应用组。
+- 使用原始 settings.describe.user 的 aliases 对象规划完整写集：仅清除普通对象 aliases.<name>.reliability 中自有三个已失效键，不论叶值类型；其余未知键及非普通对象值保留并注明不能判定。不残留空 reliability 对象；保留 candidates、efforts、别名名称、全局 reliability 和其他字段及凭据。
+- 清理禁止与新增／删除模型、删除别名、参数操作、其他清理或未保存草稿混用。用户先预览、勾选该组，再通过原 catalog-apply 的 `{token,selected}` 应用；原 catalog-restore 恢复完整原值和存在状态。沿用 revision、目录／覆盖指纹、串行 CAS、v3 manual 备份、失败安全回滚及后续修改拒绝恢复，不新增 HTTP 路由。
+- 普通保存从原始层保留尚未清理的历史值，不能接受界面新建／改写退役键；清理后普通保存不能补回这三个键。恢复备份带回旧值仍停用。对所有原始写入路径（普通保存、目录／官方迁移、清理、恢复、导入后读取）检查未知键保留与退役值不参与有效校验，不因 aliases 顶层替换破坏其他别名。
+- GET 完整 snapshot 新增 legacyAliasReliabilityCount:number，为拥有任一旧叶键的别名数量，不携带完整原始配置；别名页显示清理入口和固定恢复说明，使用现有 catalog 预览／应用／恢复组件。旧响应缺 count 时按 0，不影响其他页面和草稿。
+
+### 验收与版本边界
+
+覆盖 SPEC F002 的三候选限流复现、五次重试、四个以上候选、结构化抛错、同平台、准备失败、图片／上下文拒绝、缺 finish、32 MiB、半段各类输出、取消竞争与迟到内容、成功 replayState、逐次日志及旧原始设置清理／恢复。计时测试用假时钟验证完整退避，不做真实等待或模型消费。现有具体模型行为回归独立断言。
+
+2026-10-10 已依次通过 typecheck、build、21 文件／329 项全量测试及生产客户端冒烟。development 专用页面核对固定规则、清理预览与取消，实际宿主接口完成清理／恢复；生产适配器配开发目录和合成响应验证三候选顺序。取消、输出丢弃及快照由自动回归覆盖。开发配置原始文本已恢复，未重启日常、未调用外部模型，不将合成结果登记为真实模型兼容。版本 0.12.0，独立中文提交，根锁与受影响 Skill 同步；验证细节见 V1-COVERAGE。
+
 ## 智能补全已有模型参数（文档版 model-parameters-20261010-v2，已实现 0.11.0）
 
 对应 SPEC F011 及 F001／F006／F009。本节基线 0.10.0／`5e33bec0bf1b66aeeac92a79cf86c2d7a3fd301b`，已实现 0.11.0；目录／官方事务复用既有已实现契约。用户审阅具体 v2 文档后回复“好，按照设计文档修改并开发吧”，确认本版并授权实现。本节不改变原官方清单完整性、替代／迁移、原生 Subagent 或旧偏好停用规则。

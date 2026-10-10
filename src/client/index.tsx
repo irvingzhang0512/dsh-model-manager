@@ -5,12 +5,12 @@ import { readOfficialStream } from './official-stream.js'
 import { OfficialProgressStatus } from './official-progress.js'
 import { AliasRemovalManager, LegacyPreferencesManager, CatalogManager, CatalogPreviewPanel, catalogRequest, type CatalogEditor } from './catalog-panel.js'
 import type { CatalogCapability, CatalogResolution } from '../catalog-types.js'
-import type { AliasReliability, ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
+import type { ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
 import { probeSuggestions } from '../domain.js'
 import { ParameterPanel } from './parameter-panel.js'
 
 export const inject = ['slots']
-type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities?: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; legacyImageOverrideCount?: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
+type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities?: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; legacyImageOverrideCount?: number; legacyAliasReliabilityCount?: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
 type Tab = '模型' | '别名与兜底' | 'AUTO 自动选模型' | '视觉' | '日志'
 const tabs: Tab[] = ['模型', '别名与兜底', 'AUTO 自动选模型', '视觉', '日志']
 const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明' }
@@ -224,8 +224,8 @@ function TierMapping({ name, models, draft, edit }: { name: string; models: Mode
     })}</div>
 }
 
-/** 别名卡：候选顺序兜底 + 可选的别名级兜底覆盖 + 候选模型的档位映射。 */
-function AliasCard({ name, draft, models, edit, notify, removeAlias }: {
+/** 别名卡：固定恢复规则与候选模型的档位映射。 */
+export function AliasCard({ name, draft, models, edit, notify, removeAlias }: {
   name: string; draft: ManagerConfig; models: ModelRecord[]; edit: (fn: (next: ManagerConfig) => void) => void
   notify: (kind: Notice['kind'], text: string) => void; removeAlias: (name: string) => void
 }) {
@@ -233,14 +233,6 @@ function AliasCard({ name, draft, models, edit, notify, removeAlias }: {
   if (!alias) return null
   const candidates = alias.candidates ?? []
   const isLongContext = name === 'long-context'
-  const rel = alias.reliability ?? {}
-  const setRel = (fn: (next: AliasReliability) => void) => edit(next => {
-    const target = next.aliases[name] ?? { candidates: [] }
-    const value: AliasReliability = { ...(target.reliability ?? {}) }
-    fn(value)
-    for (const key of ['maxAttempts', 'retryTransient', 'parameterDowngrade'] as const) if (value[key] === undefined) delete value[key]
-    target.reliability = Object.keys(value).length ? value : undefined
-  })
   const referenced = [...new Map(candidates.map(ref => [JSON.stringify([ref.providerId, ref.modelId]), models.find(model => model.providerId === ref.providerId && model.modelId === ref.modelId)] as const).values()).values()].filter((item): item is ModelRecord => !!item)
   return <div className="dmm-card">
     <div className="dmm-row">
@@ -248,7 +240,7 @@ function AliasCard({ name, draft, models, edit, notify, removeAlias }: {
       {isLongContext && <span className="dmm-badge">内置：上下文溢出兜底</span>}
       <button onClick={() => removeAlias(name)}>删除</button>
     </div>
-    {isLongContext && <p className="dmm-muted">请求报「上下文溢出」时改用这里的候选重试，平时不参与；删除后溢出将直接失败。修改候选顺序与普通别名相同。</p>}
+    {isLongContext && <p className="dmm-muted">具体模型请求上下文溢出时可使用这里的候选。其他别名只尝试自己配置的候选，不自动追加本组；也可直接选择本别名。</p>}
     {candidates.map((ref, index) => <div className="dmm-row" key={index}>
       <span>{index + 1}.</span>
       <SelectModel value={ref} models={models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.aliases[name].candidates[index] = value })} />
@@ -256,11 +248,7 @@ function AliasCard({ name, draft, models, edit, notify, removeAlias }: {
     </div>)}
     <button onClick={() => edit(next => { if (models[0]) next.aliases[name].candidates.push({ providerId: models[0].providerId, modelId: models[0].modelId }) })}>添加候选</button>
     {!candidates.length && <p className="dmm-note">每个别名至少要有一个具体模型才能保存。</p>}
-    <div className="dmm-row">
-      <label>最多尝试 <input type="number" min="1" max="3" placeholder="全局默认" value={rel.maxAttempts ?? ''} onChange={event => setRel(next => { next.maxAttempts = event.target.value ? Number(event.target.value) : undefined })} /></label>
-      <label>网络失败重试 <select value={rel.retryTransient === undefined ? '' : String(rel.retryTransient)} onChange={event => setRel(next => { next.retryTransient = event.target.value === '' ? undefined : event.target.value === 'true' })}><option value="">跟随全局</option><option value="true">开</option><option value="false">关</option></select></label>
-      <label>参数降级 <select value={rel.parameterDowngrade === undefined ? '' : String(rel.parameterDowngrade)} onChange={event => setRel(next => { next.parameterDowngrade = event.target.value === '' ? undefined : event.target.value === 'true' })}><option value="">跟随全局</option><option value="true">允许</option><option value="false">不允许</option></select></label>
-    </div>
+    <p className="dmm-muted">按顺序尝试全部候选。网络、超时或服务端临时故障每个候选最多调用 5 次；其他错误直接换下一个。成功后显示完整回答，失败的半段内容丢弃；停止后不再重试。</p>
     <TierMapping name={name} models={referenced} draft={draft} edit={edit} />
     {!referenced.some(model => model.reasoningEfforts.length) && <p className="dmm-muted">候选模型都没有公开推理档位，无需映射。</p>}
   </div>
@@ -549,20 +537,21 @@ function ManagerSection() {
     {tab === '别名与兜底' && <>
       <details className="dmm-guide">
         <summary>这一页是干什么的？（点开查看说明）</summary>
-        <p style={{ margin: '6px 0', fontSize: 13 }}>别名 = 好记的名字 + 一串按顺序兜底的具体模型 + 可选的兜底策略覆盖：</p>
+        <p style={{ margin: '6px 0', fontSize: 13 }}>别名 = 好记的名字 + 一串按顺序兜底的具体模型：</p>
         <ul className="dmm-steps">
           <li><strong>候选顺序即兜底顺序</strong>：第 1 个请求失败时按规则尝试第 2 个；模型选择器、AUTO 执行档和视觉模型处都能引用 @名字。</li>
           <li><strong>推理档位</strong>：每个候选模型只显示自己支持的真实档位；留空使用模型默认。</li>
-          <li><strong>兜底策略</strong>：全局默认（最多尝试 1–3 次、网络失败重试、参数降级）在本页底部；单个别名可覆盖个别字段，例如给关键别名放宽尝试次数。</li>
-          <li><strong>内置别名 @long-context</strong>：只在请求报「上下文溢出」时启用的专用候选，把上下文最大的模型放进去即可。</li>
+          <li><strong>固定恢复规则</strong>：临时故障每候选最多 5 次，其他错误立即切换；不受三次总上限限制。成功后显示完整回答，已完成的工具操作不重做。</li>
+          <li><strong>内置别名 @long-context</strong>：供具体模型上下文溢出时使用；其他别名需要自行添加长上下文候选。</li>
         </ul>
       </details>
       <div className="dmm-card"><div className="dmm-row"><input placeholder="别名，如 fast" value={aliasName} onChange={event => setAliasName(event.target.value)} /><button onClick={() => { if (!/^[a-z][a-z0-9_-]*$/.test(aliasName) || draft.aliases[aliasName]) return; edit(next => { next.aliases[aliasName] = { candidates: [] } }); setAliasName('') }}>添加别名</button></div><p className="dmm-muted">候选按顺序尝试；每个别名至少添加一个具体模型后才能保存。</p></div>
       <AliasRemovalManager key={removingAlias ?? 'restore'} name={removingAlias} close={() => setRemovingAlias(null)} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
+      <LegacyPreferencesManager config={snapshot.config} aliasCount={snapshot.legacyAliasReliabilityCount ?? 0} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
       {aliases.map(alias => <AliasCard key={alias} name={alias} draft={draft} models={snapshot.models} edit={edit} notify={notify} removeAlias={name => { if (busy) return; if (!Object.hasOwn(snapshot.config.aliases, name)) { edit(next => { delete next.aliases[name] }); return }; setRemovingAlias(name); setOfficial(null); setCatalogEditor(null); document.getElementById('dmm-alias-removal')?.scrollIntoView({ block: 'nearest' }) }} />)}
       <div className="dmm-card">
-        <strong>全局默认兜底策略</strong>
-        <p className="dmm-muted">对走「模型管理」入口的所有请求生效；别名可用上面的覆盖项单独调整。聊天里的表现通常是「卡一下换了个模型继续答」；实际用了哪个模型可去「日志」页核对。</p>
+        <strong>具体模型恢复策略</strong>
+        <p className="dmm-muted">仅用于最终目标为具体模型的受管理请求，不控制别名。别名使用上面的固定恢复规则；实际调用可去「日志」页核对。</p>
         <div className="dmm-row">
           <label>最多实际尝试（1–3） <input type="number" min="1" max="3" value={draft.reliability.maxAttempts} onChange={event => edit(next => { next.reliability.maxAttempts = Number(event.target.value) })} /></label>
           <label><input type="checkbox" checked={draft.reliability.retryTransient} onChange={event => edit(next => { next.reliability.retryTransient = event.target.checked })} />网络失败重试一次</label>

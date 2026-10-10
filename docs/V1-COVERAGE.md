@@ -1,3 +1,15 @@
+## 2026-10-10 别名逐候选恢复与旧策略清理（0.12.0）
+
+- 确认依据：alias-failover-20261010-v1 的 SPEC F002／架构／配置契约交用户审阅后，用户回复“继续实现”明确确认。本版按原范围实施，配置保持 v3，没有新运行依赖；保留另行待确认的 batch-verification-20261010-v1 工作区差异，未开发批量测试。
+- 根因与核心回归：0.11.0 对无 status 的 RATE_LIMIT 误走网络重试，Coding Plan 两次／Agent Plan 一次耗尽预算，官方候选未尝试。新回归第一候选 RATE_LIMIT、第二候选 QUOTA、第三候选 stop，精确调用顺序 1／2／3，旧 maxAttempts=1 不干预；没有将错误原因改写为 NETWORK。
+- 自动验证：按 typecheck → build → 全量 test 执行，21 文件／329 项通过，包含生产客户端 bundle 冒烟。假时钟核对第五次成功的 0／500／1500／3500／7500 ms 调用时刻、连续五次失败再切换及五候选可达。同平台认证／参数／上下文拒绝、元数据／准备失败、原生图片不匹配、结构化 LlmError 状态和请求 ID、缺 finish、32 MiB 超限、所有失败脱敏聚合、各入口解析、请求快照均覆盖。
+- 输出与取消：文字／推理／工具参数半段失败不会提交宿主；成功工具调用仅发布一次，历史工具结果在重试请求保留。stop／tool-calls／max-tokens 均成功，usage／replayState 只提交成功尝试，失败用量留日志；解析、读流、退避、暂存、提交和 effect 释放取消及忽略信号的迟到结果由回归覆盖，不宣称外部工具真实执行验证。
+- 旧配置：v1／v2／v3 任意类型旧策略叶值不参与运行或有效校验，raw 不自动修改；普通保存保护未清理值、拒绝新建策略，清理后不补回。真实目录事务假宿主覆盖独立预览／取消／勾选应用／备份恢复／幂等／并发冲突、完整引用和未知嵌套字段保留；其他事务的既有回滚测试全量通过。
+- development 集成：只重启独立 3082，运行固定 DSH 0.1.5-rc.2 和生产 0.12.0 构建。临时别名 failover-demo 使用开发目录三个同平台模型，生产适配器配合成 RATE_LIMIT／QUOTA／stop，实际顺序 deepseek-flash → deepseek-v4-flash → deepseek-v4-pro；外部模型调用为零。实际宿主 catalog-preview／apply／restore 完成旧策略三键清理和恢复，未知 reliability.unknown 及 candidates 保留；恢复后有效层仍无旧策略。私有报告位于根 .local/reports/alias-failover-0.12.0/result.json。
+- 客户端 GUI：实际页面“别名与兜底”显示固定五次、成功完整显示和停止规则，无旧别名覆盖控件；全局显示“具体模型恢复策略”及范围。旧策略卡片计数为 1，预览未默认勾选、应用禁用，取消不写入；浏览器错误日志为空，截图位于根私有 .local/reports/alias-failover-0.12.0/client-smoke.png。
+- 配置恢复：测试后停 development，恢复 settings.yaml 原始字节；最终构建后再次重启 development（最终 PID 30204）。SHA-256 为 2A57C3A71031B684EA273CC4B398B926CFFA0C23D72EBD0355C6E71B49AF5F33，与测试前一致；最终接口 aliases={}、legacyAliasReliabilityCount=0。日常和 maintenance 未重启，日常生效另行安排。
+- 交付与限制：版本 0.12.0，独立中文提交及根精确提交锁同步，无推送。合成响应／自动取消回归／GUI 设置检查与真实模型兼容分别记录，未发付费请求；完整 AUTO／视觉／原生 Subagent 真实链路及周期巡检继续待验收，不填写 verifiedWith，verified=false 保留。
+
 ## 2026-10-10 智能补全参数与插件图片声明退役（0.11.0）
 
 - 确认依据：用户审阅 model-parameters-20261010-v2 后回复“好，按照设计文档修改并开发吧”，确认 F011／F012 及相关 F001／F003／F004／F006／F008／F009 与架构／配置；完整替代仅图片能力及未确认 v1。配置保持 v3，原始 REQUIREMENTS 未改。

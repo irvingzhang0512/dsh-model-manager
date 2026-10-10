@@ -9,6 +9,7 @@ import type { AutoDecision } from './auto-router.js'
 import { canonical, type FutureOverrides } from './official-state.js'
 import type { CatalogCapability } from './catalog-types.js'
 import { legacyImageOverrides, preserveLegacyImages, preserveUnknownConfig } from './legacy-image.js'
+import { legacyAliasReliability, rejectAliasReliability } from './legacy-alias.js'
 
 /**
  * 宿主设置服务拒绝过期 revision 时抛出的冲突错误（`SettingsConflictError`，`code` 固定为 `SETTINGS_CONFLICT`）。
@@ -240,10 +241,11 @@ export class ModelManagerService {
     if (origin === 'manual' && status === 'applied') { this.catalogBackupId = id; this.catalogBackupWritesPlugin = writesPlugin }
     else if (id === this.catalogBackupId && status === 'restored') { this.catalogBackupId = undefined; this.catalogBackupWritesPlugin = undefined }
   }
-  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; legacyImageOverrideCount: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
+  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; legacyImageOverrideCount: number; legacyAliasReliabilityCount: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
     return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models), hostDefault: this.hostDefault(),
       catalogCapabilities: this.bridge.catalogCapabilities?.() ?? [], catalogBackupId: this.catalogBackupId, catalogBackupWritesPlugin: this.catalogBackupWritesPlugin,
       parameterBackupId: this.parameterBackupId, legacyImageOverrideCount: legacyImageOverrides(this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.user).length,
+      legacyAliasReliabilityCount: legacyAliasReliability(this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.user).length,
       verifications: [...this.verification.values()].map(value => ({ ...structuredClone(value), stale: value.signature !== this.signature(value.model, value.kind) })) }
   }
 
@@ -260,6 +262,7 @@ export class ModelManagerService {
   }
 
   async update(next: ManagerConfig, revision: number): Promise<number> {
+    rejectAliasReliability(next)
     validateConfig(next)
     if (revision !== this.revision) throw new Error('SETTINGS_CONFLICT')
     if (this.settings) {

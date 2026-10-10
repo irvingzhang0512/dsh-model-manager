@@ -10,7 +10,7 @@ export async function catalogRequest(path: string, value: unknown): Promise<any>
 }
 export function CatalogPreviewPanel({ view, selected, busy, onResolve }: { view: CatalogPreview; selected: string[]; busy: boolean; onResolve: (selected: string[], resolutions: CatalogResolution[]) => void }) {
   const resolutions = view.operations.flatMap(operation => operation.choices.filter(c => c.resolution).map(c => ({ id: c.id, optionId: c.resolution! })))
-  const labels = { add: '新增模型', rename: '修改显示名称', remove: '删除模型', update: '更新声明', migrate: '整体合并迁移', removeAlias: '删除别名', clearLegacyPreferences: '清理旧分工偏好', clearLegacyImageOverrides: '清理旧插件图片声明' }
+  const labels = { add: '新增模型', rename: '修改显示名称', remove: '删除模型', update: '更新声明', migrate: '整体合并迁移', removeAlias: '删除别名', clearLegacyPreferences: '清理旧分工偏好', clearLegacyImageOverrides: '清理旧插件图片声明', clearLegacyAliasReliability: '清理旧别名恢复策略' }
   const pathLabel = (path: string) => ({ 'auto.main.target': '旧主模型绑定', 'auto.simple.target': 'AUTO 简单任务', 'auto.normal.target': 'AUTO 常规任务', 'auto.complex.target': 'AUTO 复杂任务', 'vision.target': '当前视觉模型', 'auto.roles.vision.target': '旧视觉兜底', 'agent-default-model.model': '宿主默认模型' }[path] ?? (path.startsWith('auto.preferences.') ? '分工偏好' : path.startsWith('auto.roles.') ? '旧角色模型' : path.startsWith('overrides.') ? '未来会话／下一轮模型覆盖' : path.startsWith('subagent-model-selection.') ? '子 Agent 模型范围' : path))
   return <div>
     <p className="dmm-muted">只在应用时写入；处理冲突和引用不会调用 LLM。选中操作整体应用。</p>
@@ -32,13 +32,15 @@ export function CatalogPreviewPanel({ view, selected, busy, onResolve }: { view:
   </div>
 }
 
-export function LegacyPreferencesManager({ config, dirty, externalBusy, backupId, onApplied, notify, onBusyChange }: {
-  config: ManagerConfig; dirty: boolean; externalBusy: boolean; backupId?: string
+export function LegacyPreferencesManager({ config, dirty, externalBusy, backupId, onApplied, notify, onBusyChange, aliasCount }: {
+  config: ManagerConfig; dirty: boolean; externalBusy: boolean; backupId?: string; aliasCount?: number
   onApplied: (snapshot: { config: ManagerConfig; [key: string]: unknown }) => void
   notify: (kind: 'info' | 'success' | 'error', message: string) => void; onBusyChange: (busy: boolean) => void
 }) {
   const [view, setView] = useState<CatalogPreview | null>(null), [working, setWorking] = useState(false), [error, setError] = useState('')
-  const busy = working || externalBusy, exists = Object.hasOwn(config.auto, 'preferences')
+  const busy = working || externalBusy, exists = aliasCount === undefined ? Object.hasOwn(config.auto, 'preferences') : aliasCount > 0
+  const aliasCleanup = aliasCount !== undefined, title = aliasCleanup ? '旧别名恢复策略' : '旧分工偏好'
+  const operation = aliasCleanup ? 'clearLegacyAliasReliability' : 'clearLegacyPreferences'
   useEffect(() => { setView(null); setError('') }, [config, dirty])
   const act = async (action: () => Promise<void>) => {
     if (dirty || busy) return
@@ -48,13 +50,13 @@ export function LegacyPreferencesManager({ config, dirty, externalBusy, backupId
   }
   if (!exists && !backupId) return null
   return <div className="dmm-card">
-    {exists && <><strong>旧分工偏好已停用</strong><p className="dmm-muted">这些历史设置已不再用于子任务分工。清理只移除旧偏好，保留旧主模型、视觉兜底和官方子 Agent 设置。</p><details><summary>查看旧偏好</summary><pre>{JSON.stringify(config.auto.preferences, null, 2)}</pre></details>
-      <button disabled={busy || dirty} onClick={() => void act(async () => { setView(null); setView(await catalogRequest('catalog-preview', { operations: [{ kind: 'clearLegacyPreferences' }] })) })}>预览清理</button></>}
-    {backupId && <button disabled={busy || dirty} onClick={() => void act(async () => { const result = await catalogRequest('catalog-restore', { backupId }); setView(null); onApplied(result.snapshot); notify('success', '已恢复最近操作；旧分工偏好仍处于停用状态。') })}>恢复最近操作</button>}
+    {exists && <><strong>{title}已停用</strong><p className="dmm-muted">{aliasCleanup ? `${aliasCount} 个别名有旧策略。清理只删除旧次数、重试和降级字段，保留候选、推理档位、未知设置及全部使用引用。` : '这些历史设置已不再用于子任务分工。清理只移除旧偏好，保留旧主模型、视觉兜底和官方子 Agent 设置。'}</p>{!aliasCleanup && <details><summary>查看旧偏好</summary><pre>{JSON.stringify(config.auto.preferences, null, 2)}</pre></details>}
+      <button disabled={busy || dirty} onClick={() => void act(async () => { setView(null); setView(await catalogRequest('catalog-preview', { operations: [{ kind: operation }] })) })}>预览清理</button></>}
+    {backupId && <button disabled={busy || dirty} onClick={() => void act(async () => { const result = await catalogRequest('catalog-restore', { backupId }); setView(null); onApplied(result.snapshot); notify('success', `已恢复最近操作；${title}仍处于停用状态。`) })}>恢复最近操作</button>}
     {dirty && <p className="dmm-dirty">有未保存的插件草稿。先保存，或点“重新加载”放弃草稿，再重新预览。</p>}
     {error && <p role="alert" className="dmm-error">{error}</p>}
     {view && <><CatalogPreviewPanel view={view} selected={view.selected} busy={busy || dirty} onResolve={(selected, resolutions) => void act(async () => { setView(await catalogRequest('catalog-resolve', { token: view.token, selected, resolutions })) })} />
-      <button className="dmm-primary" disabled={busy || dirty || !view.selected.length} onClick={() => void act(async () => { const result = await catalogRequest('catalog-apply', { token: view.token, selected: view.selected }); setView(null); onApplied(result.snapshot); notify('success', '已清理旧分工偏好，可恢复本次操作。') })}>应用清理</button>
+      <button className="dmm-primary" disabled={busy || dirty || !view.selected.length} onClick={() => void act(async () => { const result = await catalogRequest('catalog-apply', { token: view.token, selected: view.selected }); setView(null); onApplied(result.snapshot); notify('success', `已清理${title}，可恢复本次操作。`) })}>应用清理</button>
       <button disabled={busy} onClick={() => setView(null)}>取消清理</button></>}
   </div>
 }

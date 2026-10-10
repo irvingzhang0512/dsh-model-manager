@@ -1,12 +1,28 @@
 import { describe, expect, it, vi } from 'vitest'
 import { registerManagerTools } from '../src/tools.ts'
-import { VisionRegistry } from '../src/adapter.ts'
+import { ManagedAdapter, VisionRegistry } from '../src/adapter.ts'
 import { DEFAULT_CONFIG } from '../src/domain.ts'
 import sharp from 'sharp'
 
 vi.mock('@deepseek-ai/dsh-tools', () => ({ defineTool: (options: unknown) => options }))
 
 describe('视觉工具', () => {
+  it.each(['stop', 'tool-calls', 'max-tokens'])('视觉别名首候选额度耗尽后切下一候选，%s 正常结束仅缓存成功文字', async kind => {
+    const config = structuredClone(DEFAULT_CONFIG), vision = new VisionRegistry(), registered = new Map<string, any>()
+    const models = ['first', 'second'].map(providerId => ({ providerId, modelId: 'image', name: providerId, loaded: true, nativeImage: 'yes', reasoningEfforts: [], source: 'host' }))
+    config.aliases.images = { candidates: models }; config.vision = { enabled: true, policy: 'sidecar-only', target: '@images' }
+    vision.add('s', [{ attachmentId: 'image', mediaType: 'image/png', bytes: 1 } as never])
+    const calls: string[] = [], cache = vi.fn(async () => {})
+    const service = { snapshot: () => ({ config: structuredClone(config), models: structuredClone(models), revision: 1 }), signature: () => 'sig', getVisionCache: () => undefined, putVisionCache: cache, log: vi.fn(async () => {}), isDelegatedSession: () => false, activeTurn: () => 1 }
+    const llm = { resolveModelInfo: async () => ({ inputModalities: ['image'] }), stream: (options: any) => (async function* () {
+      calls.push(options.provider); yield { type: 'text-delta', index: 0, text: options.provider === 'first' ? 'discard' : '红色' }
+      yield options.provider === 'first' ? { type: 'finish', reason: { kind: 'error', failure: { code: 'QUOTA', message: 'quota' } } } : { type: 'finish', reason: { kind } }
+    })() }
+    const adapter = new ManagedAdapter(llm as never, service as never, vision)
+    registerManagerTools({ tools: { register: (tool: any) => { registered.set(tool.name, tool); return () => {} } }, llm, service, vision, adapter, attachments: { readImage: async () => ({ data: new Uint8Array([1]) }) } } as never)
+    expect(await registered.get('model_manager_inspect_image').execute({ attachment_id: 'image', question: '颜色？' }, { agent: { session: { id: 's' } }, signal: new AbortController().signal })).toBe('红色')
+    expect(calls).toEqual(['first', 'second']); expect(cache).toHaveBeenCalledWith(expect.any(String), '红色')
+  })
   it('区域参数实际裁剪像素，并让视觉模型收到裁剪附件', async () => {
     const registered = new Map<string, any>()
     const config = structuredClone(DEFAULT_CONFIG)

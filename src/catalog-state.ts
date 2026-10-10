@@ -4,6 +4,7 @@ import { OFFICIAL_PROVIDER, type OfficialAnalysis, type OfficialDiff } from './o
 import type { CatalogChoice, CatalogDiff, CatalogIntent, ModelCatalogIntent, CatalogOperation, CatalogProfile, CatalogReference, CatalogResolution, CatalogState } from './catalog-types.js'
 import { planAliasRemoval } from './alias-removal.js'
 import { validateParameterModel, object } from './model-parameters.js'
+import { cleanLegacyAliasReliability } from './legacy-alias.js'
 
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b)
 const isRef = (value: unknown): value is ModelRef => !!value && typeof (value as ModelRef).providerId === 'string' && typeof (value as ModelRef).modelId === 'string'
@@ -12,6 +13,11 @@ export function manualIntents(input: unknown, state: CatalogState): CatalogInten
   if (!Array.isArray(input) || !input.length || input.length > 100) throw new Error('请输入 1–100 项目录操作')
   const seen = new Set<string>()
   return input.map((item: CatalogOperation) => {
+    if (item?.kind === 'clearLegacyAliasReliability') {
+      if (input.length !== 1 || Object.keys(item).some(key => key !== 'kind')) throw new Error('旧别名策略清理须单独提交且不能包含其他字段')
+      if (!state.legacyAliases?.length) throw new Error('无需清理旧别名策略')
+      return { id: 'clearLegacyAliasReliability', kind: item.kind, path: 'aliases' }
+    }
     if (item?.kind === 'clearLegacyImageOverrides') {
       if (input.length !== 1 || Object.keys(item).some(key => key !== 'kind')) throw new Error('旧图片声明清理须单独提交')
       if (!state.legacyImages?.length) throw new Error('无需清理旧图片声明')
@@ -171,6 +177,14 @@ export function planCatalog(before: CatalogState, intents: CatalogIntent[], reso
     }
   }
   for (const intent of intents) {
+    if (intent.kind === 'clearLegacyAliasReliability') {
+      if (intents.length !== 1) throw new Error('旧别名策略清理须单独提交')
+      const after = cleanLegacyAliasReliability({ aliases: state.rawAliases })
+      operations.push({ id: intent.id, kind: intent.kind, path: intent.path, before: structuredClone(state.rawAliases), after,
+        references: [], attachedSettings: [], conflicts: [], choices: [], blockedReasons: [] })
+      if (!selected || selected.includes(intent.id)) { state.legacyAliases = []; state.rawAliases = after }
+      continue
+    }
     if (intent.kind === 'clearLegacyImageOverrides') {
       if (intents.length !== 1) throw new Error('旧图片声明清理须单独提交')
       operations.push({ id: intent.id, kind: intent.kind, path: intent.path, before: structuredClone(state.legacyImages), after: null, references: [], attachedSettings: [], conflicts: [], choices: [], blockedReasons: [] })

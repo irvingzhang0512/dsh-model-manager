@@ -286,7 +286,10 @@ export function migrateConfig(input: unknown): ManagerConfig {
   const aliases: Record<string, AliasConfig> = {}
   for (const [name, value] of Object.entries(raw.aliases ?? {})) {
     if (Array.isArray(value)) aliases[name] = { candidates: value }
-    else if (value && Array.isArray((value as AliasConfig).candidates)) aliases[name] = value as AliasConfig
+    else if (value && Array.isArray((value as AliasConfig).candidates)) {
+      const { reliability: _legacy, ...alias } = structuredClone(value as AliasConfig)
+      aliases[name] = alias
+    }
   }
   const reliability = { maxAttempts: raw.reliability?.maxAttempts ?? 3, retryTransient: raw.reliability?.retryTransient ?? true, parameterDowngrade: raw.reliability?.parameterDowngrade ?? false }
   const longContext = raw.reliability?.longContextCandidates ?? []
@@ -330,9 +333,7 @@ export function validateConfig(config: ManagerConfig): void {
     if (!/^[a-z][a-z0-9_-]*$/.test(name) || !alias || !Array.isArray(alias.candidates) || !alias.candidates.length) throw new Error(`无效别名：${name}`)
     for (const ref of alias.candidates) if (!isValidRef(ref)) throw new Error(`别名 ${name} 只能引用具体模型`)
     if (alias.efforts && Object.values(alias.efforts).some(value => typeof value !== 'string' || !value)) throw new Error(`别名 ${name} 的推理档位无效`)
-    const override = alias.reliability
-    if (override !== undefined && (typeof override !== 'object' || override === null)) throw new Error(`别名 ${name} 的兜底覆盖无效`)
-    if (override?.maxAttempts !== undefined && (!Number.isInteger(override.maxAttempts) || override.maxAttempts < 1 || override.maxAttempts > 3)) throw new Error(`别名 ${name} 的尝试次数必须为 1–3`)
+    // 旧别名策略仅在原始层等待独立清理，不参与有效配置校验。
   }
   if (config.auto?.main?.target) resolveSelection(config, config.auto.main.target)
   if (config.auto.enabled) {

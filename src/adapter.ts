@@ -1,4 +1,4 @@
-import { LlmAdapter, type ContentBlock, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type PreparedAdapterCall, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, type ContentBlock, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type PreparedAdapterCall, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createHash, randomUUID } from 'node:crypto'
@@ -6,6 +6,7 @@ import { classifyFailure, fromManagedId, LONG_CONTEXT_ALIAS, managedId, mergeSel
 import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
 import { candidateForGrade, evaluateTask, type AutoDecision } from './auto-router.js'
+import { abortable, aliasMetadata, aliasStream, type AliasRequest } from './alias-runtime.js'
 
 export const MANAGED_PROVIDER = 'dsh-model-manager'
 /** 选择器里的 AUTO 条目：托管模式，按 auto.main 决定主模型，没配目标时回退到宿主默认模型。 */
@@ -38,11 +39,15 @@ function requestedModel(id: string, config: ManagerConfig, fallback?: ModelRef):
   return [fromManagedId(id)]
 }
 
-/** 解析一次请求生效的兜底策略：别名条目用别名覆盖叠在全局默认上，其余用全局默认。 */
-function effectiveReliability(config: ManagerConfig, id: string): ManagerConfig['reliability'] {
-  const base = { ...config.reliability }
-  if (id.startsWith('alias:')) return { ...base, ...config.aliases[id.slice(6)]?.reliability }
-  return base
+/** 全局策略只用于具体模型；别名执行固定的独立恢复规则。 */
+function effectiveReliability(config: ManagerConfig): ManagerConfig['reliability'] {
+  return { ...config.reliability }
+}
+
+function entryAlias(config: ManagerConfig, id: string): string | undefined {
+  if (id.startsWith('alias:')) return id.slice(6)
+  const target = id === AUTO_MODEL_ID ? (config.auto.enabled ? config.auto.normal.target : config.auto.main.target) : undefined
+  return typeof target === 'string' ? target.slice(1) : undefined
 }
 
 /** 受管理条目参数基线：AUTO 用 auto.main，其余条目是固定模型、不带全局基线。 */
@@ -51,13 +56,24 @@ function baseSelection(config: ManagerConfig, id: string): Selection {
 }
 
 export class ManagedAdapter extends LlmAdapter {
+  private lifetime = new AbortController()
   private cooldown = new Map<string, number>()
   private pendingAuto = new Map<string, Promise<AutoDecision>>()
   constructor(private readonly llm: LlmRuntime, private readonly service: ModelManagerService, private readonly vision: VisionRegistry) { super() }
+  dispose(): void { this.lifetime.abort(new Error('模型管理已卸载')) }
 
   providerInfo(): LlmProviderInfo { return { id: MANAGED_PROVIDER, name: '模型管理' } }
   providerRetryPolicy() { return { mode: 'normal' as const, maxRetries: 0, retryableCodes: [], initialDelayMs: 500, maxDelayMs: 10000, jitterRatio: 0.1 } }
   imageRequestPricing() { return undefined }
+
+  /** 内部视觉请求使用自己的别名，不能继承主会话覆盖或再次触发 AUTO。 */
+  streamAlias(name: string, options: GenerateOptions, nativeOnly = false, captured?: ReturnType<ModelManagerService['snapshot']>): AsyncIterable<StreamChunk> {
+    const snapshot = structuredClone(captured ?? this.service.snapshot())
+    if (nativeOnly) snapshot.config.vision.enabled = false
+    return this.streamWithSnapshot({ ...options, provider: MANAGED_PROVIDER, model: `alias:${name}` }, snapshot.config,
+      nativeOnly ? snapshot.models.filter(model => model.nativeImage === 'yes') : snapshot.models,
+      resolveSelection(snapshot.config, `@${name}`), { target: `@${name}` }, snapshot.config.reliability, true)
+  }
 
   async listModels(): Promise<readonly LlmModelInfo[]> {
     const { config } = this.service.snapshot()
@@ -71,9 +87,11 @@ export class ManagedAdapter extends LlmAdapter {
 
   async resolveModel(_provider: string, id: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     const config = this.service.snapshot().config
-    const candidate = requestedModel(id, config, this.service.hostDefault())[0]
+    const candidates = requestedModel(id, config, this.service.hostDefault())
+    const candidate = candidates[0]
     if (!candidate) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 自动选模型」配置执行模型，或设置宿主默认模型' : '未配置可用模型')
-    const info = await this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, signal)
+    const aliasSignal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
+    const info = entryAlias(config, id) ? await aliasMetadata(this.llm, candidates, aliasSignal) : await this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, signal)
     return { ...info, provider: MANAGED_PROVIDER, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
   }
 
@@ -81,14 +99,15 @@ export class ManagedAdapter extends LlmAdapter {
     const snapshot = this.service.snapshot()
     const candidates = requestedModel(id, snapshot.config, this.service.hostDefault())
     if (!candidates.length) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 自动选模型」配置执行模型，或设置宿主默认模型' : '未配置可用模型')
-    const info = await this.llm.resolveModelInfo(candidates[0].providerId, candidates[0].modelId, signal)
+    const aliasSignal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
+    const info = entryAlias(snapshot.config, id) ? await aliasMetadata(this.llm, candidates, aliasSignal) : await this.llm.resolveModelInfo(candidates[0].providerId, candidates[0].modelId, signal)
     const model: LlmResolvedModelInfo = { ...info, provider, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
     return { model, stream: (options: GenerateOptions) => {
       const session = options.sessionId as string || 'one-shot'
       const delegated = this.service.isDelegatedSession(session)
       const override = delegated ? undefined : this.service.activeSelection(session)
       const selection = delegated ? {} : mergeSelection(baseSelection(snapshot.config, id), override)
-      return this.streamWithSnapshot(options, snapshot.config, snapshot.models, candidates, selection, effectiveReliability(snapshot.config, id), !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
+      return this.streamWithSnapshot(options, snapshot.config, snapshot.models, candidates, selection, effectiveReliability(snapshot.config), !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
     } }
   }
 
@@ -99,10 +118,11 @@ export class ManagedAdapter extends LlmAdapter {
     const delegated = this.service.isDelegatedSession(session)
     const override = delegated ? undefined : this.service.activeSelection(session)
     const selection = delegated ? {} : mergeSelection(baseSelection(config, options.model), override)
-    yield* this.streamWithSnapshot(options, config, snapshot.models, requestedModel(options.model, config), selection, effectiveReliability(config, options.model), !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
+    yield* this.streamWithSnapshot(options, config, snapshot.models, requestedModel(options.model, config), selection, effectiveReliability(config), !!override && (override.thinking === 'off' || !!override.tier && !['auto', 'inherit'].includes(override.tier) || override.maxOutputTokens !== undefined))
   }
 
   private async *streamWithSnapshot(options: GenerateOptions, config: ManagerConfig, models: ModelRecord[], candidates: ModelRef[], selection: ReturnType<ModelManagerService['activeSelection']>, reliability: ManagerConfig['reliability'], lockedParams: boolean): AsyncIterable<StreamChunk> {
+    options = { ...options, messages: structuredClone(options.messages), tools: options.tools && structuredClone(options.tools) }
     const session = options.sessionId as string || 'one-shot'
     const managedRequestId = randomUUID()
     const turn = this.service.activeTurn(session)
@@ -138,10 +158,45 @@ export class ManagedAdapter extends LlmAdapter {
           })().finally(() => this.pendingAuto.delete(key))
           this.pendingAuto.set(key, pending)
         }
-        decision = await pending
+        const signal = options.signal ? AbortSignal.any([options.signal, this.lifetime.signal]) : this.lifetime.signal
+        decision = await abortable(pending, signal)
       }
       chosen = mergeSelection(decision.selection, chosen)
       queue = [...decision.candidates]
+    }
+    const aliasName = typeof chosen.target === 'string' ? chosen.target.slice(1) : chosen.target ? undefined : entryAlias(config, options.model)
+    if (aliasName) {
+      // AUTO 的兼容筛选用于选择等级；一旦选定别名，按原队列逐个处理全部候选。
+      queue = resolveSelection(config, `@${aliasName}`)
+      const signal = options.signal ? AbortSignal.any([options.signal, this.lifetime.signal]) : this.lifetime.signal
+      yield* aliasStream(this.llm, queue, signal, async (candidate, candidateSignal): Promise<AliasRequest> => {
+        const model = models.find(item => modelKey(item) === modelKey(candidate))
+        if (!model || !model.loaded) throw new LlmError('候选模型未加载', 'MODEL_UNAVAILABLE')
+        await abortable(this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, candidateSignal), candidateSignal)
+        const nativeImage = model.nativeImage
+        const route = allImages.length && config.vision.enabled ? visionRoute(config.vision.policy, nativeImage, !!config.vision.target) : nativeImage === 'yes' ? 'native' : allImages.length ? historicalOnly ? 'history' : 'error' : 'native'
+        if (route === 'error') throw new LlmError('当前模型不支持图片，且视觉辅助不可用', 'IMAGE_UNSUPPORTED')
+        const aliasEffort = config.aliases[aliasName]?.efforts?.[modelKey(candidate)]
+        const effort = this.service.isDelegatedSession(session) ? options.reasoningEffort : genericProviderAdapter.reasoningEffort(model, config.models[modelKey(candidate)], aliasEffort ? { ...chosen, reasoningEffort: aliasEffort } : chosen)
+        const prepared = route === 'sidecar' || route === 'history' ? this.sidecarMessages(options.messages, route === 'history') : options.messages
+        const toWire = new Map<string, string>(), fromWire = new Map<string, string>()
+        const names = [...(options.tools?.map(tool => tool.name as string) ?? []), ...options.messages.flatMap(message => message.content.filter(block => block.type === 'tool-call').map(block => block.name))]
+        const reserved = new Set(names)
+        for (const name of names) {
+          if (/^[a-zA-Z0-9_-]+$/.test(name) || toWire.has(name)) continue
+          let wire = `dmm_${createHash('sha256').update(name).digest('hex').slice(0, 24)}`
+          while (reserved.has(wire)) wire += '_'
+          reserved.add(wire); toWire.set(name, wire); fromWire.set(wire, name)
+        }
+        if (toWire.size) await abortable(this.service.log({ session, turn, managedRequestId, action: 'tool-name-mapping', provider: candidate.providerId, model: candidate.modelId, names: [...toWire.keys()] }), candidateSignal)
+        return { route, request: { ...options, provider: candidate.providerId, model: candidate.modelId,
+          messages: prepared.map(message => ({ ...message, content: message.content.map(block => block.type === 'tool-call' && toWire.has(block.name) ? { ...block, name: toWire.get(block.name)! } : block) })),
+          tools: options.tools?.map(tool => toWire.has(tool.name as string) ? { ...tool, name: toWire.get(tool.name as string)! as never, description: `宿主工具 ${tool.name}。${tool.description}` } : tool),
+          reasoningEffort: effort as GenerateOptions['reasoningEffort'] ?? options.reasoningEffort, maxTokens: chosen.maxOutputTokens ?? options.maxTokens },
+          restore: chunk => chunk.type === 'tool-call-delta' && chunk.name && fromWire.has(chunk.name) ? { ...chunk, name: fromWire.get(chunk.name)! }
+            : chunk.type === 'block-end' && chunk.block.type === 'tool-call' && fromWire.has(chunk.block.name) ? { ...chunk, block: { ...chunk.block, name: fromWire.get(chunk.block.name)! } } : chunk }
+      }, event => this.service.log({ session, turn, managedRequestId, logicalProvider: MANAGED_PROVIDER, logicalModel: options.model, ...event }))
+      return
     }
     const longContextCandidates = config.aliases[LONG_CONTEXT_ALIAS]?.candidates ?? []
     const tried = new Set<string>()

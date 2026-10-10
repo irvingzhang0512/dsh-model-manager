@@ -17,6 +17,19 @@ beforeEach(() => { hooks.states = []; hooks.cursor = 0 })
 afterEach(() => vi.unstubAllGlobals())
 
 describe('旧偏好清理界面', () => {
+  it('别名策略清理入口提交专用操作，草稿阻止预览，旧缺计数不影响偏好组件', async () => {
+    const config = structuredClone(DEFAULT_CONFIG)
+    const props = { config, aliasCount: 2, dirty: false, externalBusy: false, notify: vi.fn(), onApplied: vi.fn(), onBusyChange: vi.fn() }
+    const render = (extra = {}) => { hooks.cursor = 0; return LegacyPreferencesManager({ ...props, ...extra }) }
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ counts: [], operations: [], selected: [] })))
+    vi.stubGlobal('fetch', fetch)
+    expect(text(render())).toContain('2 个别名有旧策略')
+    nodes(render({ dirty: true })).find(n => n.type === 'button' && text(n) === '预览清理').props.onClick()
+    expect(fetch).not.toHaveBeenCalled()
+    await nodes(render()).find(n => n.type === 'button' && text(n) === '预览清理').props.onClick()
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ operations: [{ kind: 'clearLegacyAliasReliability' }] })
+  })
   it('配置预览无模型主体和数量，必须明确勾选', () => {
     const resolve = vi.fn(), view = { counts: [], operations: [{ id: 'clearLegacyPreferences', kind: 'clearLegacyPreferences', path: 'auto.preferences', before: { research: { target: '@old' } }, after: null, blockedReasons: [], choices: [], references: [], attachedSettings: [] }] } as any
     const tree = CatalogPreviewPanel({ view, selected: [], busy: false, onResolve: resolve })

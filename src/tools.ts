@@ -6,7 +6,7 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { modelKey, resolveSelection } from './domain.js'
 import type { ModelManagerService } from './service.js'
-import type { VisionRegistry } from './adapter.js'
+import type { ManagedAdapter, VisionRegistry } from './adapter.js'
 
 async function cropImage(data: Uint8Array, region: string): Promise<Buffer> {
   const parts = region.split(',').map(value => Number(value.trim()))
@@ -23,7 +23,7 @@ async function cropImage(data: Uint8Array, region: string): Promise<Buffer> {
   return sharp(source).extract({ left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) }).png().toBuffer()
 }
 
-export function registerManagerTools(deps: { tools: ToolRuntime; llm: LlmRuntime; attachments: AttachmentStore; service: ModelManagerService; vision: VisionRegistry }): () => void {
+export function registerManagerTools(deps: { tools: ToolRuntime; llm: LlmRuntime; attachments: AttachmentStore; service: ModelManagerService; vision: VisionRegistry; adapter?: ManagedAdapter }): () => void {
   const disposers: (() => void)[] = []
 
   disposers.push(deps.tools.register(defineTool({
@@ -39,15 +39,21 @@ export function registerManagerTools(deps: { tools: ToolRuntime; llm: LlmRuntime
       const session = exec.agent?.session.id as string || 'one-shot'
       const ref = deps.vision.get(session, args.attachment_id)
       if (!ref) throw new Error('附件不属于当前会话或引用已过期')
-      const config = deps.service.snapshot().config
+      const snapshot = deps.service.snapshot(), config = snapshot.config
       if (!config.vision.enabled) throw new Error('视觉辅助未启用')
-      const target = resolveSelection(config, config.vision.target ?? config.auto.roles.vision.target)[0]
+      const selection = config.vision.target ?? config.auto.roles.vision.target
+      const alias = typeof selection === 'string' ? selection.slice(1) : undefined
+      const candidates = resolveSelection(config, selection)
+      const target = candidates[0]
       if (!target) throw new Error('尚未绑定视觉模型')
-      const info = await deps.llm.resolveModelInfo(target.providerId, target.modelId, exec.signal)
-      if (!info.inputModalities?.includes('image')) throw new Error('视觉模型未声明原生图片能力')
+      const signatures = candidates.map(candidate => [modelKey(candidate), deps.service.signature(candidate)])
+      if (!alias) {
+        const info = await deps.llm.resolveModelInfo(target.providerId, target.modelId, exec.signal)
+        if (!info.inputModalities?.includes('image')) throw new Error('视觉模型未声明原生图片能力')
+      } else if (!deps.adapter) throw new Error('视觉别名恢复入口不可用')
       const image = await deps.attachments.readImage(ref, exec.signal)
       const imageHash = createHash('sha256').update(image.data).digest('hex')
-      const key = createHash('sha256').update(JSON.stringify([session, imageHash, args.question, args.region ?? '', modelKey(target), deps.service.snapshot().revision, deps.service.signature(target)])).digest('hex')
+      const key = createHash('sha256').update(JSON.stringify([session, imageHash, args.question, args.region ?? '', signatures, snapshot.revision])).digest('hex')
       const cached = deps.service.getVisionCache(key)
       if (cached) {
         await deps.service.log({ action: 'vision', session, provider: target.providerId, model: target.modelId, status: 'cache-hit' })
@@ -60,9 +66,10 @@ export function registerManagerTools(deps: { tools: ToolRuntime; llm: LlmRuntime
         const prompt = `${args.question}${args.region ? '\n这张图是原图指定区域的裁剪。' : ''}`
         const messages: GenerateOptions['messages'] = [{ id: `model-manager:${Date.now()}` as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: prompt }, { type: 'image', attachment: visualRef }] }]
         let result = ''
-        for await (const chunk of deps.llm.stream({ provider: target.providerId, model: target.modelId, messages, signal: exec.signal, sessionId: session as never })) {
+        const options = { provider: target.providerId, model: target.modelId, messages, signal: exec.signal, sessionId: session as never }
+        for await (const chunk of alias ? deps.adapter!.streamAlias(alias, options, true, snapshot) : deps.llm.stream(options)) {
           if (chunk.type === 'text-delta') result += chunk.text
-          if (chunk.type === 'finish' && chunk.reason.kind !== 'stop') throw new Error(`视觉调用失败：${chunk.reason.kind}`)
+          if (chunk.type === 'finish' && chunk.reason.kind !== 'stop' && !(alias && ['tool-calls', 'max-tokens'].includes(chunk.reason.kind))) throw new Error(`视觉调用失败：${'failure' in chunk.reason ? chunk.reason.failure.message : chunk.reason.kind}`)
         }
         if (!result) throw new Error('视觉模型未返回可用文字')
         await deps.service.putVisionCache(key, result)

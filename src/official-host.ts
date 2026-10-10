@@ -15,6 +15,7 @@ import type { CatalogIntent, CatalogPreview, CatalogResolution, CatalogState } f
 import { migrateConfig, validateConfig, fromManagedId, type ManagerConfig, type ModelRef } from './domain.js'
 import { isSettingsConflict, ModelManagerService, resolveDataDir } from './service.js'
 import { legacyImageOverrides, cleanLegacyImages } from './legacy-image.js'
+import { legacyAliasReliability, cleanLegacyAliasReliability } from './legacy-alias.js'
 import { readParameterCatalog } from './parameter-catalog.js'
 import { describeParameterTargets, defaultParameterFields, parameterIntents, setField, type ParameterAnalysis, type ModelParameterPreview } from './model-parameters.js'
 import { analyzeModelParameters, createParameterSearch, platformOfficialHosts } from './parameter-analysis.js'
@@ -116,12 +117,12 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       const modelSettings = (value?: Record<string, unknown>) => structuredClone(Object.fromEntries(Object.entries(value ?? {}).filter(([k]) => ['models', 'modelOverrides', 'defaultContextWindow', 'defaultMaxTokens', 'defaultInput', 'compat'].includes(k))))
       profiles.push({ providerId: capability.providerId, ns, path, models, explicit, overrides, addConstraints, effective: { ...modelSettings(effective), ...(effective?.api ? { api: effective.api } : {}) }, user: modelSettings(user), base: modelSettings(baseProfile), userFields: Object.fromEntries(models.map(model => [model.id, Object.keys(original.find(m => m.id === model.id) ?? overrides?.[model.id] ?? {})])), minimumModels: capability.minimumModels })
     }
-    return { ...base, profiles, records: service.snapshot().models, legacyImages: legacyImageOverrides(raw('dsh-model-manager')), models: profiles.find(p => p.providerId === OFFICIAL_PROVIDER)?.models ?? base.models }
+    return { ...base, profiles, records: service.snapshot().models, legacyImages: legacyImageOverrides(raw('dsh-model-manager')), legacyAliases: legacyAliasReliability(raw('dsh-model-manager')), rawAliases: structuredClone(raw('dsh-model-manager')?.aliases), models: profiles.find(p => p.providerId === OFFICIAL_PROVIDER)?.models ?? base.models }
   }
   const fingerprint = (state: CatalogState) => canonical([state.profiles, service.snapshot().models])
   const present = (state: CatalogState, intents: CatalogIntent[], origin: CatalogPreview['origin'], choices: CatalogResolution[] = [], selected?: string[]): CatalogPreview => {
     const plan = planCatalog(state, intents, choices, selected)
-    const cleanup = intents.some(i => i.kind === 'clearLegacyPreferences' || i.kind === 'clearLegacyImageOverrides')
+    const cleanup = intents.some(i => i.kind === 'clearLegacyPreferences' || i.kind === 'clearLegacyImageOverrides' || i.kind === 'clearLegacyAliasReliability')
     const picked = selected ?? plan.operations.filter(o => o.kind !== 'remove' && o.kind !== 'removeAlias' && o.model && !o.blockedReasons.length).map(o => o.id)
     const simulated = planCatalog(state, intents, choices, picked)
     return { token: randomUUID(), origin, fetchedAt: new Date().toISOString(), operations: plan.operations, selected: picked, writesPlugin: cleanup || origin === 'official' || !same(state.config, simulated.after.config), counts: cleanup ? [] : state.profiles.map(p => ({ providerId: p.providerId, before: p.models.length, after: simulated.after.profiles.find(q => q.providerId === p.providerId)!.models.length, operationCount: plan.operations.filter(o => o.model?.providerId === p.providerId && picked.includes(o.id) && !o.blockedReasons.length).length })), revisions: revisions(), catalogFingerprint: fingerprint(state), overridesFingerprint: service.futureOverridesFingerprint() }
@@ -150,6 +151,11 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
     return [...grouped.values()]
   }
   const catalogWrites = (before: CatalogState, after: CatalogState): Write[] => {
+    if (before.legacyAliases?.length && !after.legacyAliases?.length) {
+      const desc = ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')!
+      const path = ['aliases'], value = at(desc.user, path)
+      return [{ ns: desc.ns, revision: desc.revision, fields: [{ path, before: structuredClone(value), had: value !== undefined, after: cleanLegacyAliasReliability(desc.user) }] }]
+    }
     if (before.legacyImages?.length && !after.legacyImages?.length) {
       const desc = ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')!
       const path = ['models'], value = at(desc.user, path)
