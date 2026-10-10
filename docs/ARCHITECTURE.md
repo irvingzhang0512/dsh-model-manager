@@ -1,6 +1,6 @@
 # 架构契约（v3）
 
-## 智能补全已有模型参数（文档版 model-parameters-20261010-v1，待确认／待实现）
+## 智能补全已有模型参数（文档版 model-parameters-20261010-v2，待确认／待实现）
 
 对应 SPEC F011 及 F001／F006／F009。本节基线 0.10.0／`5e33bec0bf1b66aeeac92a79cf86c2d7a3fd301b`，规划 0.11.0；尚无本功能源码，既有目录／官方事务继续按已实现契约运行。用户已要求实施计划，具体本版文档尚待明确确认。本节不改变原官方清单完整性、替代／迁移、原生 Subagent 或旧偏好停用规则。
 
@@ -60,15 +60,36 @@ SSE 事件 progress／result／error 与 15 秒 keepalive；progress 含 stage�
 
 选中字段须先合并到原始模型，按对应宿主公开 schema／协议验证并重新推导有效图片、容量、输出和档位。不单纯沿用旧 service.records 的能力判断；推理映射更改后检查全部仍有效的 AUTO／别名／旧主模型／视觉兜底／未来 session 与 nextTurn 选择。新推理映射必须使其 compat 有效，字段未选造成缺必要设置时列为阻止，不能隐式勾选其他字段。模型输出大于组合上下文等宿主非法组合拒绝，不自动修约束。
 
-图片声明与插件覆盖冲突，提供保留原值并跳过冲突字段／同步覆盖／清除覆盖继承宿主的服务端选项；有效视觉目标失去图片声明提供替换有效原生图片模型／明确关闭与清理相关目标／跳过该目标变更，保留无关视觉配置。推理引用不兼容提供公开档位／使用模型默认／跳过目标变更，不静默降档。停用 auto.preferences 不因本次补全复活或重新成为有效使用引用；旧 main／有效视觉兜底按当前已有契约处理。一个模型的选中字段与明确引用修正同组应用，未解决则阻止该模型，不拆成半完成写入。
+图片能力只从当前冻结的宿主原生目录取值，退役的插件图片字段不产生覆盖同步选项。有效视觉目标失去图片声明提供替换有效原生图片模型／明确关闭与清理相关目标／跳过该目标变更，保留无关视觉配置。推理引用不兼容提供公开档位／使用模型默认／跳过目标变更，不静默降档。停用 auto.preferences 不因本次补全复活或重新成为有效使用引用；旧 main／有效视觉兜底按当前已有契约处理。一个模型的选中字段与明确引用修正同组应用，未解决则阻止该模型，不拆成半完成写入。
 
-参数名改动遵循现有 catalogMetadata 自定义名称保护，用户采用官方名称时 customName=false、知识名称时 customName=true，保留 origin 与未知元信息。仅模型宿主字段的应用不清空插件草稿；有元信息、覆盖或引用写集时须先保存／放弃无关插件草稿并重新预览。搜索引用保存是独立单字段操作，不能顺带保存全局草稿。
+参数名改动遵循现有 catalogMetadata 自定义名称保护，用户采用官方名称时 customName=false、知识名称时 customName=true，保留 origin 与未知元信息。仅模型宿主字段的应用不清空插件草稿；有元信息、旧字段清理或引用写集时须先保存／放弃无关插件草稿并重新预览。搜索引用保存是独立单字段操作，不能顺带保存全局草稿。
 
 所有 parameter 操作进入 existing writesQueue；完整读原始 user 层／冻结 namespace revisions、目录和未来覆盖 fingerprint，按宿主配置路径构造 models／modelOverrides 字段更新，保留未知字段、不把全部有效默认 models 导出为新用户数组。不满足合法 modelOverrides 时不可写；DeepSeek 显式数组按已有完整目录事务保留其他项。备份 version:3 沿用现有状态机，origin 增加 parameter，保存 parameterAnalysis、selectedFields、原值及存在状态／写后 revision；`catalog-backups/latest.json` 增加 parameter 指针，保留 manual／official 指针和旧 v1／v2／v3 恢复范围。
 
 配置 v3 只新增可选 parameterCompletion.searchCredentialName，按 CONFIG 同版规则维护；旧配置不补空 section、不清理未知字段、不改已有模型参数或停用字段。失败回滚、坏备份 .bak、后续修改／跨重启拒绝恢复、完整响应与日志脱敏沿用 F010。实现后必须将来源判定、请求实际参数、老配置保存与恢复分别验证，不能用补全结果充当真实探测证据。
 
+## 插件图片声明退役与四项参数搜索（model-parameters-20261010-v2，待确认／待实现）
+
+对应 F012 及 F001／F003／F004／F006／F008／F009／F011，替代本节之前 v1 中“插件图片覆盖冲突同步”的未确认设计，其他全部模型参数范围、知识兜底及预览应用规则保持。原生图片 input／inputModalities、contextWindow、maxTokens、reasoningEfforts 都纳入每个目标的搜索要求；不能因为当前字段已存在而只搜图片或跳过容量／输出／档位。
+
+### 单一图片声明与验证建议
+
+- CapabilityOverride 不再公开 image。HostModelBridge 继续从宿主 resolveModelInfo.inputModalities 构造 nativeImage；AUTO compatible 和 ManagedAdapter 的请求快照只使用 nativeImage，禁止读取旧 models.*.capability.image。请求开始固定 nativeImage，目录变更只影响后续请求；unknown 保持未知，不按支持处理。
+- 图片策略、视觉目标和图片工具保留；退役字段不改变 vision.enabled／policy／target，旧辅助选择仍按宿主原生能力校验。移除模型卡片第二个图片下拉及其读写逻辑、解释文字、probeLabels 的 pluginImage 和应用计数。
+- ProbeField 缩为 hostImage；probeSuggestions 和客户端验证建议生成共用单一规则：accepted＋observed 才建议 hostImage=yes。rejected、not-observed、unknown、网络错误、取消不给原生否定建议；证据照常保存。建议应用先校验宿主可写，完成后刷新完整状态，不修改插件图片字段或要求再保存插件声明。原有临时提权与 finally 恢复契约保持。
+
+### 原始旧值识别、清理与保存
+
+- 原始 settings.describe.user／原始备份中的 models[任意键].capability.image 是退役字段，任何值都忽略；在有效 v1／v2／v3 迁移和运行校验前移除它，其他能力字段及未知键原样保留。新客户端不提交该字段，新写接口不得创建／修改退役值；旧持久值的读取仍兼容。
+- 完整 GET snapshot 增加 legacyImageOverrideCount，按原始用户层统计，含未知／未加载模型键。为保留明确清理边界，普通插件保存以原始层为基线，只在仍存在的模型设置上保留原退役叶值，不从有效配置或请求内容生成／更新该叶值；正常目录删除可以随整个模型附属设置删除并备份。原始层没有 image 时不能补回，清理后再保存／迁移／官方合并不复活。此兼容保留仅为用户清理前的原始数据保护，退役值不参与运行。
+- CatalogOperation／CatalogIntent 增加 `{kind:'clearLegacyImageOverrides'}`，只允许独立单项，通过 catalog-preview／resolve／apply／restore；无需已加载目标或可写 Provider。目标集合按原始层所有退役叶字段冻结，预览列出模型键、原值、字段是否存在和清理数，不伪造真实模型或改变模型目录计数；不可与模型修改混合，先清理后重新分析。
+- 在“智能补全参数”区域只有 count>0 时显示“旧插件图片声明已停用”的清理提醒及独立预览入口，没有新图片能力编辑器。存在插件草稿时先保存／放弃再生成清理预览，未选／取消不写；应用只 unset 明确退役叶字段，删除此次操作后变成空对象的 capability／该模型设置包装，其他键及顶层 models 保留。源字段移除导致包装为空时记录包装原值及存在状态，不能凭既有空对象清理无关内容。
+- 清理复用 manual 完整目录事务与 version:3 备份，包含全部目标原始值、存在状态、写后 revision；目录／插件配置／未来覆盖变化保守拒绝。重复清理在 count=0 时无操作，成功后提示消失、最近操作可恢复。旧备份还原 image 时只恢复历史原始值，运行仍忽略，清理提醒再次出现；不以恢复重启退役功能，不把旧值复制成宿主原生能力。
+
+验证涵盖原生 yes／no／unknown 与相反旧覆盖、真实图片／历史附件／AUTO／Sidecar 策略的统一来源；宿主探测建议、不可写、失败与取消；原始旧值各种类型、未加载模型、空包装与未知键、清理／普通保存／重复迁移、合并／旧备份恢复不复活；revision、草稿及失败回滚。与 F011 的四项参数搜索、逐字段应用和实际请求验证一起实施；实现前不得按本节改运行设置。
+
 ## 子 Agent 配置入口移除与旧偏好清理（0.10.0）
+
 
 文档版本：2026-10-10；基线 0.9.0／`ddafc33142be0423c361ee474a0bd1f1ae4cd345`，对应 SPEC F002／F003／F005／F009。用户审阅具体文档后回复“继续”明确确认，已按该版实现；实现状态：已实现。此节替代下文关于偏好提示、六标签页及插件 /subagents 路由的旧规则；历史版本契约与验证保留。配置仍为 v3，目标包版本 0.10.0。
 
