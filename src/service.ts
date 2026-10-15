@@ -55,16 +55,17 @@ export class HostModelBridge implements ModelBridge {
   }
 
   async catalog(): Promise<ModelRecord[]> {
+    const settings=this.settings.describe({redactSecrets:true})
     const providers = this.llm.listProviders().filter(p => p.id !== 'dsh-model-manager')
     const writable = new Set(this.llm.listConfigurableProviders().filter(p => ['llm-pi-ai','llm-deepseek'].includes(this.namespace(p.settingsNs))).map(p => p.provider))
-    const configured = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
+    const configured = settings.find(d=>d.ns==='llm-pi-ai')?.value as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
     const result = await Promise.all(providers.map(async provider => {
       const models = await this.llm.listModels(provider.id).catch(() => [])
       return Promise.all(models.map(async model => {
         const info = await this.llm.resolveModelInfo(provider.id, model.id).catch(() => model)
         const canWrite = writable.has(provider.id) && (provider.id === 'deepseek-official' || !configured?.providers?.[provider.id]?.models?.length || configured.providers[provider.id].models!.some(item => item.id === model.id))
         const ns=provider.id==='deepseek-official'?'llm-deepseek':'llm-pi-ai'
-        const raw=this.settings.describe?.().find(d=>d.ns===ns)?.user as any
+        const raw=settings.find(d=>d.ns===ns)?.user as any
         const profile=provider.id==='deepseek-official'?raw:raw?.providers?.[provider.id]
         const saved=profile?.models?.find((m:any)=>m.id===model.id) ?? profile?.modelOverrides?.[model.id]
         return {
@@ -77,7 +78,7 @@ export class HostModelBridge implements ModelBridge {
           defaultMaxTokens: 'defaultMaxTokens' in info ? info.defaultMaxTokens : undefined,
           source: 'host' as const, loaded: true,
           nativeEditable: canWrite,
-          nativeRevision: canWrite ? this.currentRevision({providerId:provider.id,modelId:model.id}) : undefined,
+          nativeRevision: canWrite ? settings.find(d=>d.ns===ns)?.revision : undefined,
           nativeClearable: canWrite && !configured?.providers?.[provider.id]?.models?.length,
           nativeEditReason: canWrite ? undefined : writable.has(provider.id) ? '模型不在 Provider 的可编辑配置清单中' : '该 Provider 未公开可写模型字段',
         }

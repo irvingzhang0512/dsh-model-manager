@@ -41,19 +41,34 @@ export class DesktopSettings implements SettingsProvider {
   readonly writable = true
   private revisions = new Map<string, { token: string; revision: number }>()
   private sequence = randomInt(1_000_000, 1_000_000_000)
+  private rows?: ReturnType<ConfigEditor['configuration']>
+  private readGeneration=0
   isBusy = () => false
   constructor(readonly editor: ConfigEditor, private readonly forms: SettingsForms) {}
-  row(ns: string) {
-    const rows = this.editor.configuration().filter(row => row.entry.options.name === (packages[ns] ?? '') || row.entry.options.id === ns)
-    if (rows.length !== 1) throw Error(`配置所有者不可用或不唯一：${ns}`)
+  private invalidate() { this.rows=undefined;this.readGeneration++ }
+  private configuration() {
+    if(!this.rows){
+      this.rows=this.editor.configuration()
+      const generation=this.readGeneration
+      queueMicrotask(()=>{if(this.readGeneration===generation)this.invalidate()})
+    }
+    return this.rows
+  }
+  private findRow(ns:string) {
+    const rows=this.configuration().filter(row=>row.entry.options.name===(packages[ns] ?? '') || row.entry.options.id===ns)
+    if(rows.length!==1)throw Error(`配置所有者不可用或不唯一：${ns}`)
     return rows[0]
   }
+  row(ns: string) {
+    this.invalidate()
+    return this.findRow(ns)
+  }
   namespaceFor(entryId: string) {
-    const row = this.row(entryId)
+    const row = this.findRow(entryId)
     return Object.keys(packages).find(key => packages[key] === row.entry.options.name) ?? entryId
   }
   private descriptor(ns: string): SettingsDescriptor {
-    const row = this.row(ns)
+    const row = this.findRow(ns)
     const token = revisionToken([row.entry.fiber?.uid, row.override, row.inherited])
     let current = this.revisions.get(ns)
     if (current?.token !== token) { current = { token, revision: ++this.sequence }; this.revisions.set(ns, current) }
@@ -61,11 +76,12 @@ export class DesktopSettings implements SettingsProvider {
   }
   get(ns: string): unknown { try { return this.descriptor(ns).value } catch { return undefined } }
   describe(_options?: { redactSecrets?: boolean }): SettingsDescriptor[] {
-    const names = new Set([...Object.keys(packages), ...this.editor.configuration().filter(row => row.entry.options.name?.startsWith('@deepseek-ai/dsh-llm-')).map(row => row.entry.options.id)])
+    const names = new Set([...Object.keys(packages), ...this.configuration().filter(row => row.entry.options.name?.startsWith('@deepseek-ai/dsh-llm-')).map(row => row.entry.options.id)])
     return [...names].flatMap(ns => { try { return [this.descriptor(ns)] } catch { return [] } })
   }
   async mutate(ns: string, operations: readonly SettingsPathOp[], expected: number): Promise<void> {
-    const before = this.descriptor(ns), row = this.row(ns)
+    this.invalidate()
+    const before = this.descriptor(ns), row = this.findRow(ns)
     if (before.revision !== expected) throw Error('SETTINGS_CONFLICT')
     if(operations.some(op=>!op.path.length || op.path.some(key=>['__proto__','constructor','prototype'].includes(key)))) throw Error('非法配置路径')
     const allowed: Record<string, string[]> = {
@@ -74,7 +90,7 @@ export class DesktopSettings implements SettingsProvider {
     }
     for (const op of operations) if (ns !== 'dsh-model-manager' && !allowed[ns]?.includes(op.path[0])) throw Error('该配置字段未公开可写')
     const live = this.forms.describe({ redactSecrets: true }).find(d => d.ns === row.entry.options.id)
-    if (live && (ns==='dsh-model-manager' || operations.every(op=>Object.hasOwn(live.value ?? {},op.path[0])))) { if (this.descriptor(ns).revision !== expected) throw Error('SETTINGS_CONFLICT'); await this.forms.mutate(live.ns, operations, live.revision); this.descriptor(ns); return }
+    if (live && (ns==='dsh-model-manager' || operations.every(op=>Object.hasOwn(live.value ?? {},op.path[0])))) { if (this.descriptor(ns).revision !== expected) throw Error('SETTINGS_CONFLICT'); await this.forms.mutate(live.ns, operations, live.revision); this.invalidate(); this.descriptor(ns); return }
     if (this.isBusy()) throw Error('请先停止正在运行的模型任务，再修改来源配置')
     const token = this.revisions.get(ns)!.token
     await this.editor.edit(row.entry, (current, inherited) => {
@@ -83,7 +99,7 @@ export class DesktopSettings implements SettingsProvider {
       for (const op of operations) editPath(next, op.path, op.op === 'set' ? op.value : undefined, op.op === 'unset')
       return next
     })
-    this.descriptor(ns)
+    this.invalidate();this.descriptor(ns)
   }
   async replace(ns: string, value: unknown, expected: number): Promise<void> {
     if (ns !== 'dsh-model-manager') throw Error('禁止替换整个来源配置')

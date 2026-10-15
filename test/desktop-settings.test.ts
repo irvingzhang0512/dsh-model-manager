@@ -1,9 +1,20 @@
-import {describe,expect,it} from 'vitest'
+import {describe,expect,it,vi} from 'vitest'
 import {applyOwner,describeOwners,unpack} from '../src/desktop-settings.js'
 import {hostRouteUrl} from '../src/client/transport.js'
 import {trusted} from '../src/http-trust.js'
 import {desktopFixture} from './desktop-fixture.js'
 describe('Desktop 实际所有者和配置层',()=>{
+  it('一次同步读取只重算一份宿主配置，写前重新读取并拒绝同一时刻的外部变化',async()=>{
+    const f=desktopFixture(),read=f.editor.configuration
+    f.editor.configuration=vi.fn(()=>read().map((row:any)=>({entry:row.entry,override:structuredClone(row.override),inherited:structuredClone(row.inherited)})))
+    const revision=f.settings.describe().find(d=>d.ns==='llm-deepseek')!.revision
+    f.settings.get('llm-pi-ai');f.settings.describe();f.settings.namespaceFor('deepseek-entry')
+    expect(f.editor.configuration).toHaveBeenCalledTimes(1)
+    f.raw['deepseek-entry'].baseURL='https://external.test'
+    await expect(f.settings.mutate('llm-deepseek',[{op:'set',path:['baseURL'],value:'https://overwrite.test'}],revision)).rejects.toThrow('SETTINGS_CONFLICT')
+    expect(f.raw['deepseek-entry'].baseURL).toBe('https://external.test')
+    await Promise.resolve();f.settings.describe();expect(f.editor.configuration.mock.calls.length).toBeGreaterThan(1)
+  })
   it('真实条目 ID 映射、实时字段用表单、未知字段和继承层保持',async()=>{
     const f=desktopFixture(),section=f.settings.describe().find(d=>d.ns==='llm-deepseek')!
     expect(f.settings.namespaceFor('deepseek-entry')).toBe('llm-deepseek')

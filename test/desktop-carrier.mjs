@@ -48,10 +48,13 @@ class FixtureAdapter extends LlmAdapter {
   }
 }
 let before,report={version:state.version,synthetic:true,checks:[]},exitCode=0
+const startupDeadline=Date.now()+60_000
 const call=async(method,suffix,body)=>{
   const url=new URL(ctx.connection.authenticatedUrl(`http://127.0.0.1:${ctx.webServer.port}`));url.pathname=`/api/model-manager${suffix}`
   const response=await fetch(url,{method,headers:{Origin:'dsh-app://app','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)})
-  const value=await response.json();assert.equal(response.status,200,`${suffix}: ${value.error ?? response.status}`);return value
+  const value=await response.json()
+  if(method==='GET' && suffix==='' && response.status===503 && Date.now()<startupDeadline){await new Promise(r=>setTimeout(r,100));return call(method,suffix,body)}
+  assert.equal(response.status,200,`${suffix}: ${value.error ?? response.status}`);return value
 }
 const idle=async agent=>{let timer;try{await Promise.race([agent.whenIdle(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('agent idle timeout')),15000)})])}finally{clearTimeout(timer)}}
 const create=async(model='auto',meta={})=>{const handle=await ctx.agents.create({sessionId:`session-${randomUUID()}`,meta:{cwd:path.join(state.root,'workspace'),...meta},agentOptions:{provider:'dsh-model-manager',model}});handles.push(handle);return handle.agent}

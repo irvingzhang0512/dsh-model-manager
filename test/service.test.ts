@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_CONFIG } from '../src/domain.ts'
 import { HostModelBridge, ModelManagerService } from '../src/service.ts'
+import {desktopFixture} from './desktop-fixture.js'
 
 /** 真实宿主的冲突错误形状：dsh-settings 的 SettingsConflictError（code=SETTINGS_CONFLICT，消息里没有字面量 CONFLICT）。 */
 function settingsConflict(expected: number, actual: number): Error {
@@ -11,6 +12,12 @@ function settingsConflict(expected: number, actual: number): Error {
 }
 
 describe('宿主桥接与版本控制', () => {
+  it('大目录每轮只读取一份配置层，不按模型重复重算宿主全部配置',async()=>{
+    const f=desktopFixture(),describe=vi.spyOn(f.settings,'describe')
+    const llm={listProviders:()=>[{id:'p'}],listConfigurableProviders:()=>[{provider:'p',settingsNs:'pi-entry'}],listModels:async()=>Array.from({length:50},(_,i)=>({id:`model-${i}`,name:`Model ${i}`})),resolveModelInfo:async()=>({inputModalities:['text']})}
+    const records=await new HostModelBridge(llm as never,f.settings).catalog()
+    expect(records).toHaveLength(50);expect(describe).toHaveBeenCalledTimes(1)
+  })
   it('模型覆盖只修改指定模型字段，不重写 Provider 凭据', async () => {
     const mutate = vi.fn(async () => {})
     const settings = { get: () => ({ providers: { p: { apiKeyEnv: 'SECRET_REF' } } }), mutate }

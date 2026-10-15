@@ -27,8 +27,13 @@ export declare class DesktopSettings implements SettingsProvider {
     readonly writable = true;
     private revisions;
     private sequence;
+    private rows?;
+    private readGeneration;
     isBusy: () => boolean;
     constructor(editor: ConfigEditor, forms: SettingsForms);
+    private invalidate;
+    private configuration;
+    private findRow;
     row(ns: string): {
         entry: import("@deepseek-ai/cordis-plugin-loader").Entry;
         inherited: Record<string, unknown>;
