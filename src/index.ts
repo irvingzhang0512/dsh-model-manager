@@ -167,9 +167,9 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     return agent ? ctx.tokenMeter.measure(agent.session,{config:{provider:ref.providerId,model:ref.modelId,...(options.reasoningEffort!==undefined?{reasoningEffort:options.reasoningEffort}:{}),...(options.maxTokens!==undefined?{maxTokens:options.maxTokens}:{})},...(options.tools?{tools:options.tools}:{})}).totalTokens : undefined
   }
   service.candidateSignature = async ref => {
-    if(ref.providerId==='opencode-go') {
+    if(ref.providerId==='dsh-opencode-go') {
       const value=settings.get('opencode-go') as any
-      const refs=[...new Set([value?.apiKeyEnv,...(Array.isArray(value?.accounts)?value.accounts.map((a:any)=>a.apiKeyEnv):[])].filter((name):name is string=>typeof name==='string'))]
+      const refs=[...new Set([value?.apiKeyEnv ?? 'OPENCODE_API_KEY',...(Array.isArray(value?.accounts)?value.accounts.map((a:any)=>a.apiKeyEnv):[])].filter((name):name is string=>typeof name==='string'))]
       const keys=await Promise.all(refs.map(async name=>{const found=await ctx.credentials.resolve(credentialRef(name));return [name,found?createHash('sha256').update(found.value).digest('hex'):null]}))
       return [value,keys]
     }

@@ -15,7 +15,7 @@ export function SourcePanel({dirty,disabled,onApplied,onRefresh,navigate,backupI
   const act=async(fn:()=>Promise<void>)=>{setBusy(true);setMessage('');try{await fn()}catch(e){setMessage(String(e))}finally{setBusy(false)}}
   const choose=(source?:SourceDescription,k=kind)=>{
     generation.current++;abort.current?.abort();setPreview(undefined);setCredential(undefined);setNewKey('');setSourceId(source?.sourceId)
-    setKind(source?.kind ?? k);setProvider(source?.providerId ?? (k==='deepseek'?'deepseek-official':k==='opencode-go'?'opencode-go':'ark-agent-plan'));setProfile(source?.arkProfile ?? '')
+    setKind(source?.kind ?? k);setProvider(source?.providerId ?? (k==='deepseek'?'deepseek-official':k==='opencode-go'?'dsh-opencode-go':'ark-agent-plan'));setProfile(source?.arkProfile ?? '')
     setConnection({});setMessage('')
   }
   const read=async(ref=credential)=>{

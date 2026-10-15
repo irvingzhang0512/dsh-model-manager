@@ -6,6 +6,7 @@ import {EventEmitter} from 'node:events'
 import {desktopFixture} from './desktop-fixture.js'
 import {HostModelBridge,ModelManagerService} from '../src/service.js'
 import {registerOfficialSync} from '../src/official-host.js'
+import {describeSources} from '../src/source-connections.js'
 const dirs:string[]=[]
 afterEach(async()=>{await Promise.all(dirs.splice(0).map(p=>rm(p,{recursive:true,force:true})))})
 async function fixture(){
@@ -23,6 +24,12 @@ async function fixture(){
   return {...f,call,service,secret,credentials,fetcher,ark,listing:(next:any[])=>{listing=next},dispose:()=>{disposers.reverse().forEach(d=>d?.());service.health.dispose()}}
 }
 describe('来源目录、凭据与共享事务',()=>{
+  it('OpenCode Go 使用实际宿主 Provider 标识，账号与写入继续归原插件',async()=>{
+    const f=await fixture(),listModels=vi.fn(async()=>[{id:'one'},{id:'two'}])
+    const sources=await describeSources({llm:{listProviders:()=>[{id:'dsh-opencode-go'}],listModels} as any,settings:f.settings,credentials:f.credentials,config:()=>f.service.snapshot().config})
+    expect(sources.find(s=>s.kind==='opencode-go')).toMatchObject({providerId:'dsh-opencode-go',loaded:true,modelCount:2,credential:{writable:false}})
+    expect(listModels).toHaveBeenCalledWith('dsh-opencode-go');f.dispose()
+  })
   it('来源标识只接受宿主已知关联，拒绝伪造或变更 Provider',async()=>{
     const f=await fixture()
     const result=await f.call('sources/preview',{kind:'deepseek',sourceId:'forged'})

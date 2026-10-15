@@ -43,13 +43,13 @@ export async function describeSources(deps:SourceDeps):Promise<SourceDescription
   const associations = Object.entries(deps.config().sources ?? {}).map(([sourceId,s])=>({sourceId,...s}))
   const providers = deps.llm.listProviders()
   if (!associations.some(s=>s.kind==='deepseek')) associations.push({sourceId:'deepseek',kind:'deepseek',providerId:'deepseek-official'})
-  if (!associations.some(s=>s.kind==='opencode-go')) associations.push({sourceId:'opencode-go',kind:'opencode-go',providerId:'opencode-go'})
+  if (!associations.some(s=>s.kind==='opencode-go')) associations.push({sourceId:'opencode-go',kind:'opencode-go',providerId:'dsh-opencode-go'})
   const pi = deps.settings.get('llm-pi-ai') as any
   for (const [id,p] of Object.entries(pi?.providers ?? {}) as [string,any][]) if (typeof p.baseURL==='string' && /^https:\/\/ark\.[^/]+\/api\/plan\//.test(p.baseURL) && !associations.some(s=>s.providerId===id)) associations.push({sourceId:`ark:${id}`,kind:'ark-agent-plan',providerId:id})
   if(!associations.some(s=>s.kind==='ark-agent-plan'))associations.push({sourceId:'ark-agent-plan',kind:'ark-agent-plan',providerId:'ark-agent-plan'})
   return Promise.all(associations.map(async source=>{
     const ns = owner(deps,source.kind), value=profile(deps,source.kind,source.providerId)
-    const ref = typeof value?.apiKeyEnv==='string' ? value.apiKeyEnv : undefined
+    const ref = typeof value?.apiKeyEnv==='string' ? value.apiKeyEnv : source.kind==='opencode-go' && value ? 'OPENCODE_API_KEY' : undefined
     const credential = ref ? {ref,...await deps.credentials.describe(credentialRef(ref))} : {configured:false,writable:source.kind!=='opencode-go'}
     let ownerEntryIds:string[]=[]
     try { ownerEntryIds = [deps.settings.row(ns ?? 'opencode-go').entry.options.id] } catch {}
