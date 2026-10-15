@@ -24,6 +24,14 @@ async function fixture(){
   return {...f,call,service,secret,credentials,fetcher,ark,listing:(next:any[])=>{listing=next},dispose:()=>{disposers.reverse().forEach(d=>d?.());service.health.dispose()}}
 }
 describe('来源目录、凭据与共享事务',()=>{
+  it('账号状态查询超时仍返回其他来源目录，并停止 CLI 查询且不改配置',async()=>{
+    const f=await fixture(),before=structuredClone(f.raw)
+    let aborted=false
+    f.ark.mockImplementation((_args,signal)=>new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>{aborted=true;reject(signal.reason)},{once:true})))
+    const result=await f.call('sources',{},'GET')
+    expect(result.status).toBe(200);expect(result.json.ark.available).toBe(false);expect(result.json.sources.some((s:any)=>s.kind==='deepseek' && s.loaded)).toBe(true)
+    expect(aborted).toBe(true);expect(f.raw).toEqual(before);f.dispose()
+  })
   it('实际 CLI 的 SSO 准入错误给出重授权说明，不回传原始秘密或错误正文',()=>{
     expect(arkFailureMessage('SECRET requires Volcengine Ark SSO STS; run arkcli auth login')).toBe(ARK_LOGIN_REQUIRED)
     expect(arkFailureMessage('SECRET arbitrary failure')).not.toContain('SECRET')

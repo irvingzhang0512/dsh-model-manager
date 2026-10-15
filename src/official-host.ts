@@ -347,7 +347,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService, so
       try {
         const items=await describeSources(sources)
         let ark:unknown
-        try {ark={available:true,...await arkStatus(sources,signalFor(res))}} catch(error) {ark={available:false,reason:error instanceof Error && error.message===ARK_LOGIN_REQUIRED ? ARK_LOGIN_REQUIRED : 'ArkCLI 状态不可用；可在连接来源后重试'}}
+        try {ark={available:true,...await arkStatus(sources,AbortSignal.any([signalFor(res),AbortSignal.timeout(3000)]))}} catch(error) {ark={available:false,reason:error instanceof Error && error.message===ARK_LOGIN_REQUIRED ? ARK_LOGIN_REQUIRED : 'ArkCLI 状态不可用；可在连接来源后重试'}}
         const owners=items.filter(s=>s.kind!=='opencode-go').map(s=>{
           const ns=s.kind==='deepseek'?'llm-deepseek':'llm-pi-ai',path=s.kind==='deepseek'?[]:['providers',s.providerId]
           const value=at(get(ns),path) as Record<string,unknown> | undefined
