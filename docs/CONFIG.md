@@ -1,8 +1,8 @@
-# 配置说明（当前 v3；Desktop v4 待实现）
+# 配置说明（Desktop v4／0.13.0）
 
-目标文档版：`model-manager-desktop-20261015-v1`，待具体文档确认／待实现。行为与接口见 [Desktop 0.13.0 契约](DESKTOP-0.13-20261015.md)，持久层接缝见 [升级适配契约](DSH-UPGRADE-20261011.md)。当前实际包仍 0.12.0／配置 v3；以下目标字段尚不可用，旧 settings.yaml 与 v3 条目保留为历史实现，不代表 Desktop 已迁移。
+目标文档版：`model-manager-desktop-20261015-v1`，已确认并实现；本版验证见 [验收记录](VERIFICATION-0.13.0.md)。行为与接口见 [Desktop 0.13.0 契约](DESKTOP-0.13-20261015.md)，持久层接缝见 [升级适配契约](DSH-UPGRADE-20261011.md)。当前包 0.13.0／配置 v4；下文旧 settings.yaml 与 v3 条目为历史实现，目标宿主接缝以本节为准。
 
-## Desktop v4 配置与 UI（待实现）
+## Desktop v4 配置与 UI（已实现）
 
 在既有 ManagerConfig 基础上新增下列字段；原始未知键保留。sourceKind='deepseek'|'ark-agent-plan'|'opencode-go'，TaskType='coding'|'writing'|'research'|'analysis'|'general'，TaskGrade 保持 simple／normal／complex。
 

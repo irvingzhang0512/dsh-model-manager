@@ -110,7 +110,7 @@ export async function analyzeModelParameters(llm: LlmRuntime, search: ParameterS
         analysis.analysisCount++; report('analyzing', { round, analysisStartedAt: new Date().toISOString(), analysisTimeoutSeconds: options.analysisTimeoutSeconds })
         let output = '', finished = false
         try {
-          const messages: GenerateOptions['messages'] = [{ id: randomUUID() as never, role: 'system', source: { kind: 'plugin', plugin: 'dsh-model-manager' }, content: [{ type: 'text', text: system }] }, { id: randomUUID() as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: JSON.stringify({ target, round, allowKnowledge: round === 2, pages: pages.map(({ url, text }) => ({ url, text })), priorSuggestions: suggestions, notes }) }] }]
+          const messages: GenerateOptions['messages'] = [{ id: randomUUID() as never, role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: system }] }, { id: randomUUID() as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: JSON.stringify({ target, round, allowKnowledge: round === 2, pages: pages.map(({ url, text }) => ({ url, text })), priorSuggestions: suggestions, notes }) }] }]
           for await (const chunk of abortableStream(llm.stream({ provider: options.analyzer.providerId, model: options.analyzer.modelId, messages, ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort as never } : {}), signal: roundSignal }), roundSignal)) {
             if (chunk.type === 'text-delta') output += chunk.text
             if (output.length > 2_000_000) throw new Error('参数分析输出超过上限')

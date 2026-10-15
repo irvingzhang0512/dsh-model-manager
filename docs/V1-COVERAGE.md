@@ -1,3 +1,15 @@
+## 2026-10-15 Desktop 0.13.0 实现与验收
+
+用户确认 model-manager-desktop-20261015-v1 后实施；逐层证据与限制见 [验收记录](VERIFICATION-0.13.0.md)。
+
+| 功能 | 实现入口 | 验证 |
+| --- | --- | --- |
+| F001／F007／F010／F011／F013 来源与原生声明 | desktop-settings、source-connections、official-host、client/source-panel | desktop-settings、source-connections、official-host 测试；原生六页及保存／草稿 |
+| F002／F004／F008 别名恢复及能力 | alias-health、alias-runtime、service、adapter、replay | alias-health、alias-runtime、adapter 测试；实际宿主故障／工具循环／取消 |
+| F003／F005 AUTO 和原生子任务边界 | auto-router、index、adapter | desktop-auto、auto-router；实际宿主每轮评估、fork 和原生 Subagent |
+| F006／F012 图片与调用证据 | vision-analysis、index、tools、adapter | tools、adapter；用户／工具／历史图片、原生不辅助及取消 |
+| F009 配置与迁移 | domain、desktop-settings、catalog-state | domain、service、目录事务回归；原生独立草稿和 CAS |
+
 ## 2026-10-15 Desktop 0.13.0 文档准备（待确认／待实现）
 
 - 基线 0.12.0／ff863f8a8ffae95f25a3ae4b56b1c23f7589e7a1，目标 0.13.0／Desktop 0.2.0-rc.2；文档版 model-manager-desktop-20261015-v1。用户已要求实施对话计划；本次新写具体文档待确认，不登记代码开发或目标兼容完成。

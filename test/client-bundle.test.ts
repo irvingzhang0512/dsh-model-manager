@@ -13,7 +13,7 @@ describe('客户端 bundle', () => {
     const module = loaded.factory((name: string) => name === 'react' ? react : { jsx: () => ({}), jsxs: () => ({}) })
     const slots: string[] = []
     module.apply({ slots: { inject: (name: string, callback: () => void) => { slots.push(name); callback() }, register: () => () => {} } })
-    expect(slots).toContain('settings.section')
+    expect(slots).toContain('plugins.bundle.config')
     expect(slots).not.toContain('conversation.input.left')
   })
 })

@@ -1,9 +1,10 @@
+import { trusted } from "./http-trust.js"
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile, rename, copyFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
-import type { SettingsProvider, SettingsPathOp } from '@deepseek-ai/dsh-settings'
+import type { SettingsProvider, SettingsPathOp } from './desktop-settings.js'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
@@ -19,6 +20,7 @@ import { legacyAliasReliability, cleanLegacyAliasReliability } from './legacy-al
 import { readParameterCatalog } from './parameter-catalog.js'
 import { describeParameterTargets, defaultParameterFields, parameterIntents, setField, type ParameterAnalysis, type ModelParameterPreview } from './model-parameters.js'
 import { analyzeModelParameters, createParameterSearch, platformOfficialHosts } from './parameter-analysis.js'
+import { arkStatus, describeSources, previewSource, runArk, sourceIntents, type SourceDeps, type SourceDraft, type SourceInput } from './source-connections.js'
 
 interface Host { llm: LlmRuntime; settings: SettingsProvider; credentials?: CredentialProvider; webServer: WebServer; effect: Context['effect'] }
 type Field = { path: string[]; before: unknown; had: boolean; after: unknown }
@@ -30,15 +32,11 @@ interface Backup {
 }
 const namespaces = ['llm-deepseek', 'llm-pi-ai', 'dsh-model-manager', 'agent-default-model', 'subagent-model-selection']
 function json(res: ServerResponse, status: number, value: unknown): void { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)) }
-function trusted(req: IncomingMessage): boolean {
-  if (req.headers['sec-fetch-site'] === 'cross-site') return false
-  if (!req.headers.origin) return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
-  try { return new URL(req.headers.origin).host === req.headers.host } catch { return false }
-}
 async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   let text = ''
   for await (const chunk of req) { text += chunk.toString(); if (text.length > 1024 * 1024) throw new Error('请求体过大') }
-  const value = JSON.parse(text)
+  let value: any
+  try { value = JSON.parse(text) } catch { throw new Error('请求体不是有效 JSON') }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('请求体无效')
   return value
 }
@@ -55,19 +53,20 @@ function preserveRaw(before: unknown, after: unknown, raw: unknown): unknown {
   return result
 }
 
-export function registerOfficialSync(ctx: Host, service: ModelManagerService): void {
+export function registerOfficialSync(ctx: Host, service: ModelManagerService, sources?: SourceDeps): void {
+  const lifetime=new AbortController()
   let preview: OfficialPreview | undefined, generation = 0, analysisAbort: AbortController | undefined
-  let catalog: { view: CatalogPreview | ModelParameterPreview; state: CatalogState; intents: CatalogIntent[]; resolutions: CatalogResolution[]; parameterAnalysis?: ParameterAnalysis; selectedFields?: string[] } | undefined
+  let catalog: { view: CatalogPreview | ModelParameterPreview; state: CatalogState; intents: CatalogIntent[]; resolutions: CatalogResolution[]; parameterAnalysis?: ParameterAnalysis; selectedFields?: string[]; source?: SourceDraft; selectedConnections?: string[] } | undefined
   let writesQueue = Promise.resolve()
-  const file = join(resolveDataDir(), 'official-sync-backup.json')
-  const backupDir = join(resolveDataDir(), 'catalog-backups')
+  const file = join(service.dataDir, 'official-sync-backup.json')
+  const backupDir = join(service.dataDir, 'catalog-backups')
   const revision = (ns: string) => ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === ns)?.revision ?? null
   const fullSnapshot = () => ({ ...service.snapshot(), nativeRevision: revision('llm-pi-ai') ?? undefined })
   const revisions = () => Object.fromEntries(namespaces.map(ns => [ns, revision(ns)]))
   const get = (ns: string) => ctx.settings.get(ns as never) as Record<string, unknown> | undefined
   const saveBackup = async (value: Backup | Record<string, unknown>) => {
     const destination = value.version === 3 ? join(backupDir, `${value.backupId}.json`) : file
-    await mkdir(value.version === 3 ? backupDir : resolveDataDir(), { recursive: true })
+    await mkdir(value.version === 3 ? backupDir : service.dataDir, { recursive: true })
     await writeFile(`${destination}.tmp`, JSON.stringify(value), { encoding: 'utf8', mode: 0o600 })
     try { await copyFile(destination, `${destination}.bak`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     await rename(`${destination}.tmp`, destination)
@@ -104,7 +103,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
     const capabilities = service.snapshot().catalogCapabilities
     for (const capability of capabilities.filter(c => c.canAdd)) {
       const entry = ctx.llm.listConfigurableProviders().find(p => p.provider === capability.providerId)
-      const ns = entry?.settingsNs ?? 'llm-deepseek', path = [...entry?.settingsPath ?? []]
+      const ns = entry ? ctx.settings.namespaceFor?.(entry.settingsNs) ?? entry.settingsNs : 'llm-deepseek', path = [...entry?.settingsPath ?? []]
       const effective = at(get(ns), path) as Record<string, unknown> | undefined
       const user = at(raw(ns), path) as Record<string, unknown> | undefined
       const baseProfile = at(descriptors.find(d => d.ns === ns)?.base, path) as Record<string, unknown> | undefined
@@ -141,7 +140,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
     }
     add('llm-deepseek', [[['models'], before.models, after.models]])
     // 无显式数组且选中字段变化，模型数组必须物化；即使目录表示的值未变也需要建立此数组。
-    for (const key of ['aliases', 'models', 'auto', 'vision', 'official', 'catalogMetadata'] as const) add('dsh-model-manager', [[[key], before.config[key], after.config[key]]])
+    for (const key of ['aliases', 'models', 'auto', 'vision', 'official', 'catalogMetadata', 'sources'] as const) add('dsh-model-manager', [[[key], before.config[key], after.config[key]]])
     // 同 namespace 合并为一个 CAS，不能让同一 revision 被使用两次。
     const grouped = new Map<string, Write>()
     for (const write of result) { const current = grouped.get(write.ns); if (current) current.fields.push(...write.fields); else grouped.set(write.ns, write) }
@@ -275,6 +274,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       const current = catalog
       if (!current || input.token !== current.view.token || !Array.isArray(input.selected) || !Array.isArray(input.resolutions) || input.resolutions.some(r => !r || typeof r.id !== 'string' || typeof r.optionId !== 'string')) throw new Error('预览或处理选项无效')
       await ensureCurrent(current)
+      if(input.cancel===true){catalog=undefined;preview=undefined;json(res,200,{cancelled:true});return}
       const resolutions = input.resolutions as CatalogResolution[]
       if (input.selectedFields !== undefined && (!current.parameterAnalysis || !Array.isArray(input.selectedFields))) throw new Error('本预览不支持逐字段选择')
       const selectedFields = (input.selectedFields ?? current.selectedFields) as string[] | undefined
@@ -286,14 +286,14 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       const validChoices = current.parameterAnalysis ? new Set(planCatalog(current.state, intents).operations.flatMap(o => o.choices.map(c => c.id))) : undefined
       if (validChoices && (new Set(resolutions.map(r => r.id)).size !== resolutions.length || resolutions.some(r => !validChoices.has(r.id) && !current.view.operations.some(o => o.choices.some(c => c.id === r.id && c.options.some(option => option.optionId === r.optionId)))))) throw new Error('处理选项无效或重复')
       const choices = validChoices ? resolutions.filter(r => validChoices.has(r.id)) : resolutions
-      const baseView = present(current.state, intents, current.view.origin, choices, selected)
+      const baseView = { ...present(current.state, intents, current.view.origin, choices, selected), catalogFingerprint:current.view.catalogFingerprint }
       const view = current.parameterAnalysis ? { ...baseView, parameterAnalysis: current.parameterAnalysis, selectedFields: selectedFields! } : baseView
       catalog = { ...current, view, intents, resolutions: choices, selectedFields }; updateOfficial(); json(res, 200, preview?.catalog?.token === view.token ? preview : view)
     })
   })
   const applyCatalog = async (input: Record<string, unknown>, res: ServerResponse) => enqueue(async () => {
     const current = catalog, selected = input.selected
-    if (!current || input.token !== current.view.token || !Array.isArray(selected) || !selected.length || selected.some(id => typeof id !== 'string')) throw new Error('请选择有效的整体操作，或重新预览')
+    if (!current || input.token !== current.view.token || !Array.isArray(selected) || !selected.length && !current.source || selected.some(id => typeof id !== 'string') || selected.some(id=>!current.intents.some(i=>i.id===id)) || new Set(selected).size!==selected.length) throw new Error('请选择有效的整体操作，或重新预览')
     await ensureCurrent(current)
     await service.withFutureOverrides(current.view.overridesFingerprint, async saveOverrides => {
       await ensureCurrent(current)
@@ -301,8 +301,36 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       const blocked = simulated.operations.filter(o => selected.includes(o.id)).flatMap(o => o.blockedReasons)
       if (blocked.length) throw new Error(blocked.join('；'))
       const after = simulated.after
+      if (current.source) {
+        if(input.selectedConnections!==undefined) {
+          if(!Array.isArray(input.selectedConnections) || input.selectedConnections.some(id=>typeof id!=='string' || !current.source!.connectionChanges.some(c=>c.fieldId===id))) throw Error('连接字段选择无效')
+          for(const change of current.source.connectionChanges) change.selected=input.selectedConnections.includes(change.fieldId)
+        }
+        after.config.sources ??= {}
+        after.config.sources[current.source.sourceId] = {kind:current.source.kind,providerId:current.source.providerId,...(current.source.kind==='ark-agent-plan' ? {arkProfile:current.source.arkProfile} : {})}
+        after.config.catalogMetadata??={}
+        for(const intent of current.intents) if(selected.includes(intent.id) && intent.model) {
+          const key=JSON.stringify([intent.model.providerId,intent.model.modelId]),prior=after.config.catalogMetadata[key]
+          after.config.catalogMetadata[key]={...prior,origin:'source',sourceId:current.source.sourceId,checkedAt:current.source.fetchedAt,sourceFields:{...(prior?.sourceFields as object ?? {}),...intent.value},...(intent.kind==='add' || intent.value?.name!==undefined ? {customName:false} : {})}
+        }
+      }
       if (current.view.origin === 'official') after.config.official = { ...after.config.official, checkedAt: preview!.fetchedAt }
       const backup: Backup = { version: 3, backupId: randomUUID(), origin: current.view.origin, selected: selected as string[], resolutions: current.resolutions, token: current.view.token, at: new Date().toISOString(), status: 'prepared', writes: catalogWrites(current.state, after), ...(current.parameterAnalysis ? { parameterAnalysis: current.parameterAnalysis, selectedFields: current.selectedFields } : {}), ...(!same(current.state.overrides, after.overrides) ? { overrides: { before: current.state.overrides, after: after.overrides } } : {}), ...(preview && current.view.origin === 'official' ? { sourceUrl: preview.sourceUrl, analyzer: preview.analyzer, reasoningEffort: preview.reasoningEffort, analysisTimeoutSeconds: preview.analysisTimeoutSeconds, pages: preview.pages } : {}) }
+      if(current.source?.ns) {
+        const source=current.source, ns=source.ns!, desc=ctx.settings.describe().find(d=>d.ns===ns)!
+        let write=backup.writes.find(w=>w.ns===ns)
+        if(!write) {write={ns,revision:desc.revision,fields:[]};backup.writes.push(write)}
+        for(const change of source.connectionChanges) if(change.selected) {
+          const path=[...source.path,change.fieldId],before=at(desc.user,path)
+          write.fields.push({path,before,had:before!==undefined,after:change.after})
+        }
+        if(source.kind==='ark-agent-plan' && at(desc.user,source.path)===undefined && at(desc.base,source.path)===undefined) {
+          const next:Record<string,any>={...Object.fromEntries(source.connectionChanges.filter(c=>c.selected).map(c=>[c.fieldId,c.after])),models:after.profiles.find(p=>p.providerId===source.providerId)!.models}
+          if(!next.models.length || !next.api || !next.baseURL) throw Error('新来源需要采用接口协议、调用地址和至少一个模型')
+          write.fields=write.fields.filter(f=>!source.path.every((part,index)=>f.path[index]===part))
+          write.fields.push({path:source.path,before:undefined,had:false,after:next})
+        }
+      }
       if (!backup.writes.length && !backup.overrides) throw new Error('没有选中有效修改')
       catalog = undefined; preview = undefined
       await transaction(backup, saveOverrides, false)
@@ -310,6 +338,69 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
     })
   })
   register('catalog-apply', async (req, res) => { await applyCatalog(await body(req), res) })
+  if(sources) {
+    const signalFor=(res:ServerResponse)=>{const abort=new AbortController();res.on('close',()=>{if(!res.writableEnded)abort.abort()});return AbortSignal.any([abort.signal,lifetime.signal,AbortSignal.timeout(60_000)])}
+    let login: {token:string;expires:number} | undefined
+    ctx.effect(()=>ctx.webServer.register({kind:'exact',path:'/api/model-manager/sources',handler:async(req,res)=>{
+      if(req.method!=='GET'){res.setHeader('Allow','GET');json(res,405,{error:'方法不允许'});return}
+      if(!trusted(req)){json(res,403,{error:'跨站请求被拒绝'});return}
+      try {
+        const items=await describeSources(sources)
+        let ark:unknown
+        try {ark={available:true,...await arkStatus(sources,signalFor(res))}} catch {ark={available:false,reason:'ArkCLI 状态不可用；可在连接来源后重试'}}
+        const owners=items.filter(s=>s.kind!=='opencode-go').map(s=>{
+          const ns=s.kind==='deepseek'?'llm-deepseek':'llm-pi-ai',path=s.kind==='deepseek'?[]:['providers',s.providerId]
+          const value=at(get(ns),path) as Record<string,unknown> | undefined
+          return {sourceId:s.sourceId,entryId:s.ownerEntryIds[0],revisionToken:String(revision(ns)),applies:s.kind==='deepseek'?'live':'reload',fields:(s.kind==='deepseek'?['baseURL']:['api','baseURL','displayName','defaultContextWindow','defaultMaxTokens']).map(fieldId=>({fieldId,value:value?.[fieldId],writable:!!s.ownerEntryIds.length}))}
+        })
+        const protocols=await import('@deepseek-ai/dsh-llm-pi-ai').then(m=>m.supportedProtocols()).catch(()=>[])
+        json(res,200,{sources:items,owners,ark,protocols})
+      } catch {json(res,503,{error:'来源目录暂不可用'})}
+    }}),'dsh-model-manager: sources')
+    register('sources/credential',async(req,res)=>{
+      const input=await body(req)
+      if(!['deepseek','ark-agent-plan'].includes(String(input.sourceKind)) || typeof input.newKey!=='string' || !input.newKey.trim() || input.newKey.length>16000 || /[\r\n]/.test(input.newKey)) throw Error('来源或新 Key 格式无效')
+      const name=`DMM_${input.sourceKind==='deepseek'?'DEEPSEEK':'ARK_AGENT_PLAN'}_${randomUUID().replace(/-/g,'').toUpperCase()}`
+      try { await sources.credentials.set(credentialRef(name),input.newKey.trim()) } catch { throw Error('凭据保存失败，请检查原生凭据服务状态') }
+      json(res,200,{credentialRef:name,configured:true})
+    })
+    register('sources/ark-auth',async(req,res)=>{
+      const input=await body(req),signal=signalFor(res),run=sources.ark ?? runArk
+      if(input.action==='status'){json(res,200,await arkStatus(sources,signal));return}
+      if(input.action==='start'){
+        if(login && login.expires>Date.now()) throw Error('已有待完成授权，请完成当前授权或等待过期')
+        const value=await run(['auth','login','--no-browser'],signal)
+        if(typeof value.authorize_url!=='string' || new URL(value.authorize_url).protocol!=='https:' || !new URL(value.authorize_url).hostname.endsWith('.volcengine.com')) throw Error('未返回有效的官方授权地址')
+        login={token:randomUUID(),expires:Date.now()+600000}
+        json(res,200,{loginToken:login.token,authorizeUrl:value.authorize_url,expiresAt:login.expires});return
+      }
+      if(input.action!=='complete' || !login || login.expires<Date.now() || input.loginToken!==login.token || typeof input.code!=='string' || !/^[A-Za-z0-9_+/=-]{1,16000}$/.test(input.code)) throw Error('授权会话无效、已过期或授权码格式无效')
+      await run(['auth','login','--no-browser','--code',input.code],signal);login=undefined
+      json(res,200,await arkStatus(sources,signal))
+    })
+    register('sources/preview',async(req,res)=>{
+      const input=await body(req) as unknown as SourceInput,signal=signalFor(res)
+      await enqueue(async()=>{
+        generation++;analysisAbort?.abort();preview=undefined;catalog=undefined
+        await service.refresh();await service.flush()
+        const rev=revisions(),overrides=service.futureOverridesFingerprint(),state=await readCatalogState(),baseline=fingerprint(state)
+        const result=await previewSource(input,signal,{...sources,publish:async draft=>{
+          signal.throwIfAborted()
+          if(!same(rev,revisions()) || overrides!==service.futureOverridesFingerprint() || baseline!==fingerprint(await readCatalogState())) throw Error('SETTINGS_CONFLICT：读取期间配置已变化')
+          if(!state.profiles.some(p=>p.providerId===draft.providerId)) {
+            if(draft.kind!=='ark-agent-plan') throw Error('来源目录所有者尚未加载')
+            state.profiles.push({providerId:draft.providerId,ns:'llm-pi-ai',path:draft.path,models:[],explicit:true,minimumModels:1,effective:draft.connection,user:{},base:{},userFields:{},addConstraints:{missing:[],declared:false}})
+          }
+          sourceIntents(draft,state)
+          const view={...present(state,draft.intents,'source',[],draft.selected),catalogFingerprint:baseline}
+          catalog={state,view,intents:draft.intents,resolutions:[],source:draft}
+          return view
+        }})
+        json(res,200,result)
+      })
+    })
+    ctx.effect(()=>()=>{login=undefined},'dsh-model-manager: source authorization')
+  }
   const readBackup = async (backupId: unknown): Promise<Backup> => {
     if (typeof backupId !== 'string' || !/^[0-9a-f-]{36}$/.test(backupId)) throw new Error('备份 ID 无效')
     const path = join(backupDir, `${backupId}.json`)
@@ -482,5 +573,5 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService): v
       json(res, 200, { restored: true, snapshot: fullSnapshot() })
     })
   })
-  ctx.effect(() => () => { preview = undefined; catalog = undefined; generation++; analysisAbort?.abort() }, 'dsh-model-manager: official cleanup')
+  ctx.effect(() => () => { lifetime.abort(); preview = undefined; catalog = undefined; generation++; analysisAbort?.abort() }, 'dsh-model-manager: official cleanup')
 }

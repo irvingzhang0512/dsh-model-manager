@@ -100,7 +100,7 @@ describe('v3 配置迁移', () => {
       reliability: { maxAttempts: 2, retryTransient: false, parameterDowngrade: true, longContextCandidates: [{ providerId: 'p', modelId: 'big' }] },
     }
     const v3 = migrateConfig(v1)
-    expect(v3.version).toBe(3)
+    expect(v3.version).toBe(4)
     expect(v3.aliases.fast).toEqual({ candidates: [{ providerId: 'p', modelId: 'a' }] })
     expect(v3.aliases[LONG_CONTEXT_ALIAS]).toEqual({ candidates: [{ providerId: 'p', modelId: 'big' }] })
     expect(v3.auto.main).toEqual({ target: { providerId: 'p', modelId: 'a' }, tier: 'balanced' })
@@ -117,8 +117,8 @@ describe('v3 配置迁移', () => {
     expect(next.models['["p","m"]'].legacyTiers).toEqual({ fast: 'low', balanced: 'medium', deep: 'high' })
     expect(next.auto.main.tier).toBe('deep')
     expect(migrateConfig(next)).toEqual(next)
-    expect(migrateConfig(structuredClone(DEFAULT_CONFIG)).version).toBe(3)
-    expect(() => migrateConfig({ version: 4 })).toThrow('不支持的配置版本')
+    expect(migrateConfig(structuredClone(DEFAULT_CONFIG)).version).toBe(4)
+    expect(() => migrateConfig({ version: 5 })).toThrow('不支持的配置版本')
   })
 })
 

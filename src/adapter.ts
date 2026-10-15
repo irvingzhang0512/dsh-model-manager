@@ -5,8 +5,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import { classifyFailure, fromManagedId, LONG_CONTEXT_ALIAS, managedId, mergeSelection, modelKey, resolveSelection, visionRoute, type ManagerConfig, type ModelRecord, type ModelRef, type Selection } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import type { ModelManagerService } from './service.js'
-import { candidateForGrade, evaluateTask, type AutoDecision } from './auto-router.js'
+import { candidateForTask, evaluateTask, requestInputTokens, type AutoDecision } from './auto-router.js'
 import { abortable, aliasMetadata, aliasStream, type AliasRequest } from './alias-runtime.js'
+import {unwrapReplay,wrapReplay} from './replay.js'
 
 export const MANAGED_PROVIDER = 'dsh-model-manager'
 /** 选择器里的 AUTO 条目：托管模式，按 auto.main 决定主模型，没配目标时回退到宿主默认模型。 */
@@ -14,14 +15,18 @@ export const AUTO_MODEL_ID = 'auto'
 
 export class VisionRegistry {
   private bySession = new Map<string, Map<string, ImageAttachmentRef>>()
-  add(session: string, refs: ImageAttachmentRef[]): void {
+  private introduced=new Map<string,Map<string,number | undefined>>()
+  add(session: string, refs: ImageAttachmentRef[],turn?:number,refresh=false): void {
     const images = this.bySession.get(session) ?? new Map<string, ImageAttachmentRef>()
-    for (const ref of refs) images.set(ref.attachmentId as string, ref)
+    const seen=this.introduced.get(session) ?? new Map<string,number | undefined>()
+    for (const ref of refs) {const id=String(ref.attachmentId);if(!images.has(id)||refresh)seen.set(id,turn);images.set(id,ref)}
     this.bySession.set(session, images)
+    this.introduced.set(session,seen)
   }
   get(session: string, id: string): ImageAttachmentRef | undefined { return this.bySession.get(session)?.get(id) }
   has(session: string, id: string): boolean { return this.bySession.get(session)?.has(id) ?? false }
-  clear(session: string): void { this.bySession.delete(session) }
+  historical(session:string,ref:ImageAttachmentRef,turn?:number){const id=String(ref.attachmentId);if(!this.has(session,id))return false;const at=this.introduced.get(session)?.get(id);return at===undefined || turn!==undefined && at<turn}
+  clear(session: string): void { this.bySession.delete(session);this.introduced.delete(session) }
 }
 
 /**
@@ -31,6 +36,7 @@ export class VisionRegistry {
  */
 function requestedModel(id: string, config: ManagerConfig, fallback?: ModelRef): ModelRef[] {
   if (id === AUTO_MODEL_ID) {
+    if (config.auto.enabled) return [...new Map([...['simple','normal','complex'].flatMap(grade => resolveSelection(config, config.auto[grade as 'simple' | 'normal' | 'complex'].target)), ...(config.auto.rules ?? []).filter(rule => rule.enabled).flatMap(rule => resolveSelection(config, rule.selection.target))].map(ref => [modelKey(ref), ref])).values()]
     const target = config.auto.enabled ? config.auto.normal.target : config.auto.main.target
     if (target) return resolveSelection(config, target)
     return fallback ? [fallback] : []
@@ -61,6 +67,15 @@ export class ManagedAdapter extends LlmAdapter {
   private pendingAuto = new Map<string, Promise<AutoDecision>>()
   constructor(private readonly llm: LlmRuntime, private readonly service: ModelManagerService, private readonly vision: VisionRegistry) { super() }
   dispose(): void { this.lifetime.abort(new Error('模型管理已卸载')) }
+  private async *frozenStream(request:GenerateOptions, expected?:string):AsyncIterable<StreamChunk> {
+    const ref={providerId:request.provider,modelId:request.model}
+    const current=async()=>JSON.stringify(await this.service.candidateSignature(ref))
+    if(expected!==undefined && await current()!==expected) throw new LlmError('来源配置已变化，请重新发起请求','CONFIG_CHANGED')
+    const prepared=this.llm.prepareCall ? await this.llm.prepareCall({provider:request.provider,model:request.model,reasoningEffort:request.reasoningEffort,maxTokens:request.maxTokens,temperature:request.temperature,stop:request.stop},request.signal) : undefined
+    if(expected!==undefined && await current()!==expected) throw new LlmError('来源配置已变化，请重新发起请求','CONFIG_CHANGED')
+    const options={...request,...prepared?.config,messages:unwrapReplay(request.messages)}
+    for await(const chunk of prepared ? prepared.stream(options) : this.llm.stream(options))yield wrapReplay(chunk,ref)
+  }
 
   providerInfo(): LlmProviderInfo { return { id: MANAGED_PROVIDER, name: '模型管理' } }
   providerRetryPolicy() { return { mode: 'normal' as const, maxRetries: 0, retryableCodes: [], initialDelayMs: 500, maxDelayMs: 10000, jitterRatio: 0.1 } }
@@ -91,7 +106,7 @@ export class ManagedAdapter extends LlmAdapter {
     const candidate = candidates[0]
     if (!candidate) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 自动选模型」配置执行模型，或设置宿主默认模型' : '未配置可用模型')
     const aliasSignal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
-    const info = entryAlias(config, id) ? await aliasMetadata(this.llm, candidates, aliasSignal) : await this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, signal)
+    const info = entryAlias(config, id) || id === AUTO_MODEL_ID ? await aliasMetadata(this.llm, candidates, aliasSignal) : await this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, signal)
     return { ...info, provider: MANAGED_PROVIDER, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
   }
 
@@ -100,7 +115,7 @@ export class ManagedAdapter extends LlmAdapter {
     const candidates = requestedModel(id, snapshot.config, this.service.hostDefault())
     if (!candidates.length) throw new Error(id === AUTO_MODEL_ID ? 'AUTO 没有可用目标：请到「AUTO 自动选模型」配置执行模型，或设置宿主默认模型' : '未配置可用模型')
     const aliasSignal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
-    const info = entryAlias(snapshot.config, id) ? await aliasMetadata(this.llm, candidates, aliasSignal) : await this.llm.resolveModelInfo(candidates[0].providerId, candidates[0].modelId, signal)
+    const info = entryAlias(snapshot.config, id) || id === AUTO_MODEL_ID ? await aliasMetadata(this.llm, candidates, aliasSignal) : await this.llm.resolveModelInfo(candidates[0].providerId, candidates[0].modelId, signal)
     const model: LlmResolvedModelInfo = { ...info, provider, id, name: id === AUTO_MODEL_ID ? 'AUTO' : id.startsWith('alias:') ? `@${id.slice(6)}` : info.name, inputModalities: ['text', 'image'] }
     return { model, stream: (options: GenerateOptions) => {
       const session = options.sessionId as string || 'one-shot'
@@ -125,20 +140,38 @@ export class ManagedAdapter extends LlmAdapter {
     options = { ...options, messages: structuredClone(options.messages), tools: options.tools && structuredClone(options.tools) }
     const session = options.sessionId as string || 'one-shot'
     const managedRequestId = randomUUID()
+    const explicitOverride=this.service.isDelegatedSession(session) ? undefined : this.service.activeSelection?.(session)
+    const effortFor=(model:ModelRecord,chosen:Selection,aliasEffort?:string)=>{
+      if(this.service.isDelegatedSession(session))return options.reasoningEffort
+      const settings=config.models[modelKey(model)]
+      if(explicitOverride?.reasoningEffort || explicitOverride?.thinking==='off' || explicitOverride?.tier && !['auto','inherit'].includes(explicitOverride.tier)) return genericProviderAdapter.reasoningEffort(model,settings,explicitOverride)
+      return genericProviderAdapter.reasoningEffort(model,settings,{...chosen,reasoningEffort:options.reasoningEffort ?? aliasEffort ?? chosen.reasoningEffort})
+    }
+    lockedParams ||= options.reasoningEffort!==undefined || explicitOverride?.reasoningEffort!==undefined
     const turn = this.service.activeTurn(session)
-    const collect = (blocks: ContentBlock[]): ImageAttachmentRef[] => blocks.flatMap(block => block.type === 'image' ? [block.attachment] : block.type === 'tool-result' ? collect(block.content) : [])
+    const collect = (blocks: readonly ContentBlock[]): ImageAttachmentRef[] => blocks.flatMap(block => block.type === 'image' ? [block.attachment] : 'content' in block && Array.isArray(block.content) ? collect(block.content as ContentBlock[]) : [])
     const allImages = options.messages.flatMap(m => collect(m.content))
-    const lastUser = [...options.messages].reverse().find(message => message.role === 'user')
-    const currentUserImages = lastUser ? collect(lastUser.content) : []
-    const historicalOnly = currentUserImages.length === 0 || currentUserImages.every(ref => this.vision.has(session, ref.attachmentId as string))
-    this.vision.add(session, allImages)
+    const requireObservation=(route:string)=>{
+      if(route!=='sidecar' || config.vision.automatic===false)return
+      const covered=new Set(options.messages.flatMap(message=>message.source?.kind==='model-manager-vision'?message.source.attachmentIds:[]))
+      if(allImages.some(ref=>!covered.has(String(ref.attachmentId)))) throw new LlmError('自动图片观察尚未准备完成，主模型请求已停止','IMAGE_CONTEXT_MISSING')
+    }
+    const historicalOnly = allImages.every(ref=>this.vision.historical(session,ref,turn))
+    this.vision.add(session, allImages,turn)
     let attempt = 0
     let previousProvider: string | undefined
     let contextOnly = false
-    let auto = options.model === AUTO_MODEL_ID && !this.service.isDelegatedSession(session) && config.auto.enabled
+    let auto = !options.purpose && options.model === AUTO_MODEL_ID && !this.service.isDelegatedSession(session) && config.auto.enabled
     let chosen = selection ?? {}
     let queue = chosen.target ? resolveSelection(config, chosen.target) : [...candidates]
+    const auxiliary=options.purpose ? this.service.latestActualModel?.(session) : undefined
+    if(auxiliary){chosen={};queue=[auxiliary]}
     if (auto && !chosen.target) {
+      const availability=new Map<string,boolean>()
+      for(const [alias,value] of Object.entries(config.aliases)) for(const ref of value.candidates) availability.set(JSON.stringify([alias,modelKey(ref)]),await this.service.aliasCandidateAvailable(alias,ref,config))
+      const available=(ref:ModelRef,selection:Selection)=>typeof selection.target!=='string' || availability.get(JSON.stringify([selection.target.slice(1),modelKey(ref)]))!==false
+      const measure=(ref:ModelRef)=>Math.max(this.service.tokenEstimate?.(ref,options)??0,requestInputTokens(options,this.llm.imageRequestPricing?.(ref.providerId,ref.modelId)))
+      if (!(['coding','writing','research','analysis','general'] as const).some(type=>candidateForTask(config,models,type,'simple',options,ref=>this.service.getVerification(ref,'tools'),true,measure,available))) throw new LlmError('AUTO 配置池没有满足能力条件且已恢复可用的模型','NO_CANDIDATE')
       const key = `${session}:${turn ?? 'one-shot'}`
       let decision = turn === undefined ? undefined : this.service.autoDecision(session, turn)
       if (!decision) {
@@ -146,7 +179,7 @@ export class ManagedAdapter extends LlmAdapter {
         if (!pending) {
           pending = (async () => {
             const evaluated = await evaluateTask(this.llm, config, options)
-            const selected = candidateForGrade(config, models, evaluated.grade, options, ref => this.service.getVerification(ref, 'tools'))
+            const selected = candidateForTask(config, models, evaluated.taskType, evaluated.grade, options, ref => this.service.getVerification(ref, 'tools'),true,measure,available)
             if (!selected) throw new Error('AUTO 没有满足图片、档位和上下文要求的模型')
             const value = { ...selected, reason: selected.fallback ? `${evaluated.reason}；该档无兼容模型，使用更高档` : evaluated.reason,
               fallback: evaluated.fallback || selected.fallback }
@@ -164,20 +197,22 @@ export class ManagedAdapter extends LlmAdapter {
       chosen = mergeSelection(decision.selection, chosen)
       queue = [...decision.candidates]
     }
-    const aliasName = typeof chosen.target === 'string' ? chosen.target.slice(1) : chosen.target ? undefined : entryAlias(config, options.model)
+    const aliasName = auxiliary ? undefined : typeof chosen.target === 'string' ? chosen.target.slice(1) : chosen.target ? undefined : entryAlias(config, options.model)
     if (aliasName) {
       // AUTO 的兼容筛选用于选择等级；一旦选定别名，按原队列逐个处理全部候选。
       queue = resolveSelection(config, `@${aliasName}`)
       const signal = options.signal ? AbortSignal.any([options.signal, this.lifetime.signal]) : this.lifetime.signal
       yield* aliasStream(this.llm, queue, signal, async (candidate, candidateSignal): Promise<AliasRequest> => {
+        const signature = this.service.candidateSignature ? JSON.stringify(await this.service.candidateSignature(candidate)) : undefined
         const model = models.find(item => modelKey(item) === modelKey(candidate))
         if (!model || !model.loaded) throw new LlmError('候选模型未加载', 'MODEL_UNAVAILABLE')
         await abortable(this.llm.resolveModelInfo(candidate.providerId, candidate.modelId, candidateSignal), candidateSignal)
         const nativeImage = model.nativeImage
         const route = allImages.length && config.vision.enabled ? visionRoute(config.vision.policy, nativeImage, !!config.vision.target) : nativeImage === 'yes' ? 'native' : allImages.length ? historicalOnly ? 'history' : 'error' : 'native'
         if (route === 'error') throw new LlmError('当前模型不支持图片，且视觉辅助不可用', 'IMAGE_UNSUPPORTED')
+        requireObservation(route)
         const aliasEffort = config.aliases[aliasName]?.efforts?.[modelKey(candidate)]
-        const effort = this.service.isDelegatedSession(session) ? options.reasoningEffort : genericProviderAdapter.reasoningEffort(model, config.models[modelKey(candidate)], aliasEffort ? { ...chosen, reasoningEffort: aliasEffort } : chosen)
+        const effort = effortFor(model,chosen,aliasEffort)
         const prepared = route === 'sidecar' || route === 'history' ? this.sidecarMessages(options.messages, route === 'history') : options.messages
         const toWire = new Map<string, string>(), fromWire = new Map<string, string>()
         const names = [...(options.tools?.map(tool => tool.name as string) ?? []), ...options.messages.flatMap(message => message.content.filter(block => block.type === 'tool-call').map(block => block.name))]
@@ -189,13 +224,13 @@ export class ManagedAdapter extends LlmAdapter {
           reserved.add(wire); toWire.set(name, wire); fromWire.set(wire, name)
         }
         if (toWire.size) await abortable(this.service.log({ session, turn, managedRequestId, action: 'tool-name-mapping', provider: candidate.providerId, model: candidate.modelId, names: [...toWire.keys()] }), candidateSignal)
-        return { route, request: { ...options, provider: candidate.providerId, model: candidate.modelId,
+        return { route, stream:request=>this.frozenStream(request,signature), request: { ...options, provider: candidate.providerId, model: candidate.modelId,
           messages: prepared.map(message => ({ ...message, content: message.content.map(block => block.type === 'tool-call' && toWire.has(block.name) ? { ...block, name: toWire.get(block.name)! } : block) })),
           tools: options.tools?.map(tool => toWire.has(tool.name as string) ? { ...tool, name: toWire.get(tool.name as string)! as never, description: `宿主工具 ${tool.name}。${tool.description}` } : tool),
           reasoningEffort: effort as GenerateOptions['reasoningEffort'] ?? options.reasoningEffort, maxTokens: chosen.maxOutputTokens ?? options.maxTokens },
           restore: chunk => chunk.type === 'tool-call-delta' && chunk.name && fromWire.has(chunk.name) ? { ...chunk, name: fromWire.get(chunk.name)! }
             : chunk.type === 'block-end' && chunk.block.type === 'tool-call' && fromWire.has(chunk.block.name) ? { ...chunk, block: { ...chunk.block, name: fromWire.get(chunk.block.name)! } } : chunk }
-      }, event => this.service.log({ session, turn, managedRequestId, logicalProvider: MANAGED_PROVIDER, logicalModel: options.model, ...event }))
+      }, event => this.service.log({ session, turn, managedRequestId, logicalProvider: MANAGED_PROVIDER, logicalModel: options.model, ...event }), this.service.aliasLifecycle(aliasName, queue, config, session, turn))
       return
     }
     const longContextCandidates = config.aliases[LONG_CONTEXT_ALIAS]?.candidates ?? []
@@ -212,8 +247,9 @@ export class ManagedAdapter extends LlmAdapter {
       const nativeImage = model.nativeImage
       const route = allImages.length && config.vision.enabled ? visionRoute(config.vision.policy, nativeImage, !!config.vision.target) : nativeImage === 'yes' ? 'native' : allImages.length ? historicalOnly ? 'history' : 'error' : 'native'
       if (route === 'error') throw new Error('当前模型不支持图片，且视觉辅助不可用')
+      requireObservation(route)
       const aliasEffort = typeof chosen.target === 'string' ? config.aliases[chosen.target.slice(1)]?.efforts?.[modelKey(candidate)] : undefined
-      const effort = this.service.isDelegatedSession(session) ? options.reasoningEffort : genericProviderAdapter.reasoningEffort(model, config.models[modelKey(candidate)], aliasEffort ? { ...chosen, reasoningEffort: aliasEffort } : chosen)
+      const effort = effortFor(model,chosen,aliasEffort)
       const prepared = route === 'sidecar' || route === 'history' ? this.sidecarMessages(options.messages, route === 'history') : options.messages
       const toWire = new Map<string, string>()
       const fromWire = new Map<string, string>()
@@ -246,7 +282,7 @@ export class ManagedAdapter extends LlmAdapter {
         let usage: Extract<StreamChunk, { type: 'usage' }>['usage'] | undefined
         const started = Date.now()
         try {
-          for await (const chunk of this.llm.stream(request)) {
+          for await (const chunk of this.frozenStream(request)) {
             if (chunk.type === 'usage') usage = chunk.usage
             if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
               failure = chunk
@@ -255,7 +291,7 @@ export class ManagedAdapter extends LlmAdapter {
             if (chunk.type === 'block-start' || chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta' || chunk.type === 'block-end') visible = true
             if (chunk.type === 'tool-call-delta' && chunk.name && fromWire.has(chunk.name)) yield { ...chunk, name: fromWire.get(chunk.name)! }
             else if (chunk.type === 'block-end' && chunk.block.type === 'tool-call' && fromWire.has(chunk.block.name)) yield { ...chunk, block: { ...chunk.block, name: fromWire.get(chunk.block.name)! } }
-            else yield chunk
+            else { if (chunk.type==='finish') this.service.recordActualModel(session,candidate); yield chunk }
           }
         } catch (error) {
           failure = { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: { code: 'NETWORK', message: error instanceof Error ? error.message : String(error) } } } as Extract<StreamChunk, { type: 'finish' }>
@@ -265,7 +301,7 @@ export class ManagedAdapter extends LlmAdapter {
         await this.service.log({ session, turn, managedRequestId, logicalProvider: MANAGED_PROVIDER, logicalModel: options.model, provider: candidate.providerId,
           model: candidate.modelId, attempt, route, effort: request.reasoningEffort, durationMs: Date.now() - started, status: failedReason?.kind ?? 'success',
           failureCode: failureInfo?.code, httpStatus: failureInfo?.status, requestId: failureInfo?.requestId, usage })
-        if (!failure) return
+        if (!failure) { this.service.recordActualModel(session,candidate); return }
         if (visible || failedReason?.kind === 'aborted' || attempt >= reliability.maxAttempts) { yield failure; return }
         const classification = classifyFailure(failureInfo?.status, failureInfo?.code)
         if (classification === 'cooldown') this.cooldown.set(modelKey(candidate), Date.now() + 30000)
@@ -287,11 +323,11 @@ export class ManagedAdapter extends LlmAdapter {
   }
 
   private sidecarMessages(messages: GenerateOptions['messages'], historyOnly = false): GenerateOptions['messages'] {
-    const transform = (blocks: ContentBlock[]): ContentBlock[] => {
+    const transform = (blocks: readonly ContentBlock[]): ContentBlock[] => {
       const result: ContentBlock[] = []
       for (const block of blocks) {
         if (block.type === 'image') result.push({ type: 'text', text: historyOnly ? `[历史图片附件 ${block.attachment.attachmentId}] 当前视觉辅助已关闭，无法重新查看原图。` : `[图片附件 ${block.attachment.attachmentId}] 请使用 model_manager_inspect_image 工具查看此原图；可对同一附件继续追问。` })
-        else if (block.type === 'tool-result') result.push({ ...block, content: transform(block.content) })
+        else if ('content' in block && Array.isArray(block.content)) result.push(Object.assign({}, block, { content: transform(block.content as ContentBlock[]) }))
         else result.push(block)
       }
       return result

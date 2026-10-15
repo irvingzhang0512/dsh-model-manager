@@ -13,7 +13,7 @@ describe('别名删除与视觉清理界面', () => {
     draft.aliases.flash = { candidates: [], reliability: { maxAttempts: 1, retryTransient: false, parameterDowngrade: true } }
     const tree = AliasCard({ name: 'flash', draft, models: [], edit: vi.fn(), notify: vi.fn(), removeAlias: vi.fn() })
     expect(text(tree)).toContain('最多调用 5 次'); expect(text(tree)).toContain('成功后显示完整回答')
-    expect(nodes(tree).filter(n => n.type === 'input' || n.type === 'select')).toEqual([])
+    expect(nodes(tree).filter(n => n.type === 'input' && n.props.type === 'number')).toHaveLength(3)
     expect(text(tree)).not.toContain('参数降级')
   })
   it('失效别名和被图片筛选排除的真实模型保留选中值及原因，可显式清除', () => {

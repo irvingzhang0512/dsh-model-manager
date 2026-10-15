@@ -1,0 +1,8 @@
+import React, {useEffect,useState} from 'react'
+import {hostRouteUrl} from './transport.js'
+export function AliasHealthPanel() {
+  const [state,setState]=useState<any>(),[error,setError]=useState(''),[busy,setBusy]=useState(false)
+  const load=async()=>{const r=await fetch(hostRouteUrl('/api/model-manager/alias-health'));const value=await r.json();if(!r.ok)throw Error(value.error);setState(value)}
+  useEffect(()=>{void load().catch(e=>setError(String(e)))},[])
+  return <div className="dmm-card"><strong>候选恢复状态</strong><p className="dmm-muted">冷却到期后由下一轮真实请求尝试首选；不发送后台探测。本轮工具循环继续使用已成功的候选。</p><button disabled={busy} onClick={()=>void load().catch(e=>setError(String(e)))}>刷新状态</button>{state?.warning && <p className="dmm-note">{state.warning}</p>}{state?.entries?.map((entry:any)=><div className="dmm-row" key={`${entry.alias}:${entry.model.providerId}:${entry.model.modelId}`}><span>@{entry.alias} · {entry.model.providerId}/{entry.model.modelId} · {({transient:'临时故障','rate-limit':'限流',quota:'额度不足',auth:'凭据无效'} as any)[entry.kind]} · {entry.recovering?'正在恢复':entry.retryAt?`下次可尝试：${new Date(entry.retryAt).toLocaleString()}`:'更换凭据或手动恢复后再试'}</span><button disabled={busy} onClick={()=>{setBusy(true);setError('');void fetch(hostRouteUrl('/api/model-manager/alias-health'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:entry.alias,expectedRevisionToken:state.revisionToken})}).then(async r=>{const v=await r.json();if(!r.ok)throw Error(v.error);setState(v)}).catch(e=>setError(String(e))).finally(()=>setBusy(false))}}>立即重新尝试首选</button></div>)}{state && !state.entries?.length && <p className="dmm-muted">当前没有冷却中的候选。</p>}{error && <p role="alert" className="dmm-error">{error}</p>}</div>
+}

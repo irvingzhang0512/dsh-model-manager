@@ -1,6 +1,10 @@
 export type Support = 'yes' | 'no' | 'unknown'
 export type Tier = 'auto' | 'off' | 'low' | 'high' | 'max' | 'fast' | 'balanced' | 'deep'
 export type TaskGrade = 'simple' | 'normal' | 'complex'
+export type TaskType = 'coding' | 'writing' | 'research' | 'analysis' | 'general'
+export interface AliasRecovery { transientCooldownSeconds?: number; rateLimitCooldownSeconds?: number; quotaCooldownSeconds?: number }
+export interface SourceConnection { kind: 'deepseek' | 'ark-agent-plan' | 'opencode-go'; providerId: string; arkProfile?: string }
+export interface AutoRule { id: string; name: string; enabled: boolean; taskTypes: TaskType[]; grades?: TaskGrade[]; selection: Selection }
 export type VisionPolicy = 'native-first' | 'sidecar-first' | 'native-only' | 'sidecar-only'
 export type Role = 'search' | 'coding' | 'review' | 'strong' | 'vision'
 
@@ -31,17 +35,18 @@ export interface RoleSettings extends Selection { }
 /** 别名级兜底覆盖：未填写的字段使用全局默认兜底策略。 */
 export interface AliasReliability { maxAttempts?: number; retryTransient?: boolean; parameterDowngrade?: boolean }
 /** 别名 = 一串按顺序兜底的具体模型候选 + 可选的兜底策略覆盖。 */
-export interface AliasConfig { candidates: ModelRef[]; efforts?: Record<string, string>; reliability?: AliasReliability }
+export interface AliasConfig { candidates: ModelRef[]; efforts?: Record<string, string>; reliability?: AliasReliability; recovery?: AliasRecovery }
 export interface ManagerConfig {
-  version: 3
-  catalogMetadata?: Record<string, { origin?: 'manual' | 'official'; customName?: boolean; [key: string]: unknown }>
+  version: 4
+  sources?: Record<string, SourceConnection>
+  catalogMetadata?: Record<string, { origin?: 'manual' | 'official' | 'source'; customName?: boolean; [key: string]: unknown }>
   aliases: Record<string, AliasConfig>
   models: Record<string, ModelSettings>
   official?: { sourceUrl?: string; analyzer?: ModelRef; checkedAt?: string; sources?: Record<string, string> }
   parameterCompletion?: { searchCredentialName?: string; [key: string]: unknown }
   /** main/roles 仅供旧配置迁移和已有会话读取。 */
-  auto: { enabled: boolean; evaluator?: ModelRef; simple: Selection; normal: Selection; complex: Selection; preferences?: Record<string, Selection>; main: Selection; roles: Record<Role, RoleSettings> }
-  vision: { enabled: boolean; policy: VisionPolicy; target?: ModelRef | string }
+  auto: { enabled: boolean; evaluator?: ModelRef; evaluatorReasoningEffort?: string; rules?: AutoRule[]; simple: Selection; normal: Selection; complex: Selection; preferences?: Record<string, Selection>; main: Selection; roles: Record<Role, RoleSettings> }
+  vision: { enabled: boolean; policy: VisionPolicy; target?: ModelRef | string; automatic?: boolean }
   /** 全局默认兜底策略；别名可用 reliability 覆盖个别字段。 */
   reliability: { maxAttempts: number; retryTransient: boolean; parameterDowngrade: boolean }
 }
@@ -49,16 +54,19 @@ export interface ModelRecord extends ModelRef {
   name: string
   nativeImage: Support
   reasoningEfforts: { id: string; name: string }[]
+  defaultReasoningEffort?:string
+  nativeDeclaration?:'saved'|'default'
   contextWindow?: number
   defaultMaxTokens?: number
   source: 'host' | 'user'
   loaded: boolean
   nativeEditable?: boolean
+  nativeRevision?: number
   nativeClearable?: boolean
   nativeEditReason?: string
   capabilitySource?: string
   capabilityCheckedAt?: string
-  catalogOrigin?: 'manual' | 'official' | 'unknown'
+  catalogOrigin?: 'manual' | 'official' | 'source' | 'unknown'
   customName?: boolean
 }
 export interface Verification {
@@ -103,7 +111,7 @@ export function probeSuggestions(verifications: Verification[]): ProbeSuggestion
 }
 
 export const DEFAULT_CONFIG: ManagerConfig = {
-  version: 3, aliases: {}, models: {},
+  version: 4, aliases: {}, models: {},
   auto: {
     enabled: false, simple: {}, normal: {}, complex: {},
     main: {},
@@ -260,7 +268,8 @@ function migrateModelTiers(settings: ModelSettings | undefined): ModelSettings {
   settings = structuredClone(settings ?? {})
   if (settings.capability && typeof settings.capability === 'object') delete (settings.capability as Record<string, unknown>).image
   if (!settings?.tiers) return settings ?? {}
-  const tiers: Partial<Record<'low' | 'high' | 'max', string>> = {}
+  const tiers: Partial<Record<'low' | 'high' | 'max', string>> = { ...settings.tiers }
+  for(const key of ['fast','balanced','deep']) delete (tiers as Record<string,unknown>)[key]
   const legacyTiers = { ...settings.legacyTiers }
   for (const key of ['fast', 'balanced', 'deep'] as const) {
     const value = (settings.tiers as Record<string, string | undefined>)[key]
@@ -279,7 +288,7 @@ function migrateModelTiers(settings: ModelSettings | undefined): ModelSettings {
 /** 把 v1 配置迁移成 v2：别名数组包成 AliasConfig，长上下文候选转成内置别名，丢弃 mode/manual 行；新旧档位名统一对齐（幂等）。 */
 export function migrateConfig(input: unknown): ManagerConfig {
   const raw = input as { version?: number; aliases?: Record<string, ModelRef[] | AliasConfig>; models?: Record<string, ModelSettings>; official?: ManagerConfig['official']; auto?: Selection | { main?: Selection; roles?: Record<string, RoleSettings>; enabled?: boolean; evaluator?: ModelRef; simple?: Selection; normal?: Selection; complex?: Selection; preferences?: Record<string, Selection> }; roles?: Record<string, RoleSettings>; vision?: ManagerConfig['vision']; reliability?: { maxAttempts?: number; retryTransient?: boolean; parameterDowngrade?: boolean; longContextCandidates?: ModelRef[] } }
-  if (![1, 2, 3].includes(raw?.version ?? 0)) throw new Error('不支持的配置版本')
+  if (![1, 2, 3, 4].includes(raw?.version ?? 0)) throw new Error('不支持的配置版本')
   const current = raw.auto && typeof raw.auto === 'object' && (raw.version !== 1 || 'main' in raw.auto) ? raw.auto as Partial<ManagerConfig['auto']> : undefined
   const legacyMain = current?.main ?? (raw.version === 1 ? raw.auto as Selection : undefined) ?? {}
   const legacyRoles: Partial<Record<Role, RoleSettings>> = current?.roles ?? raw.roles ?? {}
@@ -291,21 +300,22 @@ export function migrateConfig(input: unknown): ManagerConfig {
       aliases[name] = alias
     }
   }
-  const reliability = { maxAttempts: raw.reliability?.maxAttempts ?? 3, retryTransient: raw.reliability?.retryTransient ?? true, parameterDowngrade: raw.reliability?.parameterDowngrade ?? false }
+  const {longContextCandidates:_retired,...reliabilityFields}=structuredClone(raw.reliability ?? {})
+  const reliability = { ...reliabilityFields,maxAttempts: raw.reliability?.maxAttempts ?? 3, retryTransient: raw.reliability?.retryTransient ?? true, parameterDowngrade: raw.reliability?.parameterDowngrade ?? false }
   const longContext = raw.reliability?.longContextCandidates ?? []
   if (longContext.length && !aliases[LONG_CONTEXT_ALIAS]) aliases[LONG_CONTEXT_ALIAS] = { candidates: structuredClone(longContext) }
   const models: Record<string, ModelSettings> = {}
   for (const [key, settings] of Object.entries(raw.models ?? {})) models[key] = migrateModelTiers(settings)
-  const roles: Record<Role, RoleSettings> = { ...structuredClone(DEFAULT_CONFIG.auto.roles) }
+  const roles: Record<Role, RoleSettings> = { ...structuredClone(DEFAULT_CONFIG.auto.roles),...structuredClone(legacyRoles) }
   for (const role of Object.keys(roles) as Role[]) if (legacyRoles[role]) roles[role] = migrateSelectionTiers(structuredClone(legacyRoles[role])) as RoleSettings
   return {
-    version: 3, aliases, models, official: raw.official,
+    ...structuredClone(input as ManagerConfig), version: 4, aliases, models, official: raw.official,
     ...((input as ManagerConfig)?.parameterCompletion !== undefined ? { parameterCompletion: structuredClone((input as ManagerConfig).parameterCompletion) } : {}),
     ...((input as ManagerConfig)?.catalogMetadata ? { catalogMetadata: structuredClone((input as ManagerConfig).catalogMetadata) } : {}),
-    auto: { enabled: current?.enabled ?? false, evaluator: current?.evaluator,
+    auto: { ...structuredClone(current), enabled: current?.enabled ?? false, evaluator: current?.evaluator,
       simple: migrateSelectionTiers(current?.simple), normal: migrateSelectionTiers(current?.normal ?? legacyMain), complex: migrateSelectionTiers(current?.complex ?? legacyMain),
       ...(current && Object.hasOwn(current, 'preferences') ? { preferences: structuredClone(current.preferences) } : {}), main: migrateSelectionTiers(legacyMain), roles },
-    vision: raw.vision ?? { enabled: false, policy: 'native-first' },
+    vision: structuredClone(raw.vision ?? { enabled: false, policy: 'native-first' }),
     reliability,
   }
 }
@@ -315,13 +325,23 @@ function isValidRef(ref: unknown): ref is ModelRef {
 }
 
 export function validateConfig(config: ManagerConfig): void {
-  if (config.version !== 3) throw new Error('不支持的配置版本')
+  if (config.version !== 4) throw new Error('不支持的配置版本')
+  for (const source of Object.values(config.sources ?? {})) {
+    if (!source || !['deepseek', 'ark-agent-plan', 'opencode-go'].includes(source.kind) || !source.providerId || source.arkProfile !== undefined && (source.kind !== 'ark-agent-plan' || !source.arkProfile.trim())) throw new Error('模型来源关联无效')
+  }
+  const rules = config.auto.rules ?? []
+  if (!Array.isArray(rules) || new Set(rules.map(r => r.id)).size !== rules.length) throw new Error('AUTO 规则 ID 重复或格式无效')
+  for (const rule of rules) {
+    if (!rule.id || !rule.name?.trim() || typeof rule.enabled !== 'boolean' || !Array.isArray(rule.taskTypes) || !rule.taskTypes.length || rule.taskTypes.some(t => !['coding','writing','research','analysis','general'].includes(t)) || rule.grades !== undefined && (!rule.grades.length || rule.grades.some(g => !['simple','normal','complex'].includes(g)))) throw new Error('AUTO 任务规则无效')
+    if (rule.enabled) { if (!rule.selection?.target) throw new Error('启用的 AUTO 规则尚未绑定模型'); resolveSelection(config, rule.selection.target) }
+  }
+  if (config.vision.automatic !== undefined && typeof config.vision.automatic !== 'boolean') throw new Error('自动图片设置无效')
   if (config.parameterCompletion !== undefined && (!config.parameterCompletion || typeof config.parameterCompletion !== 'object' || Array.isArray(config.parameterCompletion))) throw new Error('搜索凭据配置无效')
   if (config.parameterCompletion?.searchCredentialName !== undefined && (typeof config.parameterCompletion.searchCredentialName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.parameterCompletion.searchCredentialName))) throw new Error('搜索凭据引用名无效')
   for (const settings of Object.values(config.models)) if (settings?.capability && Object.hasOwn(settings.capability, 'image')) throw new Error('插件图片声明已停用，不能创建或修改')
   if (config.catalogMetadata !== undefined) {
     if (!config.catalogMetadata || typeof config.catalogMetadata !== 'object' || Array.isArray(config.catalogMetadata)) throw new Error('模型来源元数据无效')
-    for (const value of Object.values(config.catalogMetadata)) if (!value || typeof value !== 'object' || Array.isArray(value) || value.origin !== undefined && !['manual', 'official'].includes(value.origin) || value.customName !== undefined && typeof value.customName !== 'boolean') throw new Error('模型来源元数据无效')
+    for (const value of Object.values(config.catalogMetadata)) if (!value || typeof value !== 'object' || Array.isArray(value) || value.origin !== undefined && !['manual', 'official','source'].includes(value.origin) || value.customName !== undefined && typeof value.customName !== 'boolean') throw new Error('模型来源元数据无效')
   }
   if (config.official?.sourceUrl !== undefined) {
     const url = new URL(config.official.sourceUrl)
@@ -333,6 +353,7 @@ export function validateConfig(config: ManagerConfig): void {
     if (!/^[a-z][a-z0-9_-]*$/.test(name) || !alias || !Array.isArray(alias.candidates) || !alias.candidates.length) throw new Error(`无效别名：${name}`)
     for (const ref of alias.candidates) if (!isValidRef(ref)) throw new Error(`别名 ${name} 只能引用具体模型`)
     if (alias.efforts && Object.values(alias.efforts).some(value => typeof value !== 'string' || !value)) throw new Error(`别名 ${name} 的推理档位无效`)
+    for (const seconds of Object.values(alias.recovery ?? {})) if (!Number.isInteger(seconds) || seconds < 1 || seconds > 604800) throw new Error(`别名 ${name} 的冷却时间必须是 1–604800 秒`)
     // 旧别名策略仅在原始层等待独立清理，不参与有效配置校验。
   }
   if (config.auto?.main?.target) resolveSelection(config, config.auto.main.target)
@@ -340,7 +361,7 @@ export function validateConfig(config: ManagerConfig): void {
     if (!config.auto.evaluator || !isValidRef(config.auto.evaluator)) throw new Error('AUTO 需要配置评估模型')
     for (const grade of ['simple', 'normal', 'complex'] as const) if (!config.auto[grade].target) throw new Error(`AUTO ${grade} 档尚未绑定模型`)
   }
-  for (const selection of [config.auto?.main, ...Object.values(config.auto?.roles ?? {}), config.auto.simple, config.auto.normal, config.auto.complex]) {
+  for (const selection of [config.auto?.main, ...Object.values(config.auto?.roles ?? {}), config.auto.simple, config.auto.normal, config.auto.complex,...(config.auto.rules ?? []).map(r=>r.selection)]) {
     if (!selection) continue
     if (selection.maxOutputTokens !== undefined && (!Number.isInteger(selection.maxOutputTokens) || selection.maxOutputTokens < 1)) throw new Error('输出上限必须为正整数')
   }

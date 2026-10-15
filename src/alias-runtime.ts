@@ -3,7 +3,12 @@ import { modelKey, type ModelRef } from './domain.js'
 import { abortableStream } from './official-sync.js'
 
 export const ALIAS_BUFFER_BYTES = 32 * 1024 * 1024
-export interface AliasRequest { request: GenerateOptions; route: string; restore: (chunk: StreamChunk) => StreamChunk }
+export interface AliasRequest { request: GenerateOptions; route: string; restore: (chunk: StreamChunk) => StreamChunk; stream?: (request:GenerateOptions)=>AsyncIterable<StreamChunk> }
+export interface AliasLifecycle {
+  admit(candidate: ModelRef): Promise<string | undefined>
+  settled(candidate: ModelRef, failure?: LlmFailure): Promise<void>
+  release(): void
+}
 export function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) { void promise.catch(() => {}); return Promise.reject(signal.reason) }
   return new Promise<T>((resolve, reject) => {
@@ -31,6 +36,7 @@ export function caughtFailure(error: unknown): LlmFailure {
   return { code: 'NETWORK', message: error instanceof Error ? error.message : String(error) }
 }
 function transient(failure: LlmFailure): boolean {
+  if(failure.status!==undefined && failure.status>=400 && failure.status<500 && failure.status!==408)return false
   if (['RATE_LIMIT', 'QUOTA', 'AUTH', 'INVALID_REQUEST', 'CONTEXT_WINDOW_EXCEEDED', 'BUFFER_LIMIT', 'INVALID_STREAM', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL', 'NO_ADAPTER'].includes(failure.code)) return false
   return ['NETWORK', 'TRANSPORT', 'TIMEOUT', 'SERVER', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'].includes(failure.code) || failure.status === 408 || (failure.status ?? 0) >= 500
 }
@@ -38,7 +44,7 @@ const aborted = (): StreamChunk => ({ type: 'finish', reason: { kind: 'aborted',
 
 /** 每次尝试完整成功后才提交，失败的块与工具调用不会进入宿主。 */
 export async function* aliasStream(llm: LlmRuntime, candidates: ModelRef[], signal: AbortSignal,
-  prepare: (candidate: ModelRef, signal: AbortSignal) => Promise<AliasRequest>, log: (event: Record<string, unknown>) => Promise<void>): AsyncGenerator<StreamChunk> {
+  prepare: (candidate: ModelRef, signal: AbortSignal) => Promise<AliasRequest>, log: (event: Record<string, unknown>) => Promise<void>, lifecycle?: AliasLifecycle): AsyncGenerator<StreamChunk> {
   const queue = [...new Map(candidates.map(ref => [modelKey(ref), ref])).values()]
   const failures: string[] = []
   let attempt = 0
@@ -46,12 +52,16 @@ export async function* aliasStream(llm: LlmRuntime, candidates: ModelRef[], sign
     for (const [index, candidate] of queue.entries()) {
       signal.throwIfAborted()
       const candidateIndex = index + 1
+      let unavailable:string | undefined
+      try{unavailable=await lifecycle?.admit(candidate)}catch(error){signal.throwIfAborted();const failure=caughtFailure(error);unavailable=`来源准备失败（${failure.code}）：${safeFailureMessage(failure.message)}`}
+      if (unavailable) { failures.push(`${candidate.providerId}/${candidate.modelId}：${unavailable}`); continue }
       let prepared: AliasRequest
       const preparationStarted = Date.now()
       try { prepared = await abortable(prepare(candidate, signal), signal) }
       catch (error) {
         signal.throwIfAborted()
         const failure = caughtFailure(error)
+        await lifecycle?.settled(candidate, failure)
         const message = safeFailureMessage(failure.message)
         failures.push(`${candidate.providerId}/${candidate.modelId}（0 次调用，${failure.code}）：${message}`)
         await abortable(log({ action: 'alias-candidate-preparation', provider: candidate.providerId, model: candidate.modelId, candidateIndex, candidateAttempt: 0, attempt, status: 'error', durationMs: Date.now() - preparationStarted, failureCode: failure.code, failureMessage: message }), signal)
@@ -69,7 +79,7 @@ export async function* aliasStream(llm: LlmRuntime, candidates: ModelRef[], sign
         let usage: Extract<StreamChunk, { type: 'usage' }>['usage'] | undefined
         const started = Date.now()
         try {
-          for await (const raw of abortableStream(llm.stream({ ...prepared.request, messages: structuredClone(prepared.request.messages), tools: prepared.request.tools && structuredClone(prepared.request.tools), signal: controller.signal }), controller.signal)) {
+          for await (const raw of abortableStream((prepared.stream ?? (request=>llm.stream(request)))({ ...prepared.request, messages: structuredClone(prepared.request.messages), tools: prepared.request.tools && structuredClone(prepared.request.tools), signal: controller.signal }), controller.signal)) {
             signal.throwIfAborted()
             if (raw.type === 'usage') usage = raw.usage
             if (raw.type === 'finish' && (raw.reason.kind === 'error' || raw.reason.kind === 'aborted')) {
@@ -96,12 +106,14 @@ export async function* aliasStream(llm: LlmRuntime, candidates: ModelRef[], sign
           failureMessage: success ? undefined : safeFailureMessage(failure.message), httpStatus: success ? undefined : failure.status, requestId: success ? undefined : failure.requestId, usage }), signal)
         if (wasAborted) { yield aborted(); return }
         if (success) {
+          await lifecycle?.settled(candidate)
           for (const chunk of chunks) { if (signal.aborted) { yield aborted(); return }; yield chunk }
           return
         }
         chunks.length = 0
         if (candidateAttempt < 5 && transient(failure)) { await delay(500 * 2 ** (candidateAttempt - 1), signal); continue }
         failures.push(`${candidate.providerId}/${candidate.modelId}（${candidateAttempt} 次调用，${failure.code}）：${safeFailureMessage(failure.message)}`)
+        await lifecycle?.settled(candidate, failure)
         break
       }
     }
@@ -110,17 +122,27 @@ export async function* aliasStream(llm: LlmRuntime, candidates: ModelRef[], sign
   } catch (error) {
     if (signal.aborted) { yield aborted(); return }
     throw error
-  }
+  } finally { lifecycle?.release() }
 }
 
 export async function aliasMetadata(llm: LlmRuntime, candidates: ModelRef[], signal?: AbortSignal) {
   const failures: string[] = []
+  const resolved: Awaited<ReturnType<LlmRuntime['resolveModelInfo']>>[] = []
   for (const candidate of candidates) {
     signal?.throwIfAborted()
     try {
       const result = llm.resolveModelInfo(candidate.providerId, candidate.modelId, signal)
-      return await (signal ? abortable(result, signal) : result)
+      resolved.push(await (signal ? abortable(result, signal) : result))
     } catch (error) { signal?.throwIfAborted(); const failure = caughtFailure(error); failures.push(`${candidate.providerId}/${candidate.modelId}：${failure.code} ${safeFailureMessage(failure.message)}`) }
+  }
+  if (resolved.length) {
+    const first = resolved[0]
+    const efforts = failures.length ? [] : first.reasoning?.efforts.filter(e => resolved.every(m => m.reasoning?.efforts.some(other => other.id === e.id))) ?? []
+    const windows = resolved.flatMap(m => m.context?.contextWindow ? [m.context.contextWindow] : [])
+    return { ...first, reasoning: efforts.length ? { efforts } : undefined, defaultMaxTokens: undefined,
+      context: windows.length ? { ...first.context, contextWindow: Math.max(...windows) } : first.context,
+      systemPromptUpdate: resolved.every(m => m.systemPromptUpdate === first.systemPromptUpdate) ? first.systemPromptUpdate : undefined,
+      toolUpdate: resolved.every(m => m.toolUpdate === first.toolUpdate) ? first.toolUpdate : undefined }
   }
   throw new LlmError(`全部别名候选准备失败：${failures.join('；')}`, 'ALL_CANDIDATES_FAILED')
 }

@@ -107,7 +107,7 @@ describe('参数补全完整目录事务', () => {
     expect(model).not.toHaveProperty('reasoningEfforts') // 内置目录相同的映射不物化为覆盖。
     if (!explicit) expect(profile).not.toHaveProperty('models')
     expect(a.json.snapshot.models[0]).toMatchObject({ nativeImage: 'yes', contextWindow: 2000, defaultMaxTokens: 500 }); expect(a.json.snapshot.parameterBackupId).toBe(a.json.backupId)
-    const backup = JSON.parse(await readFile(join(resolveDataDir(), 'catalog-backups', `${a.json.backupId}.json`), 'utf8'))
+    const backup = JSON.parse(await readFile(join(f.service.dataDir, 'catalog-backups', `${a.json.backupId}.json`), 'utf8'))
     expect(backup.origin).toBe('parameter'); expect(backup.selectedFields).toHaveLength(5); expect(backup.parameterAnalysis.results[0].suggestions[0].evidence).toHaveLength(1)
     expect((await f.call('catalog-restore', { backupId: a.json.backupId })).status).toBe(200); expect(f.raw).toEqual(original); f.disposers.forEach(d => d())
   })

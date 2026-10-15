@@ -6,12 +6,14 @@ const model: ModelRecord = { providerId: 'provider-a', modelId: 'text', name: 'T
 const fallbackModel: ModelRecord = { ...model, providerId: 'provider-b' }
 afterEach(() => vi.useRealTimers())
 function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: string, request: any) => AsyncIterable<any>, records: ModelRecord[] = [model, fallbackModel]) {
+  // Existing sidecar cases exercise explicit manual-tool mode.
+  config.vision.automatic ??= false
   const calls: any[] = []
   const llm = {
     resolveModelInfo: async (provider: string, id: string) => ({ provider, id, name: id, inputModalities: ['text'] }),
     stream: (request: any) => { calls.push({ ...request }); return chunks?.(request.provider, request) ?? (async function* () { yield { type: 'finish', reason: { kind: 'stop' } } })() },
   }
-  const service = {
+  const service = {recordActualModel:vi.fn(),aliasLifecycle:()=>undefined,
     snapshot: () => ({ config: structuredClone(config), models: structuredClone(records), revision: 1 }),
     model: (ref: any) => records.find(item => item.providerId === ref.providerId && item.modelId === ref.modelId),
     hostDefault: () => undefined,
@@ -25,6 +27,22 @@ function harness(config = structuredClone(DEFAULT_CONFIG), chunks?: (provider: s
 }
 
 describe('受管理请求', () => {
+  it('预步骤登记的新图不能误判为历史图，辅助关闭时跳过文字候选',async()=>{
+    const config=structuredClone(DEFAULT_CONFIG),native={...fallbackModel,nativeImage:'yes' as const}
+    config.aliases.image={candidates:[model,native]}
+    const {adapter,calls,vision}=harness(config,undefined,[model,native])
+    const image={attachmentId:'new-pre-step',mediaType:'image/png',bytes:1} as any
+    vision.add('s',[image],4,true)
+    for await(const _ of adapter.stream({provider:'dsh-model-manager',model:'alias:image',sessionId:'s',messages:[{role:'user',source:{kind:'user'},content:[{type:'image',attachment:image}]}]} as any)){}
+    expect(calls.map(c=>c.provider)).toEqual(['provider-b'])
+  })
+  it('自动模式缺少已接纳观察时阻止主模型，保留原图等待重新准备',async()=>{
+    const config=structuredClone(DEFAULT_CONFIG);config.vision={enabled:true,automatic:true,policy:'sidecar-only',target:{providerId:'vision',modelId:'v'}}
+    const {adapter,calls}=harness(config)
+    const request:any={provider:'dsh-model-manager',model:managedId(model),sessionId:'s',messages:[{role:'user',source:{kind:'user'},content:[{type:'image',attachment:{attachmentId:'new',mediaType:'image/png',bytes:1}}]}]}
+    await expect((async()=>{for await(const _ of adapter.stream(request)){} })()).rejects.toThrow('自动图片观察尚未准备完成')
+    expect(calls).toEqual([]);expect(request.messages[0].content[0].type).toBe('image')
+  })
   it.each(['yes', 'no', 'unknown', false, { invalid: true }])('旧图片声明 %j 不覆盖宿主原生图片', async legacy => {
     const config = structuredClone(DEFAULT_CONFIG), native = { ...model, nativeImage: 'yes' as const }
     config.models[modelKey(native)] = { capability: { image: legacy } } as any
@@ -197,11 +215,12 @@ describe('受管理请求', () => {
   it('关闭视觉辅助后仍可继续包含历史图片的文字会话', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
     config.vision = { enabled: true, policy: 'sidecar-only', target: { providerId: 'vision', modelId: 'v' } }
-    const { adapter, calls } = harness(config)
+    const { adapter, calls, service } = harness(config)
     const image = { type: 'image', attachment: { attachmentId: 'old', mediaType: 'image/png', bytes: 1, width: 1, height: 1 } }
     const oldMessage = { id: 'old', role: 'user', source: { kind: 'user' }, content: [image] }
     for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), sessionId: 'same' as never, messages: [oldMessage] as never })) { /* drain */ }
     config.vision.enabled = false
+    service.activeTurn=()=>5
     const newMessage = { id: 'new', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '继续' }] }
     for await (const _ of adapter.stream({ provider: 'dsh-model-manager', model: managedId(model), sessionId: 'same' as never, messages: [oldMessage, newMessage] as never })) { /* drain */ }
     expect(calls[1].messages[0].content[0].text).toContain('视觉辅助已关闭')

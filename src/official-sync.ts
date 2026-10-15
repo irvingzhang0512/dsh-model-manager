@@ -182,7 +182,7 @@ export async function analyzeOfficial(llm: LlmRuntime, analyzer: ModelRef, sourc
     }
     signal.throwIfAborted()
     const messages: GenerateOptions['messages'] = [
-      { id: randomUUID() as never, role: 'system', source: { kind: 'plugin', plugin: 'dsh-model-manager' }, content: [{ type: 'text', text: systemPrompt }] },
+      { id: randomUUID() as never, role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: systemPrompt }] },
       { id: randomUUID() as never, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: JSON.stringify({ round, finalRound: round === 3, pages }) }] },
     ]
     let output = ''

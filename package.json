@@ -1,13 +1,13 @@
 {
   "name": "dsh-model-manager",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "DSH 模型能力、别名、AUTO 主模型选择与视觉辅助",
   "type": "module",
   "main": "./lib/index.js",
-  "types": "./lib/types/index.d.ts",
+  "types": "./lib/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/types/index.d.ts",
+      "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
     "./client": {
@@ -41,62 +41,70 @@
     "build": "npm run clean && tsc -p tsconfig.json && node -e \"require('node:fs').rmSync('lib/client',{recursive:true,force:true})\" && tsdown -c tsdown.config.ts"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4 <5",
-    "@deepseek-ai/dsh-agent": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-attachment": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-credentials": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-llm-deepseek": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-session": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-settings": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2 <0.2",
-    "@deepseek-ai/schemastery": ">=3.18 <4",
-    "react": "^18.2.0"
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm-deepseek": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-settings": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
+    "@deepseek-ai/dsh-config-editor": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-token-meter": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "0.2.0-rc.2"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-llm-deepseek": { "optional": true },
-    "@deepseek-ai/dsh-llm-pi-ai": {
+    "@deepseek-ai/dsh-llm-deepseek": {
       "optional": true
     },
-    "react": {
+    "@deepseek-ai/dsh-llm-pi-ai": {
       "optional": true
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-agent": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-anonymous-user-id": "0.1.5-rc.3",
-    "@deepseek-ai/dsh-atomic-write": "0.1.5-rc.3",
-    "@deepseek-ai/dsh-attachment": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-authorization": "0.1.5-rc.3",
-    "@deepseek-ai/dsh-code-runtime": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-credentials": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-fs": "0.1.5-rc.3",
-    "@deepseek-ai/dsh-home-paths": "0.1.5-rc.3",
-    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-invariants": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-launch-environment": "0.1.5-rc.3",
-    "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm-deepseek": "0.1.5-rc.3",
-    "@deepseek-ai/dsh-llm-pi-ai": "0.1.5-rc.3",
-    "@deepseek-ai/dsh-scope": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-session": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-session-projection": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-settings": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-user-approval": "^0.1.5-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-anonymous-user-id": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-authorization": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-fs": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-home-paths": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm-deepseek": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-scope": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-settings": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.1",
     "react": "^18.2.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "@deepseek-ai/dsh-config-editor": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-token-meter": "0.2.0-rc.2"
   },
   "dependencies": {
-    "sharp": "^0.35.5"
+    "sharp": "0.35.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/irvingzhang0512/dsh-model-manager.git"
   }
 }

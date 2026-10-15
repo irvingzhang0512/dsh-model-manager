@@ -190,7 +190,7 @@ describe('宿主桥接与版本控制', () => {
     const service = new ModelManagerService({ catalog: async () => [] }, 'unused-migrate-path', settings as never)
     await service.init()
     const config = service.snapshot().config
-    expect(config.version).toBe(3)
+    expect(config.version).toBe(4)
     expect(config.aliases.fast).toEqual({ candidates: [{ providerId: 'p', modelId: 'a' }] })
     expect(config.aliases['long-context']!.candidates).toEqual([{ providerId: 'p', modelId: 'big' }])
     expect(config.auto.main.tier).toBe('balanced')

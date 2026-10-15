@@ -1,3 +1,4 @@
+import { hostRouteUrl } from "./transport.js"
 import React, { useEffect, useRef, useState } from 'react'
 import type { ManagerConfig, ModelRecord, ModelRef } from '../domain.js'
 import { fromManagedId } from '../domain.js'
@@ -43,7 +44,7 @@ export function ParameterPanel({ models, config, revision, defaultModel, backupI
     invalidate(); const generation = epoch.current, controller = new AbortController(); abort.current = controller
     setProgress({ stage: 'searching', modelIndex: 0, modelCount: picked.length, searchCount: 0, analysisCount: 0 })
     try {
-      const response = await fetch('/api/model-manager/model-parameter-preview', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify({ models: realModels.filter(m => picked.includes(key(m))).map(({ providerId, modelId }) => ({ providerId, modelId })), analyzer: effectiveAnalyzer ? { providerId: effectiveAnalyzer.providerId, modelId: effectiveAnalyzer.modelId } : null, ...(effort ? { reasoningEffort: effort } : {}), analysisTimeoutSeconds: Number(timeout) }), signal: controller.signal })
+      const response = await fetch(hostRouteUrl('/api/model-manager/model-parameter-preview'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify({ models: realModels.filter(m => picked.includes(key(m))).map(({ providerId, modelId }) => ({ providerId, modelId })), analyzer: effectiveAnalyzer ? { providerId: effectiveAnalyzer.providerId, modelId: effectiveAnalyzer.modelId } : null, ...(effort ? { reasoningEffort: effort } : {}), analysisTimeoutSeconds: Number(timeout) }), signal: controller.signal })
       const result = await readParameterStream(response, value => { if (epoch.current === generation && !controller.signal.aborted) setProgress(value) })
       if (controller.signal.aborted || epoch.current !== generation) return
       setView(result); notify('info', '分析完成，请逐字段核对建议与依据；应用后才修改配置。')

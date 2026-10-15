@@ -60,7 +60,7 @@ async function fixture(explicit = true, pi = false, absentUser = false, legacy =
   }
   vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['fast', 'pro'], ['old-fast']))))
   const ctx = { settings, llm: runtime, tools: { register: () => () => {} }, attachments: {}, systemPrompt: { section: (s: any) => { prompts.push(s.text); return () => {} } }, webServer: { register: (route: any) => { if (routes.has(route.path)) throw Error('duplicate route'); routes.set(route.path, route.handler); return () => {} } }, on: (name: string, fn: Function) => { hooks.set(name, fn); return () => {} }, effect: (fn: Function) => { const dispose = fn(); if (typeof dispose === 'function') disposed.push(dispose) }, logger: { error: () => {} } }
-  apply(ctx as never)
+  apply(Object.assign(ctx,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
   await new Promise(resolve => setTimeout(resolve, 15))
   await managedAdapter.service.init()
   const prepare = (path: string, value: unknown, headers: Record<string, string> = {}, method = 'POST') => {
@@ -115,6 +115,7 @@ describe('旧分工偏好独立清理事务', () => {
   const input = { operations: [{ kind: 'clearLegacyPreferences' }] }
   it('父入口为 AUTO 时 fork 延续父任务已选模型及原生参数，不再次评估', async () => {
     const f = await fixture(), chosen = { providerId: 'deepseek-official', modelId: 'pro' }
+    f.managedAdapter.service.recordActualModel('parent', chosen)
     f.managedAdapter.service.saveAutoDecision('parent', 1, { grade: 'normal', candidates: [chosen], selection: { target: chosen }, reason: 'test', fallback: false })
     const parentOptions = { provider: 'dsh-model-manager', model: 'auto', reasoningEffort: 'high', maxTokens: 33 }
     const child = await f.hooks.get('agent/request')!({ agent: { session: { id: 'fork', header: { parentSession: 'parent' } } }, turn: 1 }, async () => parentOptions)
@@ -534,3 +535,5 @@ it('仅宿主删除声明无需写插件，清理附属设置则标记插件写�
  const rename=await f.call('catalog-preview',{operations:[{kind:'rename',model:{providerId:'deepseek-official',modelId:'pro'},name:'新名字'}]})
  expect(rename.json.writesPlugin).toBe(true)
 })
+
+vi.mock('../src/desktop-settings.js', async original=>({...await original(),DesktopSettings:(await import('./route-port.js')).RouteSettingsPort}))

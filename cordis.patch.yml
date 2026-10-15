@@ -1,5 +1,5 @@
 - insert:
     - id: dsh-model-manager
       name: dsh-model-manager
-      inject: [llm, settings, tools, attachments, webServer, systemPrompt]
+      inject: [llm, settings, tools, attachments, webServer, systemPrompt, credentials, configEditor, tokenMeter]
       config: {}

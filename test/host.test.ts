@@ -1,3 +1,4 @@
+import {waitReady} from './route-port.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -101,7 +102,7 @@ describe('宿主装配', () => {
         get: (ns: string) => ns === 'dsh-model-manager' ? structuredClone(DEFAULT_CONFIG) : undefined,
         describe: () => [{ ns: 'dsh-model-manager', revision: 0 }],
       },
-      llm: { listProviders: () => [], listModels: async () => [], registerAdapter: (ids: string[]) => { adapters.push(ids); return () => {} } },
+      llm: { listConfigurableProviders:()=>[], listProviders: () => [], listModels: async () => [], registerAdapter: (ids: string[]) => { adapters.push(ids); return () => {} } },
       tools: { register: (tool: { name: string }) => { toolNames.push(tool.name); return () => {} } },
       subagents: {}, attachments: {},
       systemPrompt: { section: (section: { name: string }) => { prompts.push(section.name); return () => {} } },
@@ -110,14 +111,14 @@ describe('宿主装配', () => {
       effect: (register: () => () => void) => { disposers.push(register()) },
       logger: { error: () => {} },
     }
-    apply(fake as never)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    apply(Object.assign(fake,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
+    await waitReady(routes)
     expect(adapters).toEqual([['dsh-model-manager']])
     expect(toolNames).not.toContain('model_manager_delegate')
     expect(toolNames).toContain('model_manager_inspect_image')
     expect(prompts).toContain('dsh-model-manager')
     expect(routes.map(route => route.path)).toEqual([
-      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/catalog-preview', '/api/model-manager/catalog-resolve', '/api/model-manager/catalog-apply', '/api/model-manager/catalog-restore', '/api/model-manager/parameter-search-credential', '/api/model-manager/model-parameter-preview', '/api/model-manager/official-preview', '/api/model-manager/official-apply', '/api/model-manager/official-restore', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/recommend', '/api/model-manager/overrides',
+      '/api/model-manager', '/api/model-manager/verify', '/api/model-manager/probe', '/api/model-manager/refresh', '/api/model-manager/catalog-preview', '/api/model-manager/catalog-resolve', '/api/model-manager/catalog-apply', '/api/model-manager/sources', '/api/model-manager/sources/credential', '/api/model-manager/sources/ark-auth', '/api/model-manager/sources/preview', '/api/model-manager/catalog-restore', '/api/model-manager/parameter-search-credential', '/api/model-manager/model-parameter-preview', '/api/model-manager/official-preview', '/api/model-manager/official-apply', '/api/model-manager/official-restore', '/api/model-manager/alias-health', '/api/model-manager/native', '/api/model-manager/logs', '/api/model-manager/recommend', '/api/model-manager/overrides',
     ])
     expect(new Set(routes.map(route => route.path)).size).toBe(routes.length)
     for (const dispose of disposers.reverse()) dispose()
@@ -155,8 +156,8 @@ describe('宿主装配', () => {
       effect: (register: () => () => void) => { register() },
       logger: { error: () => {} },
     }
-    apply(fake as never)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    apply(Object.assign(fake,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
+    await waitReady(routes)
     const probe = routes.find(route => route.path === '/api/model-manager/probe')!
     const { res, result } = fakeResponse()
     await probe.handler(fakeRequest({ providerId: 'p', modelId: 'm' }), res)
@@ -187,8 +188,8 @@ describe('宿主装配', () => {
       effect: (register: () => () => void) => { register() },
       logger: { error: () => {} },
     }
-    apply(fake as never)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    apply(Object.assign(fake,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
+    await waitReady(routes)
     const probe = routes.find(route => route.path === '/api/model-manager/probe')!
     const missing = fakeResponse()
     await probe.handler(fakeRequest({ providerId: 'p', modelId: 'ghost' }), missing.res)
@@ -329,8 +330,8 @@ describe('宿主装配', () => {
       effect: (register: () => () => void) => { register() },
       logger: { error: () => {} },
     }
-    apply(fake as never)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    apply(Object.assign(fake,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
+    await waitReady(routes)
     const config = routes.find(route => route.path === '/api/model-manager')!
     const put = fakeRequest({ config: structuredClone(DEFAULT_CONFIG), revision: 1 })
     put.method = 'PUT'
@@ -353,8 +354,8 @@ describe('宿主装配', () => {
       llm: { listProviders: () => [{ id: 'p' }], listConfigurableProviders: () => [], listModels: async () => [{ id: 'm', name: 'm' }], resolveModelInfo: async () => model, registerAdapter: () => () => {}, stream: () => (async function* () { yield { type: 'text-delta', text: '{"simple":{"providerId":"p","modelId":"m"},"normal":{"providerId":"p","modelId":"ghost"},"complex":{"providerId":"p","modelId":"m"}}' }; yield { type: 'finish', reason: { kind: 'stop' } } })() },
       tools: { register: () => () => {} }, subagents: {}, attachments: {}, systemPrompt: { section: () => () => {} }, webServer: { register: (route: { path: string; handler: Function }) => { routes.push(route); return () => {} } }, on: () => () => {}, effect: (register: () => () => void) => { register() }, logger: { error: () => {} },
     }
-    apply(fake as never)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    apply(Object.assign(fake,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
+    await waitReady(routes)
     const recommend = routes.find(route => route.path === '/api/model-manager/recommend')!
     const missing = fakeResponse()
     await recommend.handler(fakeRequest({}), missing.res)
@@ -372,8 +373,8 @@ describe('宿主装配', () => {
     process.env.DSH_HOME = temporary
     const mutate = vi.fn().mockRejectedValueOnce(settingsConflict(23, 25)).mockResolvedValueOnce(undefined)
     const { fake, routes } = writableHost(mutate, 25)
-    apply(fake as never)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    apply(Object.assign(fake,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
+    await waitReady(routes)
     const native = routes.find(route => route.path === '/api/model-manager/native')!
     const { res, result } = fakeResponse()
     await native.handler(fakeRequest({ providerId: 'p', modelId: 'm', revision: 23, image: true }), res)
@@ -386,8 +387,8 @@ describe('宿主装配', () => {
     process.env.DSH_HOME = temporary
     const mutate = vi.fn(async () => { throw settingsConflict(23, 25) })
     const { fake, routes } = writableHost(mutate, 25)
-    apply(fake as never)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    apply(Object.assign(fake,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
+    await waitReady(routes)
     const native = routes.find(route => route.path === '/api/model-manager/native')!
     const { res, result } = fakeResponse()
     await native.handler(fakeRequest({ providerId: 'p', modelId: 'm', revision: 23, image: true }), res)
@@ -396,3 +397,5 @@ describe('宿主装配', () => {
     expect(mutate).toHaveBeenCalledTimes(3)
   })
 })
+
+vi.mock('../src/desktop-settings.js', async original=>({...await original(),DesktopSettings:(await import('./route-port.js')).RouteSettingsPort}))

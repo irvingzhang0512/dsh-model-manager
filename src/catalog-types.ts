@@ -40,7 +40,7 @@ interface CatalogDiffFields {
 export type CatalogDiff = CatalogDiffFields & ({ kind: ModelCatalogIntent['kind']; model: ModelRef } | { kind: CleanupKind; path: string; model?: never })
 export interface CatalogResolution { id: string; optionId: string }
 export interface CatalogPreview {
-  token: string; origin: 'manual' | 'official' | 'parameter'; fetchedAt: string; operations: CatalogDiff[]; selected: string[]
+  token: string; origin: 'manual' | 'official' | 'parameter' | 'source'; fetchedAt: string; operations: CatalogDiff[]; selected: string[]
   counts: { providerId: string; before: number; after: number; operationCount: number }[]
   revisions: Record<string, number | null>; catalogFingerprint: string; overridesFingerprint: string
   writesPlugin: boolean

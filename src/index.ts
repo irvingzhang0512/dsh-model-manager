@@ -1,17 +1,22 @@
-import { randomUUID } from 'node:crypto'
+import { trusted } from "./http-trust.js"
+import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session'
 import type { LlmRuntime, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
+import type { SettingsForms } from '@deepseek-ai/dsh-settings'
+import type { ConfigEditor } from '@deepseek-ai/dsh-config-editor'
+import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
+import { dirname, join } from 'node:path'
+import { DesktopSettings, unpack } from './desktop-settings.js'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
-import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CONFIG, LONG_CONTEXT_ALIAS, managedId, migrateConfig, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Selection, type Verification } from './domain.js'
+import { DEFAULT_CONFIG, LONG_CONTEXT_ALIAS, fromManagedId, managedId, migrateConfig, modelKey, probeSuggestions, resolveSelection, validateConfig, type ManagerConfig, type ModelRef, type ProbeSuggestion, type Selection, type Verification } from './domain.js'
 import { genericProviderAdapter } from './provider-adapter.js'
 import { HostModelBridge, ModelManagerService, isSettingsConflict, resolveDataDir, type ModelInputBridge } from './service.js'
 import { ManagedAdapter, MANAGED_PROVIDER, VisionRegistry } from './adapter.js'
@@ -19,25 +24,24 @@ import { registerManagerTools } from './tools.js'
 import { probePng } from './probe-image.js'
 import { registerOfficialSync } from './official-host.js'
 import { recommendAuto } from './recommend-auto.js'
+import { analyzeImage, imageRefs, visionNotice } from './vision-analysis.js'
 
 export const name = 'dsh-model-manager'
-export const inject = ['llm', 'settings', 'tools', 'attachments', 'webServer', 'systemPrompt', 'credentials']
-export const Config: z<ManagerConfig> = z.any<ManagerConfig>()
+export const inject = ['llm', 'settings', 'tools', 'attachments', 'webServer', 'systemPrompt', 'credentials', 'configEditor', 'tokenMeter']
+export const Config = z.transform(z.any<Partial<ManagerConfig>>(),raw=>{
+  if(!raw || typeof raw!=='object' || Array.isArray(raw)) throw Error('模型管理配置须为对象')
+  const value=migrateConfig({...structuredClone(DEFAULT_CONFIG),...raw})
+  validateConfig(value)
+  return value
+}).volatile()
 
-type Host = Context & { llm: LlmRuntime; settings: SettingsProvider; tools: ToolRuntime; attachments: AttachmentStore; webServer: WebServer; systemPrompt: SystemPrompt; credentials: CredentialProvider }
+type Host = Context & { llm: LlmRuntime; settings: SettingsForms; configEditor: ConfigEditor; tokenMeter:TokenMeter; tools: ToolRuntime; attachments: AttachmentStore; webServer: WebServer; systemPrompt: SystemPrompt; credentials: CredentialProvider }
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
   res.end(JSON.stringify(value))
 }
 
-function trusted(req: IncomingMessage): boolean {
-  if (req.headers['sec-fetch-site'] === 'cross-site') return false
-  const host = req.headers.host
-  const origin = req.headers.origin
-  if (!origin) return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
-  try { return !!host && new URL(origin).host === host } catch { return false }
-}
 
 async function body(req: IncomingMessage): Promise<unknown> {
   let text = ''
@@ -70,7 +74,7 @@ export async function verify(llm: LlmRuntime, attachments: AttachmentStore, serv
     await llm.resolveModelInfo(ref.providerId, ref.modelId, signal)
     if (kind === 'image') {
       const attachment = await attachments.saveImage({ data: probePng(), mediaType: 'image/png' })
-      messages[0].content.push({ type: 'image', attachment })
+      messages[0] = { ...messages[0], content: [...messages[0].content, { type: 'image', attachment }] }
     }
     requestCount = 1
     for await (const chunk of llm.stream({ provider: ref.providerId, model: ref.modelId, messages, tools, reasoningEffort: effort as never, signal })) {
@@ -121,7 +125,7 @@ export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, 
   let original: readonly string[] | undefined
   if (needsElevation) {
     original = inputBridge.modelInput(ref)
-    const revision = inputBridge.currentRevision()
+    const revision = inputBridge.currentRevision(ref)
     if (revision === undefined) notes.push('无法读取宿主设置版本，图片探测被跳过。')
     else {
       try { await inputBridge.setInput(ref, ['text', 'image'], revision); elevated = true }
@@ -134,7 +138,7 @@ export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, 
     if (elevated) {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const revision = inputBridge.currentRevision()
+          const revision = inputBridge.currentRevision(ref)
           if (revision === undefined) throw new Error('无法读取宿主设置版本')
           await inputBridge.setInput(ref, original, revision)
           restoreFailed = false
@@ -148,21 +152,41 @@ export async function probeModel(llm: LlmRuntime, attachments: AttachmentStore, 
       await service.refresh().catch(() => {})
     }
   }
-  return { verifications, suggestions: probeSuggestions(verifications), cancelled: signal.aborted, elevated, restoreFailed, notes, nativeRevision: inputBridge.currentRevision() }
+  return { verifications, suggestions: probeSuggestions(verifications), cancelled: signal.aborted, elevated, restoreFailed, notes, nativeRevision: inputBridge.currentRevision(ref) }
 }
 
 export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void {
-  const baseConfig: ManagerConfig = { ...structuredClone(DEFAULT_CONFIG), ...entryConfig }
+  const baseConfig = migrateConfig({ ...structuredClone(DEFAULT_CONFIG), ...unpack(entryConfig) })
   validateConfig(baseConfig)
-  const scope = ctx.settings.register(name, Config, { base: baseConfig, applies: 'live', validate: value => validateConfig(migrateConfig(value)) })
-  const bridge = new HostModelBridge(ctx.llm, ctx.settings)
-  const service = new ModelManagerService(bridge, resolveDataDir(), ctx.settings)
+  const settings = new DesktopSettings(ctx.configEditor, ctx.settings)
+  settings.isBusy=()=>ctx.get('agents')?.list().some(agent=>agent.status==='running') ?? false
+  const bridge = new HostModelBridge(ctx.llm, settings)
+  const service = new ModelManagerService(bridge, join(dirname(ctx.configEditor.documentPath), 'data', name), settings)
+  service.tokenEstimate=(ref,options)=>{
+    const agent=options.sessionId ? ctx.get('agents')?.get(options.sessionId) : undefined
+    return agent ? ctx.tokenMeter.measure(agent.session,{config:{provider:ref.providerId,model:ref.modelId,...(options.reasoningEffort!==undefined?{reasoningEffort:options.reasoningEffort}:{}),...(options.maxTokens!==undefined?{maxTokens:options.maxTokens}:{})},...(options.tools?{tools:options.tools}:{})}).totalTokens : undefined
+  }
+  service.candidateSignature = async ref => {
+    if(ref.providerId==='opencode-go') {
+      const value=settings.get('opencode-go') as any
+      const refs=[...new Set([value?.apiKeyEnv,...(Array.isArray(value?.accounts)?value.accounts.map((a:any)=>a.apiKeyEnv):[])].filter((name):name is string=>typeof name==='string'))]
+      const keys=await Promise.all(refs.map(async name=>{const found=await ctx.credentials.resolve(credentialRef(name));return [name,found?createHash('sha256').update(found.value).digest('hex'):null]}))
+      return [value,keys]
+    }
+    const entry = ctx.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
+    if (!entry) return [service.signature(ref)]
+    let ns=entry.settingsNs
+    try{ns=settings.namespaceFor(ns)}catch{}
+    let value = settings.get(ns) as any
+    for (const key of entry.settingsPath ?? []) value = value?.[key]
+    const key = typeof value?.apiKeyEnv === 'string' ? await ctx.credentials.resolve(credentialRef(value.apiKeyEnv)) : undefined
+    return [value, key ? createHash('sha256').update(key.value).digest('hex') : null]
+  }
   const vision = new VisionRegistry()
   const adapter = new ManagedAdapter(ctx.llm, service, vision)
-  ctx.effect(() => () => adapter.dispose(), 'dsh-model-manager: cancel active calls')
+  ctx.effect(() => () => { adapter.dispose(); service.health.dispose() }, 'dsh-model-manager: cancel active calls')
   let ready = false
   void service.init().then(() => { ready = true }).catch(err => ctx.logger?.error?.(`[dsh-model-manager] 初始化失败: ${String(err)}`))
-  ctx.effect(() => scope.watch(next => service.onSettingsChanged(next)), 'dsh-model-manager: settings')
   ctx.effect(() => ctx.llm.registerAdapter([MANAGED_PROVIDER], adapter), 'dsh-model-manager: adapter')
   ctx.effect(() => registerManagerTools({ tools: ctx.tools, llm: ctx.llm, attachments: ctx.attachments, service, vision, adapter }), 'dsh-model-manager: tools')
   ctx.effect(() => ctx.systemPrompt.section({ name: 'dsh-model-manager', order: 350,
@@ -173,16 +197,59 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     },
   }), 'dsh-model-manager: prompt')
   ctx.effect(() => ctx.on('llm/adapters-updated', () => { if (ready) void service.refresh().catch(() => {}) }), 'dsh-model-manager: directory')
+  const assembled = new Map<string, ModelRef>()
+  const observed = new Map<string, { turn: number; keys: Set<string> }>()
+  ctx.effect(() => ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
+    const value = await next()
+    if (context.agent && value.variables.provider && value.variables.model) assembled.set(String(context.agent.session.id), { providerId:value.variables.provider,modelId:value.variables.model })
+    return value
+  }, { global:true }), 'dsh-model-manager: assembled model')
+  ctx.effect(() => ctx.on('agent/pre-step', async (payload,next) => {
+    const decision = await next()
+    if (!ready || decision.kind !== 'enter') return decision
+    const session = String(payload.agent.session.id)
+    const delegated = payload.agent.session.header.origin === 'subagent' || !!payload.agent.session.header.parentSession
+    if (delegated) service.markDelegatedSession(session)
+    const active=service.effectiveSelection(session,payload.turn)
+    const selection = delegated ? {} : active
+    const { config } = service.snapshot()
+    const history = payload.agent.session.deriveMessages()
+    const images = imageRefs([...history,...decision.messages])
+    vision.add(session,imageRefs(history),payload.step===1?payload.turn-1:payload.turn)
+    vision.add(session,imageRefs(decision.messages),payload.turn,true)
+    if (!images.length || !config.vision.enabled || config.vision.automatic === false || config.vision.policy === 'native-only') return decision
+    const header = payload.agent.session.requestHeader()?.config
+    const current = assembled.get(session) ?? (header ? {providerId:header.provider,modelId:header.model} : payload.agent.options.provider && payload.agent.options.model ? {providerId:payload.agent.options.provider,modelId:payload.agent.options.model} : service.hostDefault())
+    let candidates = selection.target ? resolveSelection(config,selection.target) : current ? current.providerId === MANAGED_PROVIDER ? current.modelId === 'auto' && config.auto.enabled ? [...['simple','normal','complex'].flatMap(g=>resolveSelection(config,config.auto[g as 'simple'|'normal'|'complex'].target)),...(config.auto.rules??[]).filter(r=>r.enabled).flatMap(r=>resolveSelection(config,r.selection.target))] : current.modelId.startsWith('alias:') ? resolveSelection(config,`@${current.modelId.slice(6)}`) : current.modelId === 'auto' ? resolveSelection(config,config.auto.main.target ?? service.hostDefault()) : [] : [current] : []
+    if (!candidates.length && current?.providerId === MANAGED_PROVIDER && current.modelId !== 'auto' && !current.modelId.startsWith('alias:')) { try { candidates = [fromManagedId(current.modelId)] } catch {} }
+    if (config.vision.policy === 'native-first' && candidates.length && candidates.every(ref=>service.model(ref)?.nativeImage === 'yes')) return decision
+    const latest = [...history,...decision.messages].reverse().find(m=>m.role==='user' && m.source.kind==='user')
+    const question = latest?.content.filter(b=>b.type==='text').map(b=>b.text).join('\n') || '描述图片中与当前任务有关的可见内容、文字和细节；不确定时明确说明。'
+    let state = observed.get(session)
+    if (state?.turn !== payload.turn) { state = {turn:payload.turn,keys:new Set()};observed.set(session,state) }
+    const additions = []
+    for (const image of images) {
+      const key = JSON.stringify([image.attachmentId,question,config.vision])
+      if (state.keys.has(key)) continue
+      const result = await analyzeImage(session,image,question,undefined,payload.signal,{llm:ctx.llm,attachments:ctx.attachments,service,adapter})
+      additions.push(visionNotice(image,result));state.keys.add(key)
+    }
+    payload.signal.throwIfAborted()
+    return {...decision,messages:[...decision.messages,...additions]}
+  },{global:true}), 'dsh-model-manager: automatic vision')
   ctx.effect(() => ctx.on('agent/request', async (payload, next) => {
     const current = await next()
     if (!ready) return current
     const session = payload.agent.session.id as string
-    if (payload.agent.session.header.parentSession) {
+    if (payload.agent.session.header.origin === 'subagent' || payload.agent.session.header.parentSession) {
       if (current.provider === MANAGED_PROVIDER) {
         service.markDelegatedSession(session)
-        if (current.model === 'auto') {
-          const parent = service.latestAutoDecision(payload.agent.session.header.parentSession as string)
-          const selected = parent?.candidates[0]
+        if (current.model === 'auto' || current.model.startsWith('alias:')) {
+          const parentId = String(payload.agent.session.header.parentSession)
+          const historical=[...payload.agent.session.deriveMessages?.() ?? []].reverse().find(m=>m.role==='assistant')
+          const replay=historical?.role==='assistant' ? historical.source.replayState as {response?:{$dmm?:number;provider?:string;model?:string}} | undefined : undefined
+          const recorded=replay?.response?.$dmm===1 && typeof replay.response.provider==='string' && typeof replay.response.model==='string' ? {providerId:replay.response.provider,modelId:replay.response.model} : undefined
+          const selected = service.latestActualModel(parentId) ?? recorded
           if (selected) return { ...current, model: managedId(selected) }
         }
       }
@@ -207,14 +274,14 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
 
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager', handler: async (req, res) => {
     if (!ready) { json(res, 503, { error: '模型管理初始化中' }); return }
-    if (req.method === 'GET') { json(res, 200, { ...service.snapshot(), nativeRevision: ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision }); return }
+    if (req.method === 'GET') { json(res, 200, { ...service.snapshot(), nativeRevision: settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision }); return }
     if (req.method !== 'PUT') { res.setHeader('Allow', 'GET, PUT'); json(res, 405, { error: '方法不允许' }); return }
     if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
     try {
       const input = await body(req) as { config: ManagerConfig; revision: number }
       await service.update(input.config, input.revision)
       // 必须返回完整快照（含 verifications）：客户端保存后会用该响应整体替换渲染状态，缺字段会导致渲染崩溃白屏。
-      json(res, 200, { ...service.snapshot(), nativeRevision: ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision })
+      json(res, 200, { ...service.snapshot(), nativeRevision: settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision })
     } catch (err) { error(res, err) }
   } }), 'dsh-model-manager: config route')
 
@@ -249,11 +316,18 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/refresh', handler: async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
     if (!trusted(req)) { json(res, 403, { error: '跨站请求被拒绝' }); return }
-    try { await service.refresh(); json(res, 200, { ...service.snapshot(), nativeRevision: ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision }) }
+    try { await service.refresh(); json(res, 200, { ...service.snapshot(), nativeRevision: settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision }) }
     catch (err) { error(res, err) }
   } }), 'dsh-model-manager: refresh route')
 
-  registerOfficialSync(ctx, service)
+  registerOfficialSync({ llm: ctx.llm, settings, credentials: ctx.credentials, webServer: ctx.webServer, effect: ctx.effect.bind(ctx) }, service, {llm:ctx.llm,settings,credentials:ctx.credentials,config:()=>service.snapshot().config})
+  ctx.effect(()=>ctx.webServer.register({kind:'exact',path:'/api/model-manager/alias-health',handler:async(req,res)=>{
+    if(!trusted(req)){json(res,403,{error:'跨站请求被拒绝'});return}
+    if(!ready){json(res,503,{error:'模型管理初始化中'});return}
+    if(req.method==='GET'){try{json(res,200,await service.refreshAliasHealth())}catch(err){error(res,err)}return}
+    if(req.method!=='POST'){res.setHeader('Allow','GET, POST');json(res,405,{error:'方法不允许'});return}
+    try{const input=await body(req) as {alias:string;expectedRevisionToken:string};if(typeof input.alias!=='string' || !service.snapshot().config.aliases[input.alias] || typeof input.expectedRevisionToken!=='string') throw Error('别名或状态版本无效');json(res,200,await service.health.reset(input.alias,input.expectedRevisionToken))}catch(err){error(res,err)}
+  }}),'dsh-model-manager: alias health')
 
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager/native', handler: async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); json(res, 405, { error: '方法不允许' }); return }
@@ -265,10 +339,14 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
       if (input.clear && (input.image !== undefined || input.contextWindow !== undefined || input.maxTokens !== undefined)) throw new Error('清除与设置不能在同一次操作中混用')
       if (input.contextWindow !== undefined && (!Number.isInteger(input.contextWindow) || input.contextWindow < 1)) throw new Error('上下文容量必须为正整数')
       if (input.maxTokens !== undefined && (!Number.isInteger(input.maxTokens) || input.maxTokens < 1)) throw new Error('最大输出能力必须为正整数')
+      if(input.image===false || input.clear?.includes('image')) {
+        const {config}=service.snapshot(),visual=config.vision.target ?? config.auto.roles.vision.target
+        if(config.vision.enabled && resolveSelection(config,visual).some(ref=>modelKey(ref)===modelKey(input))) throw Error('该模型仍被启用的视觉辅助引用，请先更换视觉目标或关闭辅助')
+      }
       if (input.clear) await bridge.clearNative(input, input.clear, input.revision)
       else await bridge.applyNative(input, input, input.revision)
       await service.refresh()
-      const revision = ctx.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision
+      const revision = bridge.currentRevision(input)
       json(res, 200, { revision })
     } catch (err) { error(res, err) }
   } }), 'dsh-model-manager: native route')

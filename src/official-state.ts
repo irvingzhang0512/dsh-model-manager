@@ -38,6 +38,7 @@ function traverseRefs(state: OfficialState, visit: (ref: ModelRef, path: string)
   if (state.config.auto.evaluator) visit(state.config.auto.evaluator, 'auto.evaluator')
   if (state.config.official?.analyzer) visit(state.config.official.analyzer, 'official.analyzer')
   for (const field of ['main', 'simple', 'normal', 'complex'] as const) selection(state.config.auto[field], `auto.${field}`)
+  for (const [index, rule] of (state.config.auto.rules ?? []).entries()) selection(rule.selection, `auto.rules[${index}].selection`)
   for (const [key, value] of Object.entries(state.config.auto.roles)) selection(value, `auto.roles.${key}`)
   if (state.config.vision.target && typeof state.config.vision.target !== 'string') visit(state.config.vision.target, 'vision.target')
   for (const [session, value] of Object.entries(state.overrides)) {

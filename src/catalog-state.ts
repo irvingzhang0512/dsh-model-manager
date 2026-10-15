@@ -74,6 +74,7 @@ function visitRefs(state: CatalogState, callback: (ref: ModelRef, path: string, 
   if (state.config.auto.evaluator) visit(state.config.auto.evaluator, 'auto.evaluator')
   if (state.config.official?.analyzer) visit(state.config.official.analyzer, 'official.analyzer')
   for (const field of ['main', 'simple', 'normal', 'complex'] as const) selection(state.config.auto[field], `auto.${field}`)
+  for (const [index, rule] of (state.config.auto.rules ?? []).entries()) selection(rule.selection, `auto.rules[${index}].selection`)
   for (const [key, value] of Object.entries(state.config.auto.roles)) selection(value, `auto.roles.${key}`)
   if (isRef(state.config.vision.target)) visit(state.config.vision.target, 'vision.target')
   for (const [id, override] of Object.entries(state.overrides)) { selection(override.session, `overrides.${id}.session`); selection(override.nextTurn, `overrides.${id}.nextTurn`) }
@@ -102,6 +103,7 @@ function visualRefs(state: CatalogState, value?: ModelRef | string): ModelRef[] 
 function selections(state: CatalogState): { value: Selection; path: string }[] {
   return [
     ...(['main', 'simple', 'normal', 'complex'] as const).map(key => ({ value: state.config.auto[key], path: `auto.${key}` })),
+    ...(state.config.auto.rules ?? []).map((rule, index) => ({ value: rule.selection, path: `auto.rules[${index}].selection` })),
     ...Object.entries(state.config.auto.roles).map(([key, value]) => ({ value, path: `auto.roles.${key}` })),
     ...Object.entries(state.overrides).flatMap(([key, value]) => ['session', 'nextTurn'].flatMap(field => (value as any)[field] ? [{ value: (value as any)[field] as Selection, path: `overrides.${key}.${field}` }] : [])),
   ]

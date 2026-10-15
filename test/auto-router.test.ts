@@ -9,7 +9,7 @@ describe('AUTO 任务选择', () => {
   it('只调用一次独立评估器，结果为复杂档', async () => {
     const config = structuredClone(DEFAULT_CONFIG)
     config.auto.evaluator = { providerId: 'p', modelId: 'eval' }
-    const stream = vi.fn(() => (async function* () { yield { type: 'text-delta', text: '{"grade":"complex","reason":"需要多步推理"}' }; yield { type: 'finish', reason: { kind: 'stop' } } })())
+    const stream = vi.fn(() => (async function* () { yield { type: 'text-delta', text: '{"taskType":"analysis","grade":"complex","reason":"需要多步推理"}' }; yield { type: 'finish', reason: { kind: 'stop' } } })())
     const result = await evaluateTask({ stream } as never, config, { messages: [message('分析缺陷')] } as never)
     expect(result).toMatchObject({ grade: 'complex', fallback: false })
     expect(stream).toHaveBeenCalledTimes(1)
@@ -42,6 +42,6 @@ describe('AUTO 任务选择', () => {
     config.auto.simple.target = { providerId: 'p', modelId: 'short' }
     config.auto.normal.target = { providerId: 'p', modelId: 'text' }
     config.models['["p","short"]'] = { capability: { contextWindow: 1500 } }
-    expect(candidateForGrade(config, [makeModel('short'), makeModel('text')], 'simple', { messages: [message('x'.repeat(900))], maxTokens: 800 } as never)?.grade).toBe('normal')
+    expect(candidateForGrade(config, [makeModel('short'), makeModel('text')], 'simple', { messages: [message('x'.repeat(6000))], maxTokens: 800 } as never)?.grade).toBe('normal')
   })
 })

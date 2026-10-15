@@ -1,9 +1,10 @@
+import { hostRouteUrl } from "./transport.js"
 import React, { useEffect, useState } from 'react'
 import type { ManagerConfig, ModelRecord, ModelRef } from '../domain.js'
 import type { CatalogCapability, CatalogOperation, CatalogPreview, CatalogResolution } from '../catalog-types.js'
 
 export async function catalogRequest(path: string, value: unknown): Promise<any> {
-  const response = await fetch(`/api/model-manager/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) })
+  const response = await fetch(hostRouteUrl(`/api/model-manager/${path}`), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) })
   const body = await response.json()
   if (!response.ok) throw Object.assign(new Error(body.error ?? `HTTP ${response.status}`), { existingModel: body.existingModel })
   return body

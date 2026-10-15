@@ -2,7 +2,7 @@
 
 文档版：`model-manager-desktop-20261015-v1`。日期：2026-10-15。
 
-基线：0.12.0，源码 `ff863f8a8ffae95f25a3ae4b56b1c23f7589e7a1`；目标：插件 0.13.0、DSH Desktop 0.2.0-rc.2。实现状态：待实现；本版文档确认：待用户确认。用户已明确要求实施对话中的完整计划；本文件及同版 SPEC／架构／配置是按仓库流程提交的具体契约，不能将计划授权倒记为这些新增文档已经确认。
+基线：0.12.0，源码 `ff863f8a8ffae95f25a3ae4b56b1c23f7589e7a1`；目标：插件 0.13.0、DSH Desktop 0.2.0-rc.2。本版文档已获用户于 2026-10-15 回复“继续实现”明确确认。实现与分层验证独立记录于 [VERIFICATION-0.13.0.md](VERIFICATION-0.13.0.md)，不倒记早先仅计划授权的阶段。
 
 本版覆盖 SPEC F001–F005、F007–F013，回归已经实现的 F006；不实施未确认的 `batch-verification-20261010-v1`。原始 REQUIREMENTS 只读，历史实现和验证证据保留。本版与旧文档冲突时，目标版本以本版为准；旧规则仍描述 0.12.0 基线，不表示新行为已经实现。
 
@@ -104,18 +104,18 @@
 
 ## 7. 模块与 HTTP 接口（F008／F009／F013）
 
-客户端使用公开 hostRouteUrl 生成主机路由；SSE 使用实际传输公开的 streamBaseUrl。原生 dsh-app://app 请求按实际 Host／Origin 精确校验，不从 location 拼回环地址、不放行任意 null Origin。每个 path 只注册一次并按 method 分发；取消、卸载和页面关闭释放请求、流、计时器及子进程。
+客户端通过本地 transport.hostRouteUrl 统一生成主机路由；原生普通 HTTP／SSE fetch 使用 dsh-app://app 的官方认证转发。公开 streamBaseUrl 供对应流式连接使用，不将回环 HTTP 直接交给原生 fetch（实际原生检查发现会被浏览器拦截）。原生 dsh-app://app 请求按实际 Host／Origin 精确校验，不从 location 拼回环地址、不放行任意 null Origin。每个 path 只注册一次并按 method 分发；取消、卸载和页面关闭释放请求、流、计时器及子进程。
 
 新增模块边界：source-connections 发现及生成 SourcePreview；desktop-settings 解析所有者并提供脱敏 describe／CAS apply；alias-health 管理冷却和恢复租约；vision-analysis 共用于自动摘要与 inspect_image。既有 service／adapter／auto-router／catalog 继续编排，纯模块不反向取得 live ctx。
 
-| 拟新增导出 | 输入与返回契约 |
+| 本版导出 | 输入与返回契约 |
 | --- | --- |
 | source-connections.describeSources(deps) | Promise<SourceDescription[]>；每项 {sourceId,kind,providerId,ownerEntryIds,credential:{ref?,configured,writable},arkProfile?,loaded,modelCount,checkedAt?,reason?}，不包含原始配置或秘密 |
 | source-connections.previewSource(input,signal,deps) | 输入等于 /sources/preview；Promise<SourcePreview> 为 {sourceId,kind,providerId,fetchedAt,connectionChanges,models,catalog,notes}；connectionChanges 每项 {fieldId,label,before,after,selected}，models 每项 {model:ModelRef,fields,evidence}，未知资料不补值，catalog 为既有扩展 CatalogPreview |
 | desktop-settings.describeOwners(ctx) | Promise<OwnerDescription[]>；每项 {owner,entryId,revisionToken,writable,applies,fields}，applies 为 live 或 reload；fields 仅目标允许编辑的 {path,value,inherited,userPresent}，秘密只描述是否存在 |
 | desktop-settings.applyOwner(ctx,entryId,expectedRevisionToken,operations) | Promise<OwnerDescription>；operations 使用现有 set／unset 路径形状，服务端确认所有者／白名单／CAS，返回写后完整描述，不能由页面指定任意 entry |
 | alias-health.openAliasHealthStore(profileDataDir) | Promise<AliasHealthStore>；提供 snapshot、eligible、claimRecovery、recordSuccess、recordFailure、release、reset 和 dispose；recordFailure 使用 LlmFailure／AliasRecovery，reset 使用 alias／expectedRevisionToken；快照只输出第 4 节健康状态，恢复租约为不透明内存 token |
-| vision-analysis.analyzeVision(input,signal,deps) | input={sessionId,question,attachments,region?,snapshot}；Promise<VisionObservation>={attachmentIds,providerId,modelId,question,text,cacheHit}，provider／model 必须为实际成功视觉候选；不接纳会话消息，由调用方的 pre-step 或显式工具接纳 |
+| vision-analysis.analyzeImage(session,ref,question,region,signal,deps) | 每张 ImageAttachmentRef 返回 Promise<VisionAnswer>={answer,model:ModelRef}；imageRefs 去重多图，visionNotice 生成带附件编号与实际视觉候选的 notice，由 pre-step 或显式工具接纳 |
 
 以上 deps 为宿主装配时注入的受限能力（目录、配置桥、凭据解析、请求、存储及日志），不得从客户端传入；模型／Selection／来源关联／规则／健康项类型以 CONFIG 同版定义为准。实现可拆内部辅助文件，但不另造一套对外 wire 字段。
 

@@ -149,7 +149,7 @@ describe('最新网页和 LLM 分析', () => {
     Object.assign(runtime, { resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: supported }], defaultEffort } }) })
     await analyzeOfficial(runtime, runner, source, new AbortController().signal)
     expect(stream.mock.calls[0][0]).not.toHaveProperty('reasoningEffort')
-    expect(stream.mock.calls[0][0].messages[0].source).toEqual({ kind: 'plugin', plugin: 'dsh-model-manager' })
+    expect(stream.mock.calls[0][0].messages[0].source).toEqual({ kind: 'system-prompt' })
   })
   it.each(['low', 'high', 'off'])('只传递显式选择的公开档位 %s', async effort => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['one']))))

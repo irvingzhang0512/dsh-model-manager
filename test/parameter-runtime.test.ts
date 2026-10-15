@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply as applyPi } from '@deepseek-ai/dsh-llm-pi-ai'
+import { apply as applyPi, Config as PiConfig } from '@deepseek-ai/dsh-llm-pi-ai'
 import { readParameterCatalog } from '../src/parameter-catalog.ts'
 import { describeParameterTargets, validateParameterSuggestions, parameterIntents } from '../src/model-parameters.ts'
 import { planCatalog } from '../src/catalog-state.ts'
@@ -8,15 +8,17 @@ afterEach(() => vi.unstubAllGlobals())
 describe('锁定宿主公开目录及实际请求参数', () => {
   it('读取真实安装目录，包含原始 wire 映射，不凭 label 推测', async () => {
     const catalog = await readParameterCatalog({ profiles: [{ providerId: 'deepseek', ns: 'llm-pi-ai' }] } as any)
-    expect(catalog['deepseek-official']['deepseek-v4-flash'].contextWindow).toBeGreaterThan(0)
-    expect(catalog.deepseek['deepseek-v4-flash'].api).toBe('openai-completions')
-    expect(catalog.deepseek['deepseek-v4-flash'].reasoningEfforts).toBeDefined()
+    expect(catalog['deepseek-official']['deepseek-flash'].contextWindow).toBeGreaterThan(0)
+    expect(catalog.deepseek['deepseek-flash'].api).toBe('openai-completions')
+    expect(catalog.deepseek['deepseek-flash'].reasoningEfforts).toBeDefined()
   })
   it('参数写集经过宿主严格校验，目录、推理选择和最终请求 max_tokens/reasoning_effort 生效', async () => {
     let adapter: any, section: any
     let raw: any = { providers: { gateway: { api: 'openai-completions', baseURL: 'https://gateway.example/v1', apiKeyEnv: 'TEST_API_KEY', retryPolicy: { mode: 'normal', maxRetries: 0 }, models: [{ id: 'test', contextWindow: 1000, maxTokens: 100, input: ['text'] }] } } }
-    const ctx: any = { logger: { warn() {}, error() {} }, get: (name: string) => name === 'credentials' ? { resolve: async () => ({ value: 'TEST_KEY' }) } : undefined, llm: { registerConfigurableProviders: () => ({ replace() {} }), registerModelDiscovery() {}, registerAdapter: (_: unknown, next: unknown) => { adapter = next; return { replace() {} } } }, inject: (names: string[], callback: Function) => { if (names.includes('settings')) callback({ settings: { installSection: (_: unknown, _ns: string, _schema: unknown, _config: unknown, opts: any) => { section = opts; opts.setSource(() => raw) } } }) } }
-    applyPi(ctx, raw)
+    const hooks=new Map<string,Function>()
+    const ctx:any={fiber:{entry:{options:{id:'llm-pi-ai'}}},on:(event:string,fn:Function)=>{hooks.set(event,fn)},logger:{warn(){},error(){}},get:(name:string)=>name==='credentials'?{resolve:async()=>({value:'TEST_KEY'}),readRecord:async()=>undefined}:undefined,llm:{registerConfigurableProviders:()=>({replace(){}}),registerModelDiscovery(){},registerAdapter:(_:unknown,next:unknown)=>{adapter=next;return {replace(){}}}},inject:(names:string[],callback:Function)=>{if(names.includes('settings'))callback({effect:(fn:Function)=>fn(),settings:{configure:()=>()=>{}}})}}
+    applyPi(ctx,{providers:{get:()=>raw.providers}} as any)
+    section={validate:(next:any)=>hooks.get('internal/config')!.call(ctx.fiber,undefined,()=>next),onChange:()=>hooks.get('loader/volatile-update')?.()}
     const beforeInfo = await adapter.resolveModel('gateway', 'test'); expect(beforeInfo.defaultMaxTokens).toBe(100)
     const state: any = { config: structuredClone(DEFAULT_CONFIG), overrides: {}, models: [], profiles: [{ providerId: 'gateway', ns: 'llm-pi-ai', path: [], explicit: true, minimumModels: 1, models: structuredClone(raw.providers.gateway.models), effective: { api: 'openai-completions' }, user: raw.providers.gateway }], records: [{ providerId: 'gateway', modelId: 'test', name: 'test', loaded: true, source: 'host', nativeImage: 'no', reasoningEfforts: [], contextWindow: 1000, defaultMaxTokens: 100 }] }
     const target = describeParameterTargets(state, {})[0]

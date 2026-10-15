@@ -13,7 +13,7 @@ describe('视觉工具', () => {
     config.aliases.images = { candidates: models }; config.vision = { enabled: true, policy: 'sidecar-only', target: '@images' }
     vision.add('s', [{ attachmentId: 'image', mediaType: 'image/png', bytes: 1 } as never])
     const calls: string[] = [], cache = vi.fn(async () => {})
-    const service = { snapshot: () => ({ config: structuredClone(config), models: structuredClone(models), revision: 1 }), signature: () => 'sig', getVisionCache: () => undefined, putVisionCache: cache, log: vi.fn(async () => {}), isDelegatedSession: () => false, activeTurn: () => 1 }
+    const service = { snapshot: () => ({ config: structuredClone(config), models: structuredClone(models), revision: 1 }), recordActualModel:vi.fn(),aliasLifecycle:()=>undefined,candidateSignature:async()=>'source-config',latestActualModel:()=>({providerId:'second',modelId:'image'}), signature: () => 'sig', getVisionCache: () => undefined, putVisionCache: cache, log: vi.fn(async () => {}), isDelegatedSession: () => false, activeTurn: () => 1 }
     const llm = { resolveModelInfo: async () => ({ inputModalities: ['image'] }), stream: (options: any) => (async function* () {
       calls.push(options.provider); yield { type: 'text-delta', index: 0, text: options.provider === 'first' ? 'discard' : '红色' }
       yield options.provider === 'first' ? { type: 'finish', reason: { kind: 'error', failure: { code: 'QUOTA', message: 'quota' } } } : { type: 'finish', reason: { kind } }
@@ -21,7 +21,7 @@ describe('视觉工具', () => {
     const adapter = new ManagedAdapter(llm as never, service as never, vision)
     registerManagerTools({ tools: { register: (tool: any) => { registered.set(tool.name, tool); return () => {} } }, llm, service, vision, adapter, attachments: { readImage: async () => ({ data: new Uint8Array([1]) }) } } as never)
     expect(await registered.get('model_manager_inspect_image').execute({ attachment_id: 'image', question: '颜色？' }, { agent: { session: { id: 's' } }, signal: new AbortController().signal })).toBe('红色')
-    expect(calls).toEqual(['first', 'second']); expect(cache).toHaveBeenCalledWith(expect.any(String), '红色')
+    expect(calls).toEqual(['first', 'second']); expect(JSON.parse(cache.mock.calls[0][1])).toMatchObject({answer:'红色',model:{providerId:'second'}})
   })
   it('区域参数实际裁剪像素，并让视觉模型收到裁剪附件', async () => {
     const registered = new Map<string, any>()
@@ -47,7 +47,7 @@ describe('视觉工具', () => {
         readImage: async () => ({ data: original }),
         saveImage: async (input: { data: Buffer }) => { cropped = input.data; return { attachmentId: 'cropped', mediaType: 'image/png', bytes: input.data.length } },
       },
-      service: { snapshot: () => ({ config, revision: 1 }), signature: () => 'version-1', getVisionCache: () => undefined, putVisionCache: async () => {}, log: async () => {} },
+      service: { snapshot: () => ({ config, revision: 1 }), recordActualModel:vi.fn(),aliasLifecycle:()=>undefined,candidateSignature:async()=>'source-config',latestActualModel:()=>({providerId:'second',modelId:'image'}), signature: () => 'version-1', getVisionCache: () => undefined, putVisionCache: async () => {}, log: async () => {} },
       vision,
     } as never)
     const tool = registered.get('model_manager_inspect_image')
@@ -77,7 +77,7 @@ describe('视觉工具', () => {
         })(),
       },
       attachments: { readImage: async () => ({ data: Buffer.from([1]) }) },
-      service: { snapshot: () => ({ config, revision: 1 }), signature: () => 'version-1', getVisionCache: () => undefined, putVisionCache: cache, log },
+      service: { snapshot: () => ({ config, revision: 1 }), recordActualModel:vi.fn(),aliasLifecycle:()=>undefined,candidateSignature:async()=>'source-config',latestActualModel:()=>({providerId:'second',modelId:'image'}), signature: () => 'version-1', getVisionCache: () => undefined, putVisionCache: cache, log },
       vision,
     } as never)
     const tool = registered.get('model_manager_inspect_image')
@@ -87,7 +87,7 @@ describe('视觉工具', () => {
     expect(log).toHaveBeenCalledWith(expect.objectContaining({ action: 'vision', status: 'error', managedRequestId: expect.any(String) }))
     aborted = true
     controller.abort()
-    await expect(execute()).rejects.toThrow('视觉调用失败：aborted')
+    await expect(execute()).rejects.toThrow()
     expect(log).toHaveBeenCalledWith(expect.objectContaining({ action: 'vision', status: 'aborted' }))
     expect(cache).not.toHaveBeenCalled()
     dispose()

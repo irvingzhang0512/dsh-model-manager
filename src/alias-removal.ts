@@ -29,6 +29,7 @@ export function planAliasRemoval(state: CatalogState, intent: ModelCatalogIntent
     else { selection.target = structuredClone(picked.value as ModelRef); parameter(selection, selection.target, path) }
   }
   for (const grade of ['main', 'simple', 'normal', 'complex'] as const) ordinary(working.config.auto[grade], `auto.${grade}`, grade !== 'main' && working.config.auto.enabled)
+  for (const [index, rule] of (working.config.auto.rules ?? []).entries()) ordinary(rule.selection, `auto.rules[${index}].selection`, working.config.auto.enabled && rule.enabled)
   for (const [key, selection] of Object.entries(working.config.auto.roles)) if (key !== 'vision') ordinary(selection, `auto.roles.${key}`)
   for (const [session, override] of Object.entries(working.overrides)) for (const scope of ['session', 'nextTurn'] as const) if (override[scope]) ordinary(override[scope]!, `overrides.${session}.${scope}`)
 

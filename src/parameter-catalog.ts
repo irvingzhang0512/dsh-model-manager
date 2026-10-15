@@ -1,3 +1,4 @@
+import { unpack } from './desktop-settings.js'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { readFile } from 'node:fs/promises'
@@ -10,7 +11,7 @@ export async function readParameterCatalog(state: CatalogState): Promise<HostPar
   const catalog: HostParameterCatalog = {}
   try {
     const host = await import('@deepseek-ai/dsh-llm-deepseek')
-    const defaults = host.Config({})
+    const defaults = unpack(host.Config({}))
     catalog['deepseek-official'] = Object.fromEntries((defaults.models ?? []).map((model: any) => [model.id, { id: model.id, name: model.name, description: model.description, contextWindow: model.contextWindow, maxTokens: model.maxTokens, inputModalities: model.inputModalities, imagePixelBudget: model.imagePixelBudget, imageMaxBytes: model.imageMaxBytes, systemPromptUpdate: model.systemPromptUpdate }]))
   } catch { /* 宿主未提供公开目录模块时不能伪造目录来源。 */ }
   try {

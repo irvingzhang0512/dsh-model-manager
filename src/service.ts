@@ -2,14 +2,16 @@ import { createHash } from 'node:crypto'
 import { appendFile, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
-import type { SettingsPathOp, SettingsProvider } from '@deepseek-ai/dsh-settings'
+import type { LlmRuntime, GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { SettingsPathOp, SettingsProvider } from './desktop-settings.js'
 import { DEFAULT_CONFIG, mergeSelection, migrateConfig, modelKey, resolveSelection, validateConfig, type ManagerConfig, type ModelRecord, type ModelRef, type Selection, type Verification } from './domain.js'
 import type { AutoDecision } from './auto-router.js'
 import { canonical, type FutureOverrides } from './official-state.js'
 import type { CatalogCapability } from './catalog-types.js'
 import { legacyImageOverrides, preserveLegacyImages, preserveUnknownConfig } from './legacy-image.js'
 import { legacyAliasReliability, rejectAliasReliability } from './legacy-alias.js'
+import { AliasHealthStore } from './alias-health.js'
+import type { AliasLifecycle } from './alias-runtime.js'
 
 /**
  * 宿主设置服务拒绝过期 revision 时抛出的冲突错误（`SettingsConflictError`，`code` 固定为 `SETTINGS_CONFLICT`）。
@@ -34,18 +36,19 @@ export interface ModelBridge {
 export interface ModelInputBridge {
   modelInput(ref: ModelRef): readonly string[] | undefined
   setInput(ref: ModelRef, input: readonly string[] | undefined, revision: number): Promise<void>
-  currentRevision(): number | undefined
+  currentRevision(ref?: ModelRef): number | undefined
 }
 
 export class HostModelBridge implements ModelBridge {
   constructor(private readonly llm: LlmRuntime, private readonly settings: SettingsProvider) {}
+  private namespace(ns: string) { try{return this.settings.namespaceFor?.(ns) ?? ns}catch{return ns} }
 
   catalogCapabilities(): CatalogCapability[] {
     const namespaces = new Set(this.settings.describe({ redactSecrets: true }).map(item => item.ns as string))
     const configured = this.llm.listConfigurableProviders()
     return this.llm.listProviders().filter(p => p.id !== 'dsh-model-manager').map(provider => {
       const entry = configured.find(p => p.provider === provider.id)
-      const ns = entry?.settingsNs ?? (provider.id === 'deepseek-official' ? 'llm-deepseek' : undefined)
+      const ns = entry ? this.namespace(entry.settingsNs) : provider.id === 'deepseek-official' ? 'llm-deepseek' : undefined
       const editable = this.settings.writable !== false && !!ns && namespaces.has(ns) && ['llm-deepseek', 'llm-pi-ai'].includes(ns)
       return { providerId: provider.id, canAdd: editable, canRename: editable, canRemove: editable, minimumModels: ns === 'llm-pi-ai' ? 1 : 0, ...(!editable ? { reason: '该 Provider 未公开已适配的可写目录契约' } : {}) }
     })
@@ -53,21 +56,28 @@ export class HostModelBridge implements ModelBridge {
 
   async catalog(): Promise<ModelRecord[]> {
     const providers = this.llm.listProviders().filter(p => p.id !== 'dsh-model-manager')
-    const writable = new Set(this.llm.listConfigurableProviders().filter(p => p.settingsNs === 'llm-pi-ai').map(p => p.provider))
+    const writable = new Set(this.llm.listConfigurableProviders().filter(p => ['llm-pi-ai','llm-deepseek'].includes(this.namespace(p.settingsNs))).map(p => p.provider))
     const configured = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
     const result = await Promise.all(providers.map(async provider => {
       const models = await this.llm.listModels(provider.id).catch(() => [])
       return Promise.all(models.map(async model => {
         const info = await this.llm.resolveModelInfo(provider.id, model.id).catch(() => model)
-        const canWrite = writable.has(provider.id) && (!configured?.providers?.[provider.id]?.models?.length || configured.providers[provider.id].models!.some(item => item.id === model.id))
+        const canWrite = writable.has(provider.id) && (provider.id === 'deepseek-official' || !configured?.providers?.[provider.id]?.models?.length || configured.providers[provider.id].models!.some(item => item.id === model.id))
+        const ns=provider.id==='deepseek-official'?'llm-deepseek':'llm-pi-ai'
+        const raw=this.settings.describe?.().find(d=>d.ns===ns)?.user as any
+        const profile=provider.id==='deepseek-official'?raw:raw?.providers?.[provider.id]
+        const saved=profile?.models?.find((m:any)=>m.id===model.id) ?? profile?.modelOverrides?.[model.id]
         return {
           providerId: provider.id, modelId: model.id, name: model.name,
           nativeImage: info.inputModalities ? info.inputModalities.includes('image') ? 'yes' as const : 'no' as const : 'unknown' as const,
           reasoningEfforts: 'reasoning' in info && info.reasoning ? info.reasoning.efforts.map(e => ({ id: e.id as string, name: e.name })) : [],
+          defaultReasoningEffort:'reasoning' in info ? info.reasoning?.defaultEffort as string | undefined : undefined,
+          nativeDeclaration: canWrite && saved?.[provider.id==='deepseek-official'?'inputModalities':'input']!==undefined ? 'saved' as const : 'default' as const,
           contextWindow: 'context' in info ? info.context?.contextWindow : undefined,
           defaultMaxTokens: 'defaultMaxTokens' in info ? info.defaultMaxTokens : undefined,
           source: 'host' as const, loaded: true,
           nativeEditable: canWrite,
+          nativeRevision: canWrite ? this.currentRevision({providerId:provider.id,modelId:model.id}) : undefined,
           nativeClearable: canWrite && !configured?.providers?.[provider.id]?.models?.length,
           nativeEditReason: canWrite ? undefined : writable.has(provider.id) ? '模型不在 Provider 的可编辑配置清单中' : '该 Provider 未公开可写模型字段',
         }
@@ -78,9 +88,19 @@ export class HostModelBridge implements ModelBridge {
 
   async applyNative(ref: ModelRef, fields: { image?: boolean; contextWindow?: number; maxTokens?: number }, revision: number): Promise<void> {
     const entry = this.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
-    if (!entry || entry.settingsNs !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
+    if (entry && this.namespace(entry.settingsNs)==='llm-deepseek') {
+      const section=this.settings.get('llm-deepseek') as {models?:Record<string,unknown>[]}|undefined
+      if(!section?.models) throw Error('DeepSeek 模型清单不可编辑')
+      const models=structuredClone(section.models),index=models.findIndex(m=>m.id===ref.modelId)
+      if(index<0) throw Error('模型不在来源目录中')
+      const input=Array.isArray(models[index].inputModalities) ? models[index].inputModalities as string[] : ['text']
+      models[index]={...models[index],...(fields.image===undefined ? {} : {inputModalities:fields.image ? [...new Set([...input,'image'])] : input.filter(i=>i!=='image')}),...(fields.contextWindow===undefined?{}:{contextWindow:fields.contextWindow}),...(fields.maxTokens===undefined?{}:{maxTokens:fields.maxTokens})}
+      await this.settings.mutate('llm-deepseek',[{op:'set',path:['models'],value:models}],revision);return
+    }
+    if (!entry || this.namespace(entry.settingsNs) !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
     const fieldPath = ['providers', ref.providerId, 'modelOverrides', ref.modelId]
-    const values = { ...(fields.image !== undefined ? { input: fields.image ? ['text', 'image'] : ['text'] } : {}),
+    const input=this.modelInput(ref) ?? ['text']
+    const values = { ...(fields.image !== undefined ? { input: fields.image ? [...new Set([...input,'image'])] : input.filter(i=>i!=='image') } : {}),
       ...(fields.contextWindow !== undefined ? { contextWindow: fields.contextWindow } : {}),
       ...(fields.maxTokens !== undefined ? { maxTokens: fields.maxTokens } : {}) }
     // 每次尝试都重读分节重建 ops：显式模型清单是整表替换，用旧快照重试会覆盖并发写入的兄弟模型字段。
@@ -105,7 +125,7 @@ export class HostModelBridge implements ModelBridge {
 
   async clearNative(ref: ModelRef, fields: readonly ('image' | 'contextWindow' | 'maxTokens')[], revision: number): Promise<void> {
     const entry = this.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
-    if (!entry || entry.settingsNs !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
+    if (!entry || this.namespace(entry.settingsNs) !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
     const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string }[] }> } | undefined
     if (section?.providers?.[ref.providerId]?.models?.length) throw new Error('此 Provider 使用显式模型清单，无法安全地清除字段覆盖')
     const names = { image: 'input', contextWindow: 'contextWindow', maxTokens: 'maxTokens' } as const
@@ -114,6 +134,7 @@ export class HostModelBridge implements ModelBridge {
 
   /** 读取模型当前生效的 input 模态声明：显式清单优先，其次 modelOverrides；undefined 表示未显式声明。 */
   modelInput(ref: ModelRef): readonly string[] | undefined {
+    if(ref.providerId==='deepseek-official') return (this.settings.get('llm-deepseek') as {models?:{id:string;inputModalities?:string[]}[]}|undefined)?.models?.find(m=>m.id===ref.modelId)?.inputModalities
     const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string; input?: string[] }[]; modelOverrides?: Record<string, { input?: string[] }> }> } | undefined
     const profile = section?.providers?.[ref.providerId]
     if (profile?.models?.length) return profile.models.find(item => item.id === ref.modelId)?.input
@@ -123,7 +144,15 @@ export class HostModelBridge implements ModelBridge {
   /** 精确设置或删除 input 模态声明；恢复探测前的原值时使用。宿主 revision 可能被提权/还原等并发写入推进，冲突交给 `mutate` 重试。 */
   async setInput(ref: ModelRef, input: readonly string[] | undefined, revision: number): Promise<void> {
     const entry = this.llm.listConfigurableProviders().find(p => p.provider === ref.providerId)
-    if (!entry || entry.settingsNs !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
+    if (entry && this.namespace(entry.settingsNs)==='llm-deepseek') {
+      const section=this.settings.get('llm-deepseek') as {models?:{id:string;inputModalities?:string[]}[]}|undefined
+      if(!section?.models) throw Error('DeepSeek 模型目录不可编辑')
+      const models=structuredClone(section.models),model=models.find(m=>m.id===ref.modelId)
+      if(!model) throw Error('模型不在来源目录中')
+      if(input===undefined) delete model.inputModalities;else model.inputModalities=[...input]
+      await this.settings.mutate('llm-deepseek',[{op:'set',path:['models'],value:models}],revision);return
+    }
+    if (!entry || this.namespace(entry.settingsNs) !== 'llm-pi-ai') throw new Error('该 Provider 未公开可写模型字段')
     const build = (): SettingsPathOp[] => {
       const section = this.settings.get('llm-pi-ai') as { providers?: Record<string, { models?: { id: string; input?: string[] }[] }> } | undefined
       const profile = section?.providers?.[ref.providerId]
@@ -162,15 +191,15 @@ export class HostModelBridge implements ModelBridge {
     throw lastError
   }
 
-  currentRevision(): number | undefined {
-    return this.settings.describe({ redactSecrets: true }).find(d => d.ns === 'llm-pi-ai')?.revision
+  currentRevision(ref?: ModelRef): number | undefined {
+    return this.settings.describe({ redactSecrets: true }).find(d => d.ns === (ref?.providerId==='deepseek-official'?'llm-deepseek':'llm-pi-ai'))?.revision
   }
 }
 
 export function resolveDataDir(profile?: string): string {
   const flag = process.argv.findIndex(arg => arg === '--profile')
   const fromArgv = flag >= 0 ? process.argv[flag + 1] : process.argv.find(arg => arg.startsWith('--profile='))?.slice('--profile='.length)
-  profile ??= process.env.DSH_PROFILE || fromArgv || 'web'
+  profile ??= process.env.DSH_PROFILE || fromArgv || 'desktop'
   if (!/^[a-zA-Z0-9_-]+$/.test(profile)) throw new Error('无效的 DSH profile 名称')
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
   return join(home, 'profiles', profile, 'data', 'dsh-model-manager')
@@ -190,6 +219,23 @@ async function readJsonWithBackup<T>(path: string): Promise<T | undefined> {
 }
 
 export class ModelManagerService {
+  readonly health: AliasHealthStore
+  candidateSignature: (ref: ModelRef) => Promise<unknown> = async () => undefined
+  tokenEstimate?: (ref:ModelRef,options:GenerateOptions)=>number | undefined
+  private aliasTurns = new Map<string, { cursor: number; candidates: string }>()
+  private actualModels = new Map<string, ModelRef>()
+  latestActualModel(session: string) { return this.actualModels.get(session) }
+  recordActualModel(session: string, ref: ModelRef) { this.actualModels.set(session, structuredClone(ref)) }
+  async refreshAliasHealth() {
+    const {config}=this.snapshot(),valid=new Set<string>()
+    for(const [alias,value]of Object.entries(config.aliases)) for(const ref of value.candidates) {
+      valid.add(`${alias}:${modelKey(ref)}`)
+      const signature=createHash('sha256').update(canonical([value,config.models[modelKey(ref)],await this.candidateSignature(ref)])).digest('hex')
+      await this.health.eligible(alias,ref,signature)
+    }
+    await this.health.retain(valid)
+    return this.health.snapshot()
+  }
   private config: ManagerConfig = structuredClone(DEFAULT_CONFIG)
   private revision = 0
   private models: ModelRecord[] = []
@@ -205,11 +251,46 @@ export class ModelManagerService {
   private catalogBackupId?: string
   private catalogBackupWritesPlugin?: boolean
   private parameterBackupId?: string
-  constructor(private readonly bridge: ModelBridge, private readonly dataDir: string, private readonly settings?: SettingsProvider) {}
+  private sourceBackupId?: string
+  constructor(private readonly bridge: ModelBridge, readonly dataDir: string, private readonly settings?: SettingsProvider) { this.health = new AliasHealthStore(dataDir) }
+
+  async aliasCandidateAvailable(alias:string,ref:ModelRef,config:ManagerConfig):Promise<boolean> {
+    const signature=createHash('sha256').update(canonical([config.aliases[alias],config.models[modelKey(ref)],await this.candidateSignature(ref)])).digest('hex')
+    return (await this.health.eligible(alias,ref,signature)).allowed
+  }
+  aliasLifecycle(alias: string, candidates: ModelRef[], config: ManagerConfig, session: string, turn?: number): AliasLifecycle {
+    const key = `${session}:${turn}:${alias}`, identity = canonical(candidates)
+    const tokens = new Map<string, { ref: ModelRef; token: string; signature: string }>()
+    const cursor = turn === undefined ? undefined : this.aliasTurns.get(key)
+    let position = cursor?.candidates === identity ? cursor.cursor : 0
+    return {
+      admit: async ref => {
+        const index = candidates.findIndex(c => modelKey(c) === modelKey(ref))
+        if (index < position) return '本轮已切换到后续候选'
+        const signature = createHash('sha256').update(canonical([config.aliases[alias], config.models[modelKey(ref)], await this.candidateSignature(ref)])).digest('hex')
+        const eligible = await this.health.eligible(alias, ref, signature)
+        if (!eligible.allowed) return eligible.reason ?? '候选正在恢复'
+        const token = this.health.claimRecovery(alias, ref)
+        if (!token) return '另一个会话正在恢复该候选'
+        tokens.set(modelKey(ref), { ref, token, signature })
+      },
+      settled: async (ref, failure) => {
+        const ticket = tokens.get(modelKey(ref)); if (!ticket) return
+        const index = candidates.findIndex(c => modelKey(c) === modelKey(ref))
+        position = failure ? index + 1 : index
+        if (turn !== undefined) this.aliasTurns.set(key, { cursor: position, candidates: identity })
+        if (failure) await this.health.recordFailure(alias, ref, ticket.signature, failure, config.aliases[alias]?.recovery ?? {}, ticket.token)
+        else { this.recordActualModel(session, ref); await this.health.recordSuccess(alias, ref, ticket.signature, ticket.token) }
+        tokens.delete(modelKey(ref))
+      },
+      release: () => { for (const t of tokens.values()) this.health.release(alias, t.ref, t.token); tokens.clear() },
+    }
+  }
 
   init(): Promise<void> { return this.initialization ??= this.initialize() }
   private async initialize(): Promise<void> {
     await mkdir(this.dataDir, { recursive: true })
+    await this.health.init()
     const stored = this.settings?.get('dsh-model-manager') as ManagerConfig | undefined
     if (stored) {
       const migrated = migrateConfig(stored)
@@ -224,7 +305,11 @@ export class ModelManagerService {
     if (savedOverrides) for (const [session, value] of Object.entries(savedOverrides)) this.overrides.set(session, value)
     const savedCache = await readJsonWithBackup<Record<string, { answer: string; at: number }>>(join(this.dataDir, 'vision-cache.json'))
     if (savedCache) for (const [key, value] of Object.entries(savedCache)) if (value.at > Date.now() - 7 * 86400000) this.visionCache.set(key, value)
-    const latest = await readJsonWithBackup<{ manual?: string; parameter?: string }>(join(this.dataDir, 'catalog-backups', 'latest.json'))
+    const latest = await readJsonWithBackup<{ manual?: string; parameter?: string; source?:string }>(join(this.dataDir, 'catalog-backups', 'latest.json'))
+    if(latest?.source && /^[0-9a-f-]{36}$/.test(latest.source)) {
+      const backup=await readJsonWithBackup<{status:string}>(join(this.dataDir,'catalog-backups',`${latest.source}.json`))
+      if(backup?.status==='applied') this.sourceBackupId=latest.source
+    }
     if (latest?.parameter && /^[0-9a-f-]{36}$/.test(latest.parameter)) {
       const backup = await readJsonWithBackup<{ status: string }>(join(this.dataDir, 'catalog-backups', `${latest.parameter}.json`))
       if (backup?.status === 'applied') this.parameterBackupId = latest.parameter
@@ -236,15 +321,19 @@ export class ModelManagerService {
   }
 
   onCatalogBackup(id: string, origin: string, status: string, writesPlugin: boolean): void {
+    if(origin==='source' && status==='applied') this.sourceBackupId=id
+    if(id===this.sourceBackupId && status==='restored') this.sourceBackupId=undefined
     if (origin === 'parameter' && status === 'applied') this.parameterBackupId = id
     if (id === this.parameterBackupId && status === 'restored') this.parameterBackupId = undefined
     if (origin === 'manual' && status === 'applied') { this.catalogBackupId = id; this.catalogBackupWritesPlugin = writesPlugin }
     else if (id === this.catalogBackupId && status === 'restored') { this.catalogBackupId = undefined; this.catalogBackupWritesPlugin = undefined }
   }
-  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; legacyImageOverrideCount: number; legacyAliasReliabilityCount: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
+  snapshot(): { revision: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; sourceBackupId?:string; legacyImageOverrideCount: number; legacyAliasReliabilityCount: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] } {
+    const live = this.settings?.describe().find(d => d.ns === 'dsh-model-manager')
+    if (live && live.revision !== this.revision) this.onSettingsChanged(live.value as ManagerConfig)
     return { revision: this.revision, config: structuredClone(this.config), models: structuredClone(this.models), hostDefault: this.hostDefault(),
       catalogCapabilities: this.bridge.catalogCapabilities?.() ?? [], catalogBackupId: this.catalogBackupId, catalogBackupWritesPlugin: this.catalogBackupWritesPlugin,
-      parameterBackupId: this.parameterBackupId, legacyImageOverrideCount: legacyImageOverrides(this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.user).length,
+      parameterBackupId: this.parameterBackupId, sourceBackupId:this.sourceBackupId, legacyImageOverrideCount: legacyImageOverrides(this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.user).length,
       legacyAliasReliabilityCount: legacyAliasReliability(this.settings?.describe({ redactSecrets: true }).find(d => d.ns === 'dsh-model-manager')?.user).length,
       verifications: [...this.verification.values()].map(value => ({ ...structuredClone(value), stale: value.signature !== this.signature(value.model, value.kind) })) }
   }
@@ -257,8 +346,8 @@ export class ModelManagerService {
   private decorateModels(models: ModelRecord[]): ModelRecord[] {
     return models.map(model => ({ ...model,
       catalogOrigin: this.config.catalogMetadata?.[modelKey(model)]?.origin ?? 'unknown', customName: this.config.catalogMetadata?.[modelKey(model)]?.customName ?? false,
-      capabilitySource: model.providerId === 'deepseek-official' && this.config.official ? this.config.official.sourceUrl ?? this.config.official.sources?.models ?? 'DSH 已加载模型目录' : 'DSH 已加载模型目录',
-      capabilityCheckedAt: model.providerId === 'deepseek-official' ? this.config.official?.checkedAt : undefined }))
+      capabilitySource: this.config.catalogMetadata?.[modelKey(model)]?.origin==='source' ? '来源目录资料（经预览采用）' : model.providerId === 'deepseek-official' && this.config.official ? this.config.official.sourceUrl ?? this.config.official.sources?.models ?? 'DSH 已加载模型目录' : 'DSH 已加载模型目录',
+      capabilityCheckedAt: typeof this.config.catalogMetadata?.[modelKey(model)]?.checkedAt==='string' ? this.config.catalogMetadata[modelKey(model)].checkedAt as string : model.providerId === 'deepseek-official' ? this.config.official?.checkedAt : undefined }))
   }
 
   async update(next: ManagerConfig, revision: number): Promise<number> {
@@ -375,6 +464,7 @@ export class ModelManagerService {
   isDelegatedSession(session: string): boolean { return this.delegatedSessions.has(session) }
 
   endTurn(session: string, turn: number): void {
+    for (const key of this.aliasTurns.keys()) if (key.startsWith(`${session}:${turn}:`)) this.aliasTurns.delete(key)
     const value = this.overrides.get(session)
     if (value?.active?.turn !== turn) return
     delete value.active
@@ -386,9 +476,10 @@ export class ModelManagerService {
 
   signature(ref: ModelRef, kind?: Verification['kind']): string {
     const model = this.model(ref)
+    const {nativeRevision:_revision,...stableModel}=model ?? {}
     const settings = this.config.models[modelKey(ref)]
     const reasoningSelection = kind === 'reasoning' ? this.config.auto.main : undefined
-    return createHash('sha256').update(JSON.stringify({ model, settings, reasoningSelection, providerAdapterVersion: 1 })).digest('hex')
+    return createHash('sha256').update(JSON.stringify({ model:stableModel, settings, reasoningSelection, providerAdapterVersion: 1 })).digest('hex')
   }
 
   verificationKey(ref: ModelRef, kind: Verification['kind']): string { return `${modelKey(ref)}:${kind}` }

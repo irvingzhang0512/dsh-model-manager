@@ -1,3 +1,4 @@
+import { hostRouteUrl } from "./transport.js"
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AutoTab } from './auto-tabs.js'
 import { DEFAULT_OFFICIAL_URL, DEFAULT_ANALYSIS_TIMEOUT_SECONDS, officialAnalysisTimeout, predictedModelCount, type OfficialPreview, type OfficialProgress } from '../official-types.js'
@@ -8,11 +9,13 @@ import type { CatalogCapability, CatalogResolution } from '../catalog-types.js'
 import type { ManagerConfig, ModelRecord, ModelRef, ProbeField, ProbeSuggestion, Verification } from '../domain.js'
 import { probeSuggestions } from '../domain.js'
 import { ParameterPanel } from './parameter-panel.js'
+import { SourcePanel } from './source-panel.js'
+import { AliasHealthPanel } from './alias-health-panel.js'
 
 export const inject = ['slots']
-type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities?: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; legacyImageOverrideCount?: number; legacyAliasReliabilityCount?: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
-type Tab = '模型' | '别名与兜底' | 'AUTO 自动选模型' | '视觉' | '日志'
-const tabs: Tab[] = ['模型', '别名与兜底', 'AUTO 自动选模型', '视觉', '日志']
+type Snapshot = { revision: number; nativeRevision?: number; config: ManagerConfig; models: ModelRecord[]; catalogCapabilities?: CatalogCapability[]; catalogBackupId?: string; parameterBackupId?: string; sourceBackupId?:string; legacyImageOverrideCount?: number; legacyAliasReliabilityCount?: number; catalogBackupWritesPlugin?: boolean; hostDefault?: ModelRef; verifications: (Verification & { stale: boolean })[] }
+type Tab = '模型来源' | '模型' | '别名与兜底' | 'AUTO 自动选模型' | '视觉' | '日志'
+const tabs: Tab[] = ['模型来源', '模型', '别名与兜底', 'AUTO 自动选模型', '视觉', '日志']
 const probeLabels: Record<ProbeField, string> = { hostImage: '宿主原生图片声明' }
 type Notice = { id: number; kind: 'info' | 'success' | 'error'; text: string }
 type ProbeResponse = { verifications: Verification[]; suggestions: ProbeSuggestion[]; cancelled?: boolean; elevated?: boolean; restoreFailed?: boolean; notes?: string[]; nativeRevision?: number }
@@ -40,7 +43,7 @@ function asSnapshot(value: any): Snapshot {
 }
 
 const style = `
-.dmm-root{padding:20px;max-width:1100px;color:var(--dsw-alias-label-primary,#222)}
+.dmm-root [hidden]{display:none!important}.dmm-root{font-family:system-ui,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;padding:20px;max-width:1100px;color:var(--dsw-alias-label-primary,#222)}
 .dmm-root h2{margin:0 0 6px;font-size:20px}.dmm-muted{color:var(--dsw-alias-label-secondary,#666);font-size:12px}
 .dmm-tabs{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0}.dmm-tabs button,.dmm-root button,.dmm-composer{font:inherit}
 .dmm-tabs button,.dmm-root button{border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:7px;background:var(--dsw-alias-bg-layer-2,#fff);color:inherit;padding:6px 10px;cursor:pointer}
@@ -85,7 +88,7 @@ function injectStyle(): void {
   const node = document.createElement('style'); node.dataset.dshModelManager = ''; node.textContent = style; document.head.appendChild(node)
 }
 async function request(path: string, init?: RequestInit): Promise<any> {
-  const response = await fetch(`/api/model-manager${path}`, { headers: { 'Content-Type': 'application/json' }, ...init })
+  const response = await fetch(hostRouteUrl(`/api/model-manager${path}`), { headers: { 'Content-Type': 'application/json' }, ...init })
   const value = await response.json()
   if (!response.ok) throw new Error(value.error ?? `HTTP ${response.status}`)
   return value
@@ -186,13 +189,14 @@ export function VisionSection({ draft, models, aliases, edit }: { draft: Manager
       <p style={{ margin: '6px 0', fontSize: 13 }}>开启「视觉辅助」后，插件在每次请求发出前接管图片路由：</p>
       <ul className="dmm-steps">
         <li><strong>当前模型自己支持看图</strong>：图片原样随消息发给它，效果最直接，也不产生额外调用。</li>
-        <li><strong>当前模型不支持看图</strong>：消息里的图片被替换成文字占位，模型改用 model_manager_inspect_image 工具看图——插件把原图发给下方配置的「视觉模型」，再把视觉模型的文字结论交回对话模型。</li>
+        <li><strong>当前模型不支持看图</strong>：自动模式先请视觉模型理解图片，再把带来源的观察交给当前模型；仍可用看图工具继续追问或裁剪。</li>
       </ul>
-      <p className="dmm-muted">附件上传与发送流程保持不变；历史消息里的旧图片不会反复重看，只有本轮新发的图片才触发看图。关闭开关立即恢复 DSH 默认行为。</p>
+      <p className="dmm-muted">附件上传与发送流程保持不变；新图和工具图片都会处理；历史追问按当前问题读取，会话内复用相同问题的观察。关闭开关立即恢复 DSH 默认行为。</p>
     </details>
     <div className="dmm-card">
       <div className="dmm-switch-row"><div><strong>视觉辅助</strong><span className="dmm-muted">当前模型看不了图时，交给辅助模型理解图片。</span></div><label aria-label="启用视觉辅助"><input type="checkbox" checked={draft.vision.enabled} onChange={event => edit(next => { next.vision.enabled = event.target.checked })} />{draft.vision.enabled ? '已开启' : '已关闭'}</label></div>
       {draft.vision.enabled && <>
+      <label className="dmm-row"><input type="checkbox" checked={draft.vision.automatic!==false} onChange={e=>edit(next=>{next.vision.automatic=e.target.checked})}/>自动理解图片（默认开启）</label><p className="dmm-muted">自动模式在每步请求前准备必要观察，包括工具返回的图片，并在会话中记录视觉来源；关闭后仍可用看图工具追问或裁剪。</p>
       <div className="dmm-row"><label>策略 <select value={draft.vision.policy} onChange={event => edit(next => { next.vision.policy = event.target.value as ManagerConfig['vision']['policy'] })}><option value="native-first">原生优先（推荐）</option><option value="sidecar-first">看图工具优先</option><option value="native-only">仅原生直读</option><option value="sidecar-only">仅看图工具</option></select></label><span className="dmm-muted">决定「当前模型直接看图」与「交给视觉模型代看」如何取舍。</span></div>
       <div className="dmm-hint">{policyHelp[draft.vision.policy]}</div>
       <details className="dmm-guide"><summary>何时使用辅助模型？</summary><p>当前模型不能直接看图时，辅助模型先理解图片，再把文字结果交给当前模型。未选择辅助模型且当前模型不支持图片时，请求会报错。</p></details>
@@ -203,7 +207,7 @@ export function VisionSection({ draft, models, aliases, edit }: { draft: Manager
     <div className="dmm-guide">
       <strong>看图工具的工作方式</strong>
       <ul className="dmm-steps">
-        <li>对话模型收到的不是原图，而是形如「[图片附件 ID] 请使用 model_manager_inspect_image 工具查看此原图」的文字占位，由它决定何时、带着什么问题去看图。</li>
+        <li>自动模式先生成带附件编号和视觉模型来源的观察，随后交给对话模型。关闭自动模式时，对话模型可按附件编号调用 model_manager_inspect_image；理解失败会明确反馈。</li>
         <li>模型看图时可以附带裁剪区域（x,y,width,height，取值 0–1），插件只把这一块裁剪图发给视觉模型，方便放大看局部细节；不带区域就看整张原图。</li>
         <li>相同图片、相同问题、相同区域的看图结果会被缓存，重复追问不重复消耗视觉模型用量。</li>
       </ul>
@@ -244,21 +248,24 @@ export function AliasCard({ name, draft, models, edit, notify, removeAlias }: {
     {candidates.map((ref, index) => <div className="dmm-row" key={index}>
       <span>{index + 1}.</span>
       <SelectModel value={ref} models={models} aliases={[]} onChange={value => edit(next => { if (value && typeof value !== 'string') next.aliases[name].candidates[index] = value })} />
+      <button disabled={!index} onClick={()=>edit(next=>{const list=next.aliases[name].candidates;[list[index-1],list[index]]=[list[index],list[index-1]]})}>上移</button><button disabled={index===candidates.length-1} onClick={()=>edit(next=>{const list=next.aliases[name].candidates;[list[index+1],list[index]]=[list[index],list[index+1]]})}>下移</button>
       <button onClick={() => edit(next => { next.aliases[name].candidates.splice(index, 1) })}>移除</button>
     </div>)}
     <button onClick={() => edit(next => { if (models[0]) next.aliases[name].candidates.push({ providerId: models[0].providerId, modelId: models[0].modelId }) })}>添加候选</button>
     {!candidates.length && <p className="dmm-note">每个别名至少要有一个具体模型才能保存。</p>}
     <p className="dmm-muted">按顺序尝试全部候选。网络、超时或服务端临时故障每个候选最多调用 5 次；其他错误直接换下一个。成功后显示完整回答，失败的半段内容丢弃；停止后不再重试。</p>
     <TierMapping name={name} models={referenced} draft={draft} edit={edit} />
+    <div className="dmm-row">{([{key:'transientCooldownSeconds',label:'临时故障冷却',value:60},{key:'rateLimitCooldownSeconds',label:'限流冷却',value:300},{key:'quotaCooldownSeconds',label:'额度不足冷却',value:3600}] as const).map(field=><label key={field.key}>{field.label}（秒，1–604800）<input type="number" min="1" max="604800" placeholder={`默认 ${field.value}`} value={alias.recovery?.[field.key]??''} onChange={e=>edit(next=>{next.aliases[name].recovery??={};if(e.target.value)next.aliases[name].recovery![field.key]=Number(e.target.value);else delete next.aliases[name].recovery![field.key]})}/></label>)}</div><p className="dmm-muted">限流和额度不足优先采用服务端等待时间；凭据无效需更换凭据或手动恢复。能力和参数不匹配只跳过本次。</p>
     {!referenced.some(model => model.reasoningEfforts.length) && <p className="dmm-muted">候选模型都没有公开推理档位，无需映射。</p>}
   </div>
 }
 
-function ManagerSection() {
+function ManagerSection({ctx}:{ctx?:any}) {
   const [catalogEditor, setCatalogEditor] = useState<CatalogEditor | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [draft, setDraft] = useState<ManagerConfig | null>(null)
-  const [tab, setTab] = useState<Tab>('模型')
+  const [tab, setTab] = useState<Tab>('模型来源')
+  const draftRevision=useRef<number>(0)
   const [fatal, setFatal] = useState('')
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -302,13 +309,13 @@ function ManagerSection() {
   const load = async () => {
     const next = asSnapshot(await request(''))
     // 插件 host 改动需要重启 DSH：旧 host 返回 v1 配置（别名是数组、无 auto 字段），新页面渲染必然崩溃，这里给出明确指引。
-    if (next.config.version !== 3) throw new Error(`检测到旧版插件服务（配置格式 v${next.config.version}）：请重启 DSH 让新版 host 生效后刷新本页`)
+    if (next.config.version !== 4) throw new Error(`检测到旧版插件服务（配置格式 v${next.config.version}）：请重启 DSH 让新版 host 生效后刷新本页`)
     if (!officialFormInitialized.current) {
       setOfficialSource(next.config.official?.sourceUrl ?? DEFAULT_OFFICIAL_URL)
       setOfficialAnalyzer(next.config.official?.analyzer)
       officialFormInitialized.current = true
     }
-    setSnapshot(next); setDraft(structuredClone(next.config)); setFatal(''); setOfficial(null); setOfficialChecked([])
+    draftRevision.current=next.revision; setSnapshot(next); setDraft(structuredClone(next.config)); setFatal(''); setOfficial(null); setOfficialChecked([])
     setExpanded(new Set())
   }
   useEffect(() => { void load().catch(error => setFatal(String(error))) }, [])
@@ -329,8 +336,8 @@ function ManagerSection() {
     if (!snapshot || !draft) return
     setBusy(true)
     try {
-      const next = asSnapshot(await request('', { method: 'PUT', body: JSON.stringify({ revision: snapshot.revision, config: draft }) }))
-      setSnapshot(next); setDraft(structuredClone(next.config)); window.dispatchEvent(new Event('dmm:config'))
+      const next = asSnapshot(await request('', { method: 'PUT', body: JSON.stringify({ revision: draftRevision.current, config: draft }) }))
+      draftRevision.current=next.revision; setSnapshot(next); setDraft(structuredClone(next.config)); window.dispatchEvent(new Event('dmm:config'))
       setOfficial(null); setOfficialChecked([])
       notify('success', '已保存插件配置（所有标签页），后续请求使用新配置。')
     } catch (error) {
@@ -363,7 +370,7 @@ function ManagerSection() {
     setBusy(true)
     try {
       const analysisTimeoutSeconds = officialAnalysisTimeout(Number(officialTimeout))
-      const response = await fetch('/api/model-manager/official-preview', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify({ sourceUrl: officialSource, analyzer: officialAnalyzer ?? null, ...(officialEffort ? { reasoningEffort: officialEffort } : {}), analysisTimeoutSeconds }), signal: controller.signal })
+      const response = await fetch(hostRouteUrl('/api/model-manager/official-preview'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' }, body: JSON.stringify({ sourceUrl: officialSource, analyzer: officialAnalyzer ?? null, ...(officialEffort ? { reasoningEffort: officialEffort } : {}), analysisTimeoutSeconds }), signal: controller.signal })
       const result = await readOfficialStream(response, value => { if (officialAbort.current === controller && !controller.signal.aborted) setOfficialProgress(value) })
       if (controller.signal.aborted || officialAbort.current !== controller) return
       setOfficial(result); setOfficialChecked(result.diffs.filter(item => item.field !== 'removeModel' && !item.blockedReasons.length).map(item => item.id))
@@ -450,6 +457,7 @@ function ManagerSection() {
       </ul>
     </details>
     <div className="dmm-tabs">{tabs.map(item => <button key={item} aria-selected={tab === item} onClick={() => { setTab(item); if (item === '日志') void request('/logs').then(result => setLogs(result.events)).catch(error => notify('error', String(error))) }}>{item}</button>)}</div>
+    {<div hidden={tab!=='模型来源'}><SourcePanel dirty={dirty} disabled={busy} backupId={snapshot.sourceBackupId} navigate={ctx?.get?.('pluginNavigation') ? ()=>ctx.get('pluginNavigation').openBundle('dsh-opencode-go') : undefined} onRefresh={()=>refreshDirectory(true)} onApplied={value=>{const next=asSnapshot(value);draftRevision.current=next.revision;setSnapshot(next);setDraft(structuredClone(next.config));window.dispatchEvent(new Event('dmm:config'))}}/></div>}
     {tab === '模型' && <>
       <div className="dmm-card"><strong>同步 DeepSeek 官方配置</strong>
         <p className="dmm-muted">每次重新读取入口网页，由 LLM 根据原文识别当前 API model name；必要时读取相关链接。会调用一次或多次分析模型，产生用量。先预览，再手动应用。</p>
@@ -484,7 +492,7 @@ function ManagerSection() {
       <CatalogManager backupWritesPlugin={snapshot.catalogBackupWritesPlugin} backupId={snapshot.catalogBackupId} externalBusy={busy} models={snapshot.models} capabilities={snapshot.catalogCapabilities ?? []} editor={catalogEditor} setEditor={editor => { setCatalogEditor(editor); setOfficial(null); setOfficialChecked([]); document.getElementById('dmm-catalog-editor')?.scrollIntoView({ block: 'nearest' }) }} dirty={dirty} notify={notify} onApplied={value => {
         const next = asSnapshot(value); setSnapshot(next); if (!dirty) setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config'))
       }} />
-      <ParameterPanel models={snapshot.models} config={snapshot.config} revision={snapshot.revision} defaultModel={snapshot.hostDefault} backupId={snapshot.parameterBackupId} manualBackupId={snapshot.catalogBackupId} legacyCount={snapshot.legacyImageOverrideCount ?? 0} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); if (!dirty) setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} onCredentialSaved={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(current => current && { ...current, parameterCompletion: structuredClone(next.config.parameterCompletion) }); setOfficial(null); setOfficialChecked([]) }} />
+      <ParameterPanel models={snapshot.models} config={snapshot.config} revision={snapshot.revision} defaultModel={snapshot.hostDefault} backupId={snapshot.parameterBackupId} manualBackupId={snapshot.catalogBackupId} legacyCount={snapshot.legacyImageOverrideCount ?? 0} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); if (!dirty) setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} onCredentialSaved={value => { const next = asSnapshot(value); draftRevision.current=next.revision; setSnapshot(next); setDraft(current => current && { ...current, parameterCompletion: structuredClone(next.config.parameterCompletion) }); setOfficial(null); setOfficialChecked([]) }} />
       <details className="dmm-guide">
         <summary>这一页是干什么的？（点开查看说明）</summary>
         <p>按 Provider 分组列出宿主已加载的模型，核对并修正能力声明、实测验证。组默认全部收起，点组头展开：</p>
@@ -517,10 +525,10 @@ function ManagerSection() {
             {group.models.map(model => <div className="dmm-card" key={`${model.providerId}:${model.modelId}`}>
               <strong>{model.name}</strong> <span className="dmm-muted">{model.providerId} / {model.modelId}</span>
               <div className="dmm-row"><button disabled={busy || !snapshot.catalogCapabilities?.find(c => c.providerId === model.providerId)?.canRename} onClick={() => { document.getElementById('dmm-catalog-editor')?.scrollIntoView({ block: 'start' }); setCatalogEditor({ kind: 'rename', model }); setOfficial(null) }}>修改显示名称</button><button disabled={busy || !snapshot.catalogCapabilities?.find(c => c.providerId === model.providerId)?.canRemove} onClick={() => { document.getElementById('dmm-catalog-editor')?.scrollIntoView({ block: 'start' }); setCatalogEditor({ kind: 'remove', model }); setOfficial(null) }}>删除模型</button>{snapshot.catalogCapabilities?.find(c => c.providerId === model.providerId)?.reason && <span className="dmm-muted">{snapshot.catalogCapabilities.find(c => c.providerId === model.providerId)?.reason}</span>}</div>
-              <div className="dmm-row">原生图片：{model.nativeImage}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}；推理档位：{model.reasoningEfforts.map(e => e.id).join(' / ') || '未知'}</div>
+              <div className="dmm-row">原生图片：{model.nativeImage}；上下文：{model.contextWindow ?? '未知'}；默认输出：{model.defaultMaxTokens ?? '未知'}；推理档位：{model.reasoningEfforts.map(e => e.id).join(' / ') || '模型默认'}；默认推理：{model.defaultReasoningEffort ?? '由来源决定'}；图片声明：{model.nativeDeclaration==='saved'?'来源的已保存覆盖':'来源默认'}</div>
               <div className="dmm-muted">资料：{model.capabilitySource ?? '未知'}{model.capabilityCheckedAt ? ` · 核对于 ${model.capabilityCheckedAt}` : ''}</div>
               <div className="dmm-muted">{snapshot.verifications.filter(item => item.model.providerId === model.providerId && item.model.modelId === model.modelId).map(item => `${item.kind}: ${item.status} / ${item.behavior ?? '未知'}${item.stale ? '（已过期）' : ''}`).join('；') || '尚无验证证据'}</div>
-              <NativeEditor model={model} revision={snapshot.nativeRevision} refresh={async () => { await refreshDirectory(true) }} notify={notify} />
+              <NativeEditor model={model} revision={model.nativeRevision ?? snapshot.nativeRevision} refresh={async () => { await refreshDirectory(true) }} notify={notify} />
               <div className="dmm-row">
                 <button disabled={busy || probing !== ''} onClick={() => void probeOne(model)}>{probing === `${model.providerId}:${model.modelId}` ? '验证中…' : '验证图片能力'}</button>
                 <button disabled={busy} onClick={() => { setBusy(true); void verifyOne({ providerId: model.providerId, modelId: model.modelId }, 'text').catch(error => notify('error', String(error))).finally(() => setBusy(false)) }}>验证文字</button>
@@ -535,6 +543,7 @@ function ManagerSection() {
       {verifyResult && !preview && <details className="dmm-card"><summary className="dmm-composer">查看最近一次验证的原始证据</summary><pre>{JSON.stringify(verifyResult, null, 2)}</pre></details>}
     </>}
     {tab === '别名与兜底' && <>
+      <AliasHealthPanel />
       <details className="dmm-guide">
         <summary>这一页是干什么的？（点开查看说明）</summary>
         <p style={{ margin: '6px 0', fontSize: 13 }}>别名 = 好记的名字 + 一串按顺序兜底的具体模型：</p>
@@ -546,8 +555,8 @@ function ManagerSection() {
         </ul>
       </details>
       <div className="dmm-card"><div className="dmm-row"><input placeholder="别名，如 fast" value={aliasName} onChange={event => setAliasName(event.target.value)} /><button onClick={() => { if (!/^[a-z][a-z0-9_-]*$/.test(aliasName) || draft.aliases[aliasName]) return; edit(next => { next.aliases[aliasName] = { candidates: [] } }); setAliasName('') }}>添加别名</button></div><p className="dmm-muted">候选按顺序尝试；每个别名至少添加一个具体模型后才能保存。</p></div>
-      <AliasRemovalManager key={removingAlias ?? 'restore'} name={removingAlias} close={() => setRemovingAlias(null)} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
-      <LegacyPreferencesManager config={snapshot.config} aliasCount={snapshot.legacyAliasReliabilityCount ?? 0} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
+      <AliasRemovalManager key={removingAlias ?? 'restore'} name={removingAlias} close={() => setRemovingAlias(null)} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); draftRevision.current=next.revision; setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
+      <LegacyPreferencesManager config={snapshot.config} aliasCount={snapshot.legacyAliasReliabilityCount ?? 0} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); draftRevision.current=next.revision; setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
       {aliases.map(alias => <AliasCard key={alias} name={alias} draft={draft} models={snapshot.models} edit={edit} notify={notify} removeAlias={name => { if (busy) return; if (!Object.hasOwn(snapshot.config.aliases, name)) { edit(next => { delete next.aliases[name] }); return }; setRemovingAlias(name); setOfficial(null); setCatalogEditor(null); document.getElementById('dmm-alias-removal')?.scrollIntoView({ block: 'nearest' }) }} />)}
       <div className="dmm-card">
         <strong>具体模型恢复策略</strong>
@@ -560,10 +569,10 @@ function ManagerSection() {
         <p className="dmm-muted">已有输出不会重播；认证错误跳过同 Provider，429 暂时冷却；本轮明确指定的参数不会被静默降级。上下文溢出只尝试内置别名 @long-context 的候选。</p>
       </div>
     </>}
-    {tab === 'AUTO 自动选模型' && <>
+    {<div hidden={tab !== 'AUTO 自动选模型'}>
       <AutoTab draft={draft} models={snapshot.models} aliases={aliases} edit={edit} notify={notify} />
-      <LegacyPreferencesManager config={snapshot.config} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
-    </>}
+      <LegacyPreferencesManager config={snapshot.config} dirty={dirty} externalBusy={busy} onBusyChange={setBusy} backupId={snapshot.catalogBackupId} notify={notify} onApplied={value => { const next = asSnapshot(value); draftRevision.current=next.revision; setSnapshot(next); setDraft(structuredClone(next.config)); setOfficial(null); setOfficialChecked([]); window.dispatchEvent(new Event('dmm:config')) }} />
+    </div>}
     {tab === '视觉' && <VisionSection draft={draft} models={snapshot.models} aliases={aliases} edit={edit} />}
     {tab === '日志' && <div className="dmm-card"><p className="dmm-muted">查看实际使用的模型、AUTO 选择和看图结果，排查调用失败。</p><button onClick={() => void request('/logs').then(result => setLogs(result.events)).catch(error => notify('error', String(error)))}>刷新日志</button>
       {logs.map((event, index) => <div className="dmm-log-row" key={index}>{event.time ? new Date(String(event.time)).toLocaleString() : '时间未知'} · <strong>{event.action === 'auto-evaluation' ? 'AUTO 评估' : String(event.action ?? '执行调用')}</strong> · {String(event.provider ?? '')}/{String(event.model ?? '')} · {String(event.status ?? '完成')} · {event.durationMs == null ? '耗时未知' : `${event.durationMs} ms`}
@@ -575,7 +584,7 @@ function ManagerSection() {
       <button className="dmm-primary" disabled={busy || !dirty} onClick={() => void save()}>{busy ? '处理中…' : '保存设置'}</button>
       <button disabled={busy} onClick={() => void reload()} title="放弃未保存的修改，重新读取已保存的配置">重新加载</button>
       {dirty ? <span className="dmm-dirty">● 有未保存的修改</span> : <span className="dmm-muted">没有未保存的修改</span>}
-      <span className="dmm-muted">「保存设置」把全部标签页的插件配置写入 DSH，下一次请求生效；模型卡片里的「保存到宿主」是另一件事：写宿主 llm-pi-ai 的模型声明。</span>
+      <span className="dmm-muted">「保存设置」把全部标签页的插件配置写入 DSH，下一次请求生效；模型卡片里的「保存到宿主」是另一件事：写入模型来源拥有的声明。</span>
     </div>
     <div className="dmm-toasts">{notices.map(item => <div key={item.id} className={`dmm-toast dmm-toast-${item.kind}`} role="status"><span>{item.text}</span><button aria-label="关闭提示" onClick={() => dismiss(item.id)}>×</button></div>)}</div>
     {preview && <div className="dmm-modal-mask" onClick={() => { if (!busy) setPreview(null) }} role="presentation">
@@ -615,7 +624,7 @@ class PanelBoundary extends React.Component<{ children: React.ReactNode }, { err
   }
 }
 
-export function apply(ctx: { slots: { inject(name: string, register: () => () => void): void; register(options: { name: string; id: string; order: number; label?: () => string }, component: (props: any) => React.ReactElement): () => void } }): void {
+export function apply(ctx: any): void {
   injectStyle()
-  ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'model-manager', order: 12, label: () => '模型管理' }, (props: any) => <PanelBoundary><ManagerSection {...props} /></PanelBoundary>))
+  ctx.slots.inject('plugins.bundle.config',()=>ctx.slots.register({name:'plugins.bundle.config',key:'dsh-model-manager',label:'模型管理',inject:()=>({ctx})},(props:any)=>props.view==='summary' ? <p>管理模型来源、备用候选、AUTO 与图片辅助。</p> : <PanelBoundary><ManagerSection ctx={ctx}/></PanelBoundary>))
 }

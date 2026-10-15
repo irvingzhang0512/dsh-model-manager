@@ -15,7 +15,7 @@ function setup(run: (request: any, count: number) => AsyncIterable<any>, count =
   const calls: any[] = [], times: number[] = []
   const runtime = { resolveModelInfo: vi.fn(async (provider: string, id: string) => ({ provider, id, name: id, inputModalities: ['text'] })),
     stream: (request: any) => { calls.push(request); times.push(Date.now()); return run(request, calls.length) } }
-  const service = { snapshot: () => ({ config: structuredClone(config), models: structuredClone(records), revision: 1 }), hostDefault: () => undefined,
+  const service = {aliasCandidateAvailable:async()=>true,recordActualModel:vi.fn(),aliasLifecycle:()=>undefined, snapshot: () => ({ config: structuredClone(config), models: structuredClone(records), revision: 1 }), hostDefault: () => undefined,
     activeSelection: (): any => undefined, activeTurn: () => 1, isDelegatedSession: () => false, log: vi.fn(async () => {}),
     autoDecision: (): any => undefined, saveAutoDecision: vi.fn(), getVerification: () => undefined }
   const adapter = new ManagedAdapter(runtime as never, service as never, new VisionRegistry())
@@ -66,7 +66,7 @@ describe('别名按序恢复与完整提交', () => {
     f.options.messages = [{ id: 'history', role: 'tool', source: { kind: 'tool', toolCallId: 'done' }, content: [{ type: 'tool-result', toolCallId: 'done', content: [{ type: 'text', text: 'already completed' }] }] }]
     f.options.tools = [{ name: 'write.file', description: 'write', parameters: {} }]
     const output = await drain(f.adapter.stream(f.options))
-    expect(output).toHaveLength(2); expect(output[0]).toMatchObject({ type: 'tool-call-delta', id: 'only', name: 'write.file' }); expect(output[1].replayState).toEqual({ response: 'success' })
+    expect(output).toHaveLength(2); expect(output[0]).toMatchObject({ type: 'tool-call-delta', id: 'only', name: 'write.file' }); expect(output[1].replayState).toMatchObject({response:{$dmm:1,state:'success'}})
     expect(f.calls[0].messages).toEqual(f.calls[1].messages)
   })
   it.each(['stop', 'tool-calls', 'max-tokens'])('%s 正常结束保留原块与 usage', async kind => {
@@ -122,7 +122,7 @@ describe('别名按序恢复与完整提交', () => {
     const output: any[] = [], task = (async () => { for await (const chunk of f.adapter.stream(f.options)) output.push(chunk) })()
     for (let i = 0; i < 50; i++) await Promise.resolve()
     expect(output).toEqual([]); release(); await task
-    expect(output[0].text).toBe('p1'); expect(output[1].usage.inputTokens).toBe(1); expect(output[2].replayState.response.id).toBe('success')
+    expect(output[0].text).toBe('p1'); expect(output[1].usage.inputTokens).toBe(1); expect(output[2].replayState.response.state.id).toBe('success')
     expect(f.service.log).toHaveBeenCalledWith(expect.objectContaining({ usage: expect.objectContaining({ inputTokens: 100 }) }))
   })
   it('视觉别名跳过非原生图片候选，不继承主会话目标覆盖', async () => {
