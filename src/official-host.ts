@@ -20,7 +20,7 @@ import { legacyAliasReliability, cleanLegacyAliasReliability } from './legacy-al
 import { readParameterCatalog } from './parameter-catalog.js'
 import { describeParameterTargets, defaultParameterFields, parameterIntents, setField, type ParameterAnalysis, type ModelParameterPreview } from './model-parameters.js'
 import { analyzeModelParameters, createParameterSearch, platformOfficialHosts } from './parameter-analysis.js'
-import { arkStatus, describeSources, previewSource, runArk, sourceIntents, type SourceDeps, type SourceDraft, type SourceInput } from './source-connections.js'
+import { ARK_LOGIN_REQUIRED, arkStatus, describeSources, previewSource, runArk, sourceIntents, type SourceDeps, type SourceDraft, type SourceInput } from './source-connections.js'
 
 interface Host { llm: LlmRuntime; settings: SettingsProvider; credentials?: CredentialProvider; webServer: WebServer; effect: Context['effect'] }
 type Field = { path: string[]; before: unknown; had: boolean; after: unknown }
@@ -347,7 +347,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService, so
       try {
         const items=await describeSources(sources)
         let ark:unknown
-        try {ark={available:true,...await arkStatus(sources,signalFor(res))}} catch {ark={available:false,reason:'ArkCLI 状态不可用；可在连接来源后重试'}}
+        try {ark={available:true,...await arkStatus(sources,signalFor(res))}} catch(error) {ark={available:false,reason:error instanceof Error && error.message===ARK_LOGIN_REQUIRED ? ARK_LOGIN_REQUIRED : 'ArkCLI 状态不可用；可在连接来源后重试'}}
         const owners=items.filter(s=>s.kind!=='opencode-go').map(s=>{
           const ns=s.kind==='deepseek'?'llm-deepseek':'llm-pi-ai',path=s.kind==='deepseek'?[]:['providers',s.providerId]
           const value=at(get(ns),path) as Record<string,unknown> | undefined

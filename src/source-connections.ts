@@ -30,13 +30,15 @@ export async function runArk(args:string[],signal:AbortSignal):Promise<any> {
     // Official commands can print a human preamble before the JSON payload.
     for (let i=0;i<stdout.length;i++) if (stdout[i]==='{' || stdout[i]==='[') { try { return JSON.parse(stdout.slice(i)) } catch {} }
     throw Error('invalid-json')
-  } catch { signal.throwIfAborted();throw Error('ArkCLI 查询失败或超时；请检查登录状态、所选 Profile 与 CLI 版本') }
+  } catch(error) { signal.throwIfAborted();throw Error(arkFailureMessage(String((error as any)?.stderr ?? ''))) }
 }
+export const ARK_LOGIN_REQUIRED='火山账号需要重新授权，请点击“连接火山账号”完成登录；调用 Key 与账号登录分开管理'
+export function arkFailureMessage(stderr:string) {return /requires Volcengine Ark SSO STS|auth login|not logged in|unauthenticated/i.test(stderr)?ARK_LOGIN_REQUIRED:'ArkCLI 查询失败或超时；请检查登录状态、所选 Profile 与 CLI 版本'}
 export function safeArkStatus(raw:any) {
   const rows = Array.isArray(raw?.profiles_summary) ? raw.profiles_summary : []
   return { loggedIn:raw?.logged_in===true, profiles:rows.filter((r:any)=>r && typeof r.name==='string' && typeof r.type==='string').map((r:any)=>({name:r.name,type:r.type})), activeProfile:typeof raw?.active_profile?.name==='string' ? raw.active_profile.name : undefined }
 }
-export async function arkStatus(deps:SourceDeps,signal:AbortSignal) { return safeArkStatus(await (deps.ark ?? runArk)(['auth','status'],signal)) }
+export async function arkStatus(deps:SourceDeps,signal:AbortSignal,profile?:string) { return safeArkStatus(await (deps.ark ?? runArk)(['auth','status',...(profile?['--profile',profile]:[])],signal)) }
 function owner(deps:SourceDeps,kind:Kind) { return kind==='deepseek' ? 'llm-deepseek' : kind==='ark-agent-plan' ? 'llm-pi-ai' : 'opencode-go' }
 function profile(deps:SourceDeps,kind:Kind,provider:string):any { const value=deps.settings.get(owner(deps,kind) ?? '');return kind==='ark-agent-plan' ? (value as any)?.providers?.[provider] : value }
 export async function describeSources(deps:SourceDeps):Promise<SourceDescription[]> {
@@ -47,12 +49,13 @@ export async function describeSources(deps:SourceDeps):Promise<SourceDescription
   const pi = deps.settings.get('llm-pi-ai') as any
   for (const [id,p] of Object.entries(pi?.providers ?? {}) as [string,any][]) if (typeof p.baseURL==='string' && /^https:\/\/ark\.[^/]+\/api\/plan\//.test(p.baseURL) && !associations.some(s=>s.providerId===id)) associations.push({sourceId:`ark:${id}`,kind:'ark-agent-plan',providerId:id})
   if(!associations.some(s=>s.kind==='ark-agent-plan'))associations.push({sourceId:'ark-agent-plan',kind:'ark-agent-plan',providerId:'ark-agent-plan'})
+  const ownerEntries=new Map<string,string[]>()
+  for(const source of associations){const ns=owner(deps,source.kind);if(ownerEntries.has(ns))continue;try{ownerEntries.set(ns,[deps.settings.entryId(ns)])}catch{ownerEntries.set(ns,[])}}
   return Promise.all(associations.map(async source=>{
     const ns = owner(deps,source.kind), value=profile(deps,source.kind,source.providerId)
     const ref = typeof value?.apiKeyEnv==='string' ? value.apiKeyEnv : source.kind==='opencode-go' && value ? 'OPENCODE_API_KEY' : undefined
     const credential = ref ? {ref,...await deps.credentials.describe(credentialRef(ref))} : {configured:false,writable:source.kind!=='opencode-go'}
-    let ownerEntryIds:string[]=[]
-    try { ownerEntryIds = [deps.settings.row(ns ?? 'opencode-go').entry.options.id] } catch {}
+    const ownerEntryIds=ownerEntries.get(ns) ?? []
     const loaded=providers.some(p=>p.id===source.providerId)
     return {...source,ownerEntryIds,credential:{ref,configured:credential.configured,writable:source.kind==='opencode-go'?false:credential.writable},loaded,modelCount:loaded ? (await deps.llm.listModels(source.providerId).catch(()=>[])).length : 0,...(!ownerEntryIds.length ? {reason:'来源插件未安装或所有者不唯一'} : {})}
   }))
@@ -108,8 +111,8 @@ export async function prepareSource(input:SourceInput,signal:AbortSignal,deps:So
     const value=JSON.parse(text);if(!Array.isArray(value.data)) throw Error('DeepSeek 模型目录格式无效');raw=value.data
   } else {
     if (!input.arkProfile || !/^[A-Za-z0-9_.-]{1,160}$/.test(input.arkProfile)) throw Error('请明确选择用于查询的 ArkCLI Profile')
-    const status=await arkStatus(deps,signal), selected=status.profiles.find((p:{name:string;type:string})=>p.name===input.arkProfile)
-    if (!status.loggedIn || !selected || !['plan','agent-plan','team','agent_plan'].includes(selected.type)) throw Error('所选 Profile 未登录或不是 Agent Plan Profile')
+    const status=await arkStatus(deps,signal,input.arkProfile), selected=status.profiles.find((p:{name:string;type:string})=>p.name===input.arkProfile)
+    if (!status.loggedIn || !selected || !['plan','agent-plan','agent-plan-team','team','agent_plan'].includes(selected.type)) throw Error('所选 Profile 未登录或不是 Agent Plan Profile')
     const value=await (deps.ark ?? runArk)(['resources','list','--modality','text','--profile',input.arkProfile],signal)
     if (value.profile!==input.arkProfile || !Array.isArray(value.items)) throw Error('ArkCLI 返回的 Profile 或目录无效')
     raw=value.items.filter((m:any)=>m.invocable===true && (!m.required_overrides || Array.isArray(m.required_overrides) && !m.required_overrides.length) && m.data_plane!=='platform')

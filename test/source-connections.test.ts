@@ -6,7 +6,7 @@ import {EventEmitter} from 'node:events'
 import {desktopFixture} from './desktop-fixture.js'
 import {HostModelBridge,ModelManagerService} from '../src/service.js'
 import {registerOfficialSync} from '../src/official-host.js'
-import {describeSources} from '../src/source-connections.js'
+import {ARK_LOGIN_REQUIRED,arkFailureMessage,describeSources} from '../src/source-connections.js'
 const dirs:string[]=[]
 afterEach(async()=>{await Promise.all(dirs.splice(0).map(p=>rm(p,{recursive:true,force:true})))})
 async function fixture(){
@@ -24,6 +24,10 @@ async function fixture(){
   return {...f,call,service,secret,credentials,fetcher,ark,listing:(next:any[])=>{listing=next},dispose:()=>{disposers.reverse().forEach(d=>d?.());service.health.dispose()}}
 }
 describe('来源目录、凭据与共享事务',()=>{
+  it('实际 CLI 的 SSO 准入错误给出重授权说明，不回传原始秘密或错误正文',()=>{
+    expect(arkFailureMessage('SECRET requires Volcengine Ark SSO STS; run arkcli auth login')).toBe(ARK_LOGIN_REQUIRED)
+    expect(arkFailureMessage('SECRET arbitrary failure')).not.toContain('SECRET')
+  })
   it('OpenCode Go 使用实际宿主 Provider 标识，账号与写入继续归原插件',async()=>{
     const f=await fixture(),listModels=vi.fn(async()=>[{id:'one'},{id:'two'}])
     const sources=await describeSources({llm:{listProviders:()=>[{id:'dsh-opencode-go'}],listModels} as any,settings:f.settings,credentials:f.credentials,config:()=>f.service.snapshot().config})
@@ -70,8 +74,10 @@ describe('来源目录、凭据与共享事务',()=>{
   })
   it('指定套餐 Profile 查询、过滤不兼容资源，源连接与目录同一写集并可恢复',async()=>{
     const f=await fixture(),saved=await f.call('sources/credential',{sourceKind:'ark-agent-plan',newKey:'PLAN_SECRET'})
+    f.ark.mockImplementationOnce(async()=>({logged_in:true,profiles_summary:[{name:'chosen',type:'agent-plan-team'}]}) as any)
     const p=await f.call('sources/preview',{kind:'ark-agent-plan',providerId:'ark-plan',arkProfile:'chosen',credentialRef:saved.json.credentialRef})
     expect(p.status,JSON.stringify(p.json)).toBe(200);expect(p.json.models.map((m:any)=>m.model.modelId)).toEqual(['ark-model'])
+    expect(f.ark.mock.calls[0][0]).toEqual(['auth','status','--profile','chosen'])
     expect(f.ark.mock.calls[1][0]).toEqual(['resources','list','--modality','text','--profile','chosen'])
     const applied=await f.call('catalog-apply',{token:p.json.catalog.token,selected:p.json.catalog.selected})
     expect(applied.status,JSON.stringify(applied.json)).toBe(200)

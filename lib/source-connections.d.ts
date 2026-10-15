@@ -72,12 +72,14 @@ export interface SourceDeps {
 }
 export declare function findArkCli(): Promise<string | undefined>;
 export declare function runArk(args: string[], signal: AbortSignal): Promise<any>;
+export declare const ARK_LOGIN_REQUIRED = "\u706B\u5C71\u8D26\u53F7\u9700\u8981\u91CD\u65B0\u6388\u6743\uFF0C\u8BF7\u70B9\u51FB\u201C\u8FDE\u63A5\u706B\u5C71\u8D26\u53F7\u201D\u5B8C\u6210\u767B\u5F55\uFF1B\u8C03\u7528 Key \u4E0E\u8D26\u53F7\u767B\u5F55\u5206\u5F00\u7BA1\u7406";
+export declare function arkFailureMessage(stderr: string): "火山账号需要重新授权，请点击“连接火山账号”完成登录；调用 Key 与账号登录分开管理" | "ArkCLI 查询失败或超时；请检查登录状态、所选 Profile 与 CLI 版本";
 export declare function safeArkStatus(raw: any): {
     loggedIn: boolean;
     profiles: any;
     activeProfile: any;
 };
-export declare function arkStatus(deps: SourceDeps, signal: AbortSignal): Promise<{
+export declare function arkStatus(deps: SourceDeps, signal: AbortSignal, profile?: string): Promise<{
     loggedIn: boolean;
     profiles: any;
     activeProfile: any;

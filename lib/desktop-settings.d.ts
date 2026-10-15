@@ -39,6 +39,7 @@ export declare class DesktopSettings implements SettingsProvider {
         inherited: Record<string, unknown>;
         override: Record<string, unknown>;
     };
+    entryId(ns: string): string;
     namespaceFor(entryId: string): string;
     private descriptor;
     get(ns: string): unknown;

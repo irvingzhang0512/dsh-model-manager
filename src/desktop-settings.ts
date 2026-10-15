@@ -63,6 +63,7 @@ export class DesktopSettings implements SettingsProvider {
     this.invalidate()
     return this.findRow(ns)
   }
+  entryId(ns:string) { return this.findRow(ns).entry.options.id }
   namespaceFor(entryId: string) {
     const row = this.findRow(entryId)
     return Object.keys(packages).find(key => packages[key] === row.entry.options.name) ?? entryId
@@ -118,11 +119,11 @@ function ownerBridge(ctx: { configEditor: ConfigEditor; settings: SettingsForms 
 }
 export function describeOwners(ctx: { configEditor: ConfigEditor; settings: SettingsForms }) {
   const bridge = ownerBridge(ctx)
-  return bridge.describe().map(d => ({ owner: d.ns, entryId: bridge.row(d.ns).entry.options.id, revisionToken: String(d.revision), writable: true, applies: d.ns === 'dsh-model-manager' ? 'live' : 'reload', fields: [] }))
+  return bridge.describe().map(d => ({ owner: d.ns, entryId: bridge.entryId(d.ns), revisionToken: String(d.revision), writable: true, applies: d.ns === 'dsh-model-manager' ? 'live' : 'reload', fields: [] }))
 }
 export async function applyOwner(ctx: { configEditor: ConfigEditor; settings: SettingsForms }, entryId: string, expectedRevisionToken: string, operations: readonly SettingsPathOp[]) {
   const bridge = ownerBridge(ctx)
-  const canonical = bridge.describe().find(d => bridge.row(d.ns).entry.options.id === entryId)?.ns
+  const canonical = bridge.describe().find(d => bridge.entryId(d.ns) === entryId)?.ns
   if (!canonical) throw Error('配置所有者不可用')
   await bridge.mutate(canonical, operations, Number(expectedRevisionToken))
   return describeOwners(ctx).find(owner => owner.entryId === entryId)
