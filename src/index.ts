@@ -186,7 +186,16 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
   const adapter = new ManagedAdapter(ctx.llm, service, vision)
   ctx.effect(() => () => { adapter.dispose(); service.health.dispose() }, 'dsh-model-manager: cancel active calls')
   let ready = false
-  void service.init().then(() => { ready = true }).catch(err => ctx.logger?.error?.(`[dsh-model-manager] 初始化失败: ${String(err)}`))
+  let directoryDirty=false,directoryRefreshing=false,directoryClosed=false
+  ctx.effect(()=>()=>{directoryClosed=true;directoryDirty=false},'dsh-model-manager: directory lifecycle')
+  const refreshChangedDirectory=async()=>{
+    if(directoryClosed)return
+    directoryDirty=true
+    if(!ready || directoryRefreshing)return
+    directoryRefreshing=true
+    try{do{directoryDirty=false;await service.refresh()}while(directoryDirty && !directoryClosed)}catch{}finally{directoryRefreshing=false}
+  }
+  void service.init().then(async() => { while(directoryDirty && !directoryClosed){directoryDirty=false;await service.refresh()}if(!directoryClosed)ready=true }).catch(err => ctx.logger?.error?.(`[dsh-model-manager] 初始化失败: ${String(err)}`))
   ctx.effect(() => ctx.llm.registerAdapter([MANAGED_PROVIDER], adapter), 'dsh-model-manager: adapter')
   ctx.effect(() => registerManagerTools({ tools: ctx.tools, llm: ctx.llm, attachments: ctx.attachments, service, vision, adapter }), 'dsh-model-manager: tools')
   ctx.effect(() => ctx.systemPrompt.section({ name: 'dsh-model-manager', order: 350,
@@ -196,7 +205,7 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
         config.vision.enabled ? '当消息中出现 [图片附件 ID] 时，使用 model_manager_inspect_image 针对具体问题查看原图；不要根据占位文字猜测图片内容。' : ''].filter(Boolean).join('\n')
     },
   }), 'dsh-model-manager: prompt')
-  ctx.effect(() => ctx.on('llm/adapters-updated', () => { if (ready) void service.refresh().catch(() => {}) }), 'dsh-model-manager: directory')
+  ctx.effect(() => ctx.on('llm/adapters-updated', () => { void refreshChangedDirectory() }), 'dsh-model-manager: directory')
   const assembled = new Map<string, ModelRef>()
   const observed = new Map<string, { turn: number; keys: Set<string> }>()
   ctx.effect(() => ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
