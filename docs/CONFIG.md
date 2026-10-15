@@ -1,6 +1,54 @@
-# 配置说明（v3）
+# 配置说明（当前 v3；Desktop v4 待实现）
 
-目标宿主配置补充：见 [DSH 0.2.0-rc.2 升级适配契约](DSH-UPGRADE-20261011.md)（`dsh-upgrade-20261011-v1`，待确认／待实现）。既有字段含义、凭据边界、覆盖／清理规则不变；目标持久层和表单入口迁移以该版契约为准，旧 settings.yaml 接入说明仍是当前组合基线，不表示目标版本已迁移或验证。
+目标文档版：`model-manager-desktop-20261015-v1`，待具体文档确认／待实现。行为与接口见 [Desktop 0.13.0 契约](DESKTOP-0.13-20261015.md)，持久层接缝见 [升级适配契约](DSH-UPGRADE-20261011.md)。当前实际包仍 0.12.0／配置 v3；以下目标字段尚不可用，旧 settings.yaml 与 v3 条目保留为历史实现，不代表 Desktop 已迁移。
+
+## Desktop v4 配置与 UI（待实现）
+
+在既有 ManagerConfig 基础上新增下列字段；原始未知键保留。sourceKind='deepseek'|'ark-agent-plan'|'opencode-go'，TaskType='coding'|'writing'|'research'|'analysis'|'general'，TaskGrade 保持 simple／normal／complex。
+
+| 路径／类型 | 默认与校验 | UI／所有者／生效 |
+| --- | --- | --- |
+| version:4 | v1–v3 有效迁移，v4 幂等；更高版本拒绝写入 | 迁移预览／管理器；首次成功保存或迁移应用才改原始版本 |
+| sources?: Record<string,SourceConnection> | 缺省不持久补空对象；每项 {kind,providerId,arkProfile?}；来源键由宿主生成，kind 与 Provider 唯一关联 | 模型来源／管理器；选中导入应用后生效 |
+| sources.*.arkProfile?:string | 火山账号查询必须明确选择；非空名称从 CLI 状态摘要选择，其他 kind 不创建该字段 | 模型来源／管理器；只控制目录查询，不切 CLI 默认或 DSH 调用身份 |
+| aliases.*.recovery?:AliasRecovery | 可选局部字段，缺失采用下述默认；不用已退役 reliability 命名 | 别名卡“冷却与恢复”／管理器；下一轮使用新策略，正在执行的尝试不变 |
+| recovery.transientCooldownSeconds:number | 缺省 60，整数 1–604800 秒 | 同上，“临时故障冷却” |
+| recovery.rateLimitCooldownSeconds:number | 缺省 300，同范围；服务端有效等待优先 | 同上，“限流冷却” |
+| recovery.quotaCooldownSeconds:number | 缺省 3600，同范围；服务端明确等待优先 | 同上，“额度冷却” |
+| auto.evaluatorReasoningEffort?:string | 必须是评估模型实际公开值；缺失省略，不自动选 low／off | AUTO 评估设置／管理器；下一轮；切模型清空旧档位草稿 |
+| auto.rules?:AutoRule[] | 缺省空规则，原始不存在不主动补写；按数组顺序优先 | AUTO 可选规则／管理器；下一轮 |
+| AutoRule | {id,name,enabled,taskTypes,grades?,selection}；id 唯一稳定，name 非空；enabled 新建默认 true；taskTypes 为非空去重集合；grades 缺失不限，存在则非空合法集合；selection 使用现有 Selection | 添加／编辑／排序／启停／删除规则；启用的目标须完整可用 |
+| vision.automatic?:boolean | 有效默认 true；只有 enabled 时执行，显式 false 保留旧图片工具路径 | 视觉“自动理解图片”／管理器；下一轮，进行中请求用原快照 |
+
+来源 apiKeyEnv／baseURL／api／models 等字段仍只存实际原生所有者，不复制到 sources。原生新来源高级表单按实际 schema 提供，只写明确编辑字段；OpenCode Go 只导航原插件设置。保存凭据是独立动作，新增引用使用 DMM_DEEPSEEK_ 或 DMM_ARK_AGENT_PLAN_ 加随机合法后缀，由服务端分配；不覆盖已有名字。凭据保存成功后可继续预览，取消预览不删除已保存 Key；旧 Key 更换在原生凭据入口完成，不进入管理器目录回滚。
+
+自有 schema 的实时字段通过实际 entry ID 的 SettingsForms 保存；官方非 volatile 字段走 configEditor.edit，以原始＋继承层指纹作 CAS，不改变上游 volatile 语义。自有参数更新对后续轮次生效；原生来源参数按其 Loader 生命周期生效，保存前阻止相关在途操作，返回真实的生效／重挂载结果。普通全量草稿保存不覆盖刚独立完成的来源、凭据或目录操作。
+
+### v1–v4 迁移与遗留配置矩阵
+
+| 原始数据 | 有效 v4／写入规则 |
+| --- | --- |
+| v1／v2 的模型、别名数组、主模型、角色与档位 | 先执行既有保值语义，再归一为 v4；tiers／legacyTiers 和仍有效主／视觉绑定保留，不生成 preferences |
+| v3 的 aliases／efforts／auto 三档／vision／models | 保留原值，增量默认仅存在有效层；不自动开启 AUTO 或原本关闭的视觉 |
+| 缺少 recovery／rules／sources／automatic | 有效采用新默认；首次保存仅写实际选中修改和 version=4，不全量物化 schema 默认；已经开启的视觉在本版 automatic 默认 true 下改为自动辅助 |
+| 已有 vision.enabled=false 或限定策略 | enabled 和 policy 原值保持；automatic 不绕过禁用或 native-only |
+| models.*.capability.image、auto.preferences、aliases.*.reliability 三键 | 继续按各自已确认独立清理／备份恢复规则处理；raw 保留至明确清理，不参与运行，不从恢复或默认值复活 |
+| auto.main／roles、official 历史字段及未知键 | 仍有效部分继续读取并纳入引用；未知值原样保留，不借版本升级清除 |
+| AUTO 新规则目标／相关参数 | 新增为完整使用引用；目录改名／删除、官方迁移和恢复一并检查，不产生悬空规则 |
+| 原生来源旧七档／input=[]／maxTokens | 不由本次迁移猜测校正；预览独立选择，未选字段和未知模态保留，输出上限默认不选 |
+| 历史 v2／v3 目录备份、证据和会话 | 保留原件；旧证据签名不改成新验证；跨宿主旧备份不能直接覆写新 owner，无法证明完整映射与基线时拒绝恢复 |
+
+启动对旧值只读归一，尚未迁移的原始层在页面可见；实际迁移应用前完整备份并核对原始用户层、继承层、全部引用及目录。schema 须接纳可迁移的旧配置输入，不先用 version=4 校验把旧插件挡在挂载阶段。配置异常展示诊断，不能静默恢复默认并覆盖原件。
+
+### 独立健康状态
+
+目录使用实际 Profile 配置文档所在目录下 data/dsh-model-manager，沿用同 Profile 原有 verification／vision cache／catalog-backups；不能缺省落到 web。不自动把其他 Profile 或旧共享目录数据搬进来。
+
+alias-health.json 保存 {version:1,revision,entries}。AliasHealthEntry 为 {alias,model:{providerId,modelId},signature,kind,failedAt,retryAt?}；kind 限 transient／rate-limit／quota／auth，时间为 UTC 毫秒，auth 无 retryAt。signature 绑定候选／来源与相关配置／凭据代次，客户端不回传私有凭据指纹。健康文件不含 Key、完整错误正文、提示词、图片、alias 顺序或 Selection。
+
+使用文件锁、CAS、原子写和损坏备份回退；状态损坏明确提示并丢弃不可验证条目，不写模型能力。到期条目仍留作一次恢复竞争记录，恢复租约与本轮成功候选只在内存，进程重启后无悬空租约。候选移除、相关配置／凭据变化删除相应失效状态；成功清除对应条目；其他 Profile 不受影响。手动重置只清状态，不能同时更改凭据、发模型请求或修改验证证据。
+
+新增 source 操作备份使用目标版完整写集格式，latest 指针按 source／manual／official／parameter 分开；恢复使用后写状态 token 和实际所有者版本，跨重启或后续编辑不匹配时保守拒绝。冷却状态不随目录备份恢复复活，恢复后的相关来源重新计算健康签名。
 
 ## 别名候选恢复（alias-failover-20261010-v1，已实现 0.12.0）
 

@@ -1,6 +1,15 @@
-# 架构契约（v3）
+# 架构契约（当前 v3；Desktop v4 待实现）
 
-目标版技术契约：见 [DSH 0.2.0-rc.2 升级适配](DSH-UPGRADE-20261011.md)（`dsh-upgrade-20261011-v1`，待确认／待实现）。本文原宿主 API 和设置存储说明保留作为当前组合基线；目标版采用该补充中的接口、配置迁移与验收边界，不将旧 API 继续当作目标版可用接口。
+目标版：`model-manager-desktop-20261015-v1`，0.12.0 → 0.13.0／Desktop 0.2.0-rc.2，待具体文档确认／待实现。完整 [Desktop 功能与技术契约](DESKTOP-0.13-20261015.md) 和 [升级接缝](DSH-UPGRADE-20261011.md) 优先于本文旧宿主接口；旧条目保留为历史实现依据，不把规划写成已实现。
+
+## Desktop 0.13.0 技术入口（待实现）
+
+- HostModelBridge 保留复合主键和宿主目录读取；desktop-settings 将实际所有者的 Config／继承／覆盖、volatile schema、writable 和 revisionToken 统一描述，分别使用 SettingsForms 或 configEditor 写入。自有字段声明 volatile，原始层与有效 v4 分离；旧 register／scope 不再使用。
+- 拟新增 source-connections、alias-health、vision-analysis，分别处理来源预览、独立健康状态及共享视觉调用。新增类型 SourceConnection／SourcePreview、AliasRecovery／AliasHealthEntry、AutoRule 见 CONFIG；CatalogPreview.origin 增加 source，其完整写集共用现有目录事务。
+- 新来源／登录／健康 HTTP 的输入、完整输出、路径聚合、错误码及取消以 Desktop 契约第 7 节为准；AUTO 推荐继续使用现有 /recommend，不另造同义接口。source 操作备份与 manual／official／parameter 分开记录最近指针，凭据不混入模型备份。
+- 自动视觉通过 agent/pre-step 的 PreStepDecision.messages 接纳 model-manager-vision 来源观察；AUTO 按同一 session／turn 的候选快照一次评估和规则选择，agent/request 返回该轮目标。预步骤拒绝／取消时不提交图片观察或迟到决策，不直接改历史和 UI 草稿。
+- alias／AUTO 暴露推理交集，候选实际调用遵循明确覆盖→候选→执行档→模型默认；冷却文件和本轮固定候选不写入用户选择。公开的 0.2 prepared call、流、规范消息及 replayState 必须由实际宿主回归，不能只做旧测试桩改名。
+- 具体状态转移、会话／Profile 隔离、冷却文件、能力过滤、混合别名视觉准备和旧字段迁移分别见 Desktop 契约第 3–6、8 节及 CONFIG。以下 v3／0.1.5 接口不继续作为目标 API。
 
 ## 别名候选恢复（alias-failover-20261010-v1，已实现 0.12.0）
 

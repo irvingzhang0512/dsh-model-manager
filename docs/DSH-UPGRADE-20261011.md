@@ -1,16 +1,18 @@
 # DSH 0.2.0-rc.2 升级适配契约
 
-文档版：`dsh-upgrade-20261011-v1`；2026-10-11。需求确认：待用户明确确认本版。实现状态：待实现；目标运行验证：未执行。现有已实现状态／历史证据仍对应原组合，不自动延伸到目标。
+当前文档版：`model-manager-desktop-20261015-v1`；2026-10-15。基线 0.12.0，目标 0.13.0／Desktop 0.2.0-rc.2；具体文档待用户确认。实现状态：待实现；目标运行验证：未执行。该版替代 2026-10-11 未确认的 dsh-upgrade-20261011-v1，修正其“所有字段都用 SettingsForms”的假设；历史证据不自动延伸到目标。
 
-本契约补充 [当前规格](SPEC.md) 的 F001–F005、F007–F012；回归已实现 F006，与 [架构](ARCHITECTURE.md)、[配置](CONFIG.md)一起作为本次目标版技术预期。原业务行为保持；以下 API 与持久层接入以目标版为准，原架构中的旧 settings／会话接口描述仅适用于 0.1.5-rc.2 基线。
+本契约补充 [当前规格](SPEC.md) 的 F001–F005、F007–F013，回归已实现 F006，与 [Desktop 完整契约](DESKTOP-0.13-20261015.md)、[架构](ARCHITECTURE.md)、[配置](CONFIG.md)一起作为目标版预期。来源导入、冷却、类型规则、自动视觉为本次新增行为，其他既有行为按原预期回归；旧 settings／会话接口仅适用于 0.1.5-rc.2 基线。
 
 ## 接口、配置与验收
 
-- SettingsForms.describe／mutate／replace 按实际 Profile entry ID 工作，旧 SettingsProvider／register／get／watch 接入退役；有效配置来自插件 Config。官方 Provider、默认模型、原生 Subagent 的 entry ID 以实际目标组合解析，不从 npm 包名推断。
+- SettingsForms.describe／mutate 只处理实际 entry 的 volatile 字段；自有实时配置通过自有 schema 明确声明。普通字段使用 configEditor.configuration()／edit()，在锁内校验原始＋继承层 token，依正常 Loader 重挂载；不为方便表单修改官方 volatile 语义。旧 SettingsProvider／register／get／watch 退役。
+- 官方 Provider、共享目录、默认模型、原生 Subagent 的所有者由实际目录／公开服务与唯一 entry ID 解析，不从 npm 包名或旧分节推断。settingsNs 指实际条目，不等于整份官方配置都能通过 SettingsForms 读写。
 - 保留 Config 的 base／用户覆盖、原始值／解析值分离、revision／目录冲突保护及多分节操作的现有整体备份／应用／恢复边界。脱敏 describe 不可拼整节 replace 以免删除未回传凭据；有限字段操作须保留未触及的秘密值。
-- 官方 DeepSeek Messages 协议及 pi-ai 目录同步先形成预览；下架模型、别名候选、AUTO 三档、视觉／旧有效兜底、宿主默认、原生 Subagent 与未来覆盖的引用及相关参数完整处理，未解决阻止应用；未知字段不顺带清理。
+- 官方 DeepSeek Messages 协议及 pi-ai 目录同步先形成预览；下架模型、别名候选、AUTO 三档／新规则、视觉／旧有效兜底、宿主默认、原生子模型与未来覆盖的引用及相关参数完整处理，未解决阻止应用；未知字段不顺带清理。新增来源刷新不自动执行删除／迁移。
 - 别名逐候选与每候选最多五次临时故障调用、32 MiB 暂存、成功后提交、取消／丢弃失败内容与已完成工具边界保持；新流事件／终态必须对应目标宿主，不把 mock 通过当作真实协议通过。
-- AUTO 仍只评估主任务，原生 Subagent 的显式选择与 fork 继承保持独立；原生图片能力与推理参数按目标目录核验。新会话覆盖／调用快照不能互串或改写历史。
+- AUTO 只评估主任务，新类型规则与复杂度使用同一次评估；原生 Subagent 显式选择与 fork 继承独立。逻辑入口推理声明使用交集，具体调用校验实际档位。通过 agent/pre-step／PreStepDecision.messages 接纳带来源的视觉观察，agent/request 不私改消息；调用快照不能互串或重写历史。
+- 客户端配置注册 plugins.bundle.config，key 为 dsh-model-manager；原生路径使用公开 hostRouteUrl／streamBaseUrl，可信来源精确核验 dsh-app://app。六标签、分区草稿、独立保存、普通字段重挂载和原生导航按完整契约验收。
 - 验收：实际 Provider／alias／AUTO／视觉／原生子任务链路、官方同步预览取消／应用／恢复、旧停用字段的独立清理恢复、并发冲突与秘密值保留、两会话覆盖隔离，以及既有别名恢复回归。
 - 本版不实现未确认的 batch-verification-20261010-v1；原有 SPEC／架构／配置差异原样保留，本适配文档不构成对该设计的确认。
 
@@ -18,5 +20,5 @@
 
 - 旧持久配置先按真实原始文件预览，保留组装 base、用户覆盖、未知字段与完整引用。配置映射以目标实际 Profile entry ID／插件存储为准，不只修改类型或页面。
 - DSH 旧 settings.yaml 自动导入先改名再逐节写入，拒绝分节不会自动重试；在隔离副本中逐节核对迁移，不把启动成功视作数据完整。业务存储另行备份，不与 DSH 全局设置混淆。
-- 测试与运行只能使用独立源码／DSH_HOME／DSH_DATA_DIR／Profile，保持旧日常原件。适配完成运行适用的类型、测试、构建及宿主页面／集成验证，失败记录不得写成兼容通过。
+- 开发故障注入使用独立源码／DSH_HOME／Profile／原生 userData 并核验实际数据隔离，保持旧日常原件。适配完成运行类型、构建、测试及宿主页面／集成验证；按既有授权固定提交、正常退出／冷备份后安装日常并重开核对。日常不默认发推理请求或建立测试数据，承载当前 Agent 时遵循外部重启交接。
 - 没有对应源码实现、测试执行或目标页面证据；本次仅补文档，不提高包版本。需要新增业务规则时先重新确认具体差异。
