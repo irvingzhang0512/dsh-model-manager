@@ -11,6 +11,12 @@
 - alias／AUTO 暴露推理交集，候选实际调用遵循明确覆盖→候选→执行档→模型默认；冷却文件和本轮固定候选不写入用户选择。公开的 0.2 prepared call、流、规范消息及 replayState 必须由实际宿主回归，不能只做旧测试桩改名。
 - 具体状态转移、会话／Profile 隔离、冷却文件、能力过滤、混合别名视觉准备和旧字段迁移分别见 Desktop 契约第 3–6、8 节及 CONFIG。以下 v3／0.1.5 接口不继续作为目标 API。
 
+### 本版实际接缝补充
+
+- 配置读取在同一同步操作内复用公开 configuration() 结果，微任务边界失效；目录每轮只捕获一次配置层，写前重新读取并保留原生表单／锁内 CAS。初始化期间的 adapters-updated 延后合并，初始化完成前接纳变更，卸载后停止刷新。
+- OpenCode Go 宿主 Provider 为 dsh-opencode-go，SDK 内部 opencode-go 不作为模型主键；原生 owner 条目仍为 opencode-go。
+- 来源页被动 auth status 最多三秒，明确操作保留六十秒；认证和资源查询使用选定 Profile，登录失败只输出受限说明。catalog-resolve 的 cancel:true 使当前预览 token 失效，不写模型或凭据。
+
 ## 别名候选恢复（alias-failover-20261010-v1，已实现 0.12.0）
 
 对应 SPEC F002，基线 0.11.0／`89aac7b018ac8a123aa40b98ecabc153eeee9d40`，当前实现 0.12.0。用户审阅该版具体文档后回复“继续实现”确认；替代仅限最终逻辑目标为别名的旧兜底流程，不实现或授权其他待确认章节。配置仍为 v3，不新增运行依赖或可调持久参数。
