@@ -446,7 +446,7 @@ function ManagerSection({ctx}:{ctx?:any}) {
   const groups = providers.map(id => ({ id, models: filtered.filter(model => model.providerId === id) })).filter(group => group.models.length)
   const groupOpen = (id: string) => filtering ? true : expanded.has(id)
   return <div className="dmm-root">
-    <h2>模型管理</h2>
+    <h2>Irving · 模型增强</h2>
     <details className="dmm-guide">
       <summary>这个插件是干什么的？（点开查看说明）</summary>
       <p>查看已加载模型及能力，配置别名、AUTO 自动选模型和视觉辅助。子 Agent 模型范围请到 DSH 官方设置配置。</p>
@@ -626,5 +626,5 @@ class PanelBoundary extends React.Component<{ children: React.ReactNode }, { err
 
 export function apply(ctx: any): void {
   injectStyle()
-  ctx.slots.inject('plugins.bundle.config',()=>ctx.slots.register({name:'plugins.bundle.config',key:'dsh-model-manager',label:'模型管理',inject:()=>({ctx})},(props:any)=>props.view==='summary' ? <p>管理模型来源、备用候选、AUTO 与图片辅助。</p> : <PanelBoundary><ManagerSection ctx={ctx}/></PanelBoundary>))
+  ctx.slots.inject('plugins.bundle.config',()=>ctx.slots.register({name:'plugins.bundle.config',key:'dsh-model-manager',label:'Irving · 模型增强',inject:()=>({ctx})},(props:any)=>props.view==='summary' ? <p>管理模型来源、备用候选、AUTO 与图片辅助。</p> : <PanelBoundary><ManagerSection ctx={ctx}/></PanelBoundary>))
 }

@@ -1,7 +1,7 @@
 {
   "name": "dsh-model-manager",
-  "version": "0.13.1",
-  "description": "DSH 模型能力、别名、AUTO 主模型选择与视觉辅助",
+  "version": "0.2.1-rc.2+rev.1",
+  "description": "提供模型参数配置、别名与备用模型管理、自动选模和视觉辅助。",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
@@ -14,13 +14,15 @@
       "default": "./lib/client.js"
     },
     "./package.json": "./package.json",
-    "./cordis.patch.yml": "./cordis.patch.yml"
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib",
     "docs",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "locale"
   ],
   "engines": {
     "node": ">=22",

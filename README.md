@@ -1,4 +1,4 @@
-# dsh-model-manager
+# Irving · 模型增强
 
 在 DSH 中配置模型参数、管理别名和备用模型、按任务自动选择主模型，并为文本模型提供视觉辅助。
 
@@ -12,13 +12,13 @@
 
 ## 安装
 
-当前本地版本 **0.13.1**，适配 **DSH Desktop 0.2.1-rc.2**。使用 OpenCode Go 来源时，还需安装并启用 **dsh-opencode-go 0.1.24**；其他来源不依赖它。实际宿主要求见 [package.json](package.json)。
+当前本地版本 **0.2.1-rc.2+rev.1**，适配 **DSH Desktop 0.2.1-rc.2**。使用 OpenCode Go 来源时，还需安装并启用 **dsh-opencode-go 0.1.24**；其他来源不依赖它。实际宿主要求见 [package.json](package.json)。
 
 截至 2026-10-18，[公开源码仓库](https://github.com/irvingzhang0512/dsh-model-manager)默认分支包版本为 **0.3.0**，本页版本尚未公开推送或发布。先向维护者获取对应版本的完整预构建 `.tgz`，目前没有本版公开下载链接。
 
 1. 打开「插件 → 添加插件 → 安装第三方插件」，填写安装包的本机绝对路径。
-2. 核对包名 `dsh-model-manager` 和版本 `0.13.1`，启用后按提示重启 DSH。
-3. 在「插件 → dsh-model-manager → 模型管理」确认出现来源、模型、别名、AUTO、视觉和日志六个标签。
+2. 核对包名 `dsh-model-manager` 和版本 `0.2.1-rc.2+rev.1`，启用后按提示重启 DSH。
+3. 在「插件 → Irving · 模型增强 → 模型增强」确认出现来源、模型、别名、AUTO、视觉和日志六个标签。
 
 本版兼容验证见 [升级记录](docs/DSH-UPGRADE-20261017.md)，完整功能验收见 [0.13.0 验收](docs/VERIFICATION-0.13.0.md)。
 

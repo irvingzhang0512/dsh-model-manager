@@ -472,3 +472,8 @@ type OfficialPreview = {
 ### 验证与兼容边界
 
 模拟 HTML 与 LLM 分别测试识别流程和宿主写集；客户端冒烟检查表单、流分片、取消、token 失效、计数、阻止项、草稿保护和完整 snapshot。代码修改后顺序执行 typecheck、build、test，再在 development 做真实网页＋LLM 预览与页面验收；不运行真实模型能力验证来证明网页识别正确，不重启 maintenance。只有实际完成相关验收才填写兼容记录。
+
+
+## 2026-10-18 统一展示与套件交付契约
+
+依据用户已确认的 office-suite-implementation-20261018-v1。Irving · 模型增强／Irving · Model Enhancement，包 dsh-model-manager 统一 0.2.1-rc.2+rev.1。展示资源通过 locale 导出提供；原条目 id、服务／工具／客户端身份、配置及存储保持。本插件保持独立安装。版本按完整字符串与固定散列核对；本节不授权原先待确认的业务扩展。
