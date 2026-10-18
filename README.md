@@ -20,7 +20,7 @@
 2. 核对包名 `dsh-model-manager` 和版本 `0.2.1-rc.2+rev.1`，启用后按提示重启 DSH。
 3. 在「插件 → Irving · 模型增强 → 模型增强」确认出现来源、模型、别名、AUTO、视觉和日志六个标签。
 
-本版兼容验证见 [升级记录](docs/DSH-UPGRADE-20261017.md)，完整功能验收见 [0.13.0 验收](docs/VERIFICATION-0.13.0.md)。
+此前兼容验证见 [升级记录](docs/DSH-UPGRADE-20261017.md)，完整功能验收见 [0.13.0 验收](docs/VERIFICATION-0.13.0.md)。
 
 ## 配置
 
@@ -82,3 +82,5 @@
 - [配置指南](docs/CONFIG.md)：参数、保存、备份及旧配置处理。
 - [当前规格](docs/SPEC.md)、[更新记录](docs/CHANGELOG.md)。
 - [Desktop 功能契约](docs/DESKTOP-0.13-20261015.md)、[技术架构](docs/ARCHITECTURE.md)。
+
+本次统一名称、版本与办公套件的实测范围见 [2026-10-18 验证记录](docs/VERIFICATION-OFFICE-20261018.md)。
