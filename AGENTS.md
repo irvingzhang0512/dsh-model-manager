@@ -1,8 +1,10 @@
 # dsh-model-manager 维护约定
 
+> OpenSpec 文档入口：[迁移索引](openspec/MIGRATION.md)。后续开发与管理统一使用 `openspec/specs` 和 `openspec/changes`；旧 `docs/SPEC.md` 与原始需求冻结保留，个人项目资料本轮保持原样，旧文中的“可编辑规格”入口由此替代。新功能先审阅具体方案并确认，再实施与验证；历史资料不双写。
+
 ## 开发入口与文档分工
 
-先返回根维护目录，读取 [根 AGENTS](../AGENTS.md)、[维护规范](../docs/MAINTENANCE.md) 和开发 Skill；本仓库的特殊约束仍适用。统一流程见 [文档驱动开发](../docs/DOC-DRIVEN-DEVELOPMENT.md)，当前可编辑规格见 [docs/SPEC.md](docs/SPEC.md)。
+先返回根维护目录，读取 [根 AGENTS](../AGENTS.md)、[维护规范](../docs/MAINTENANCE.md) 和开发 Skill；本仓库的特殊约束仍适用。统一流程见 [文档驱动开发](../docs/DOC-DRIVEN-DEVELOPMENT.md)，当前可编辑规格与待确认方案见 [OpenSpec 迁移索引](openspec/MIGRATION.md)。
 
 - 功能新增／修改：读取规格及其差异，先改预期和验收条件，涉及接口／配置／存储时先同步技术契约；用户确认该版文档后再改源码并验证。自然语言需求也先落入规格。
 - Desktop 0.13.0 已确认实施版为 [model-manager-desktop-20261015-v1](docs/DESKTOP-0.13-20261015.md)，与 SPEC／架构／配置及升级接缝共同审阅；用户于 2026-10-15 在该版文档交付后回复“继续实现”，据此开发 0.13.0／v4；实际验收独立记录，同版不重复询问。

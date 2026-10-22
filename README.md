@@ -1,5 +1,7 @@
 # Irving · 模型增强
 
+> OpenSpec 文档入口：[迁移索引](openspec/MIGRATION.md)。后续开发与管理统一使用 `openspec/specs` 和 `openspec/changes`；旧 `docs/SPEC.md` 与原始需求冻结保留，个人项目资料本轮保持原样，旧文中的“可编辑规格”入口由此替代。新功能先审阅具体方案并确认，再实施与验证；历史资料不双写。
+
 在 DSH 中配置模型参数、管理别名和备用模型、按任务自动选择主模型，并为文本模型提供视觉辅助。
 
 ## 能做什么
@@ -80,7 +82,7 @@
 ## 更多文档
 
 - [配置指南](docs/CONFIG.md)：参数、保存、备份及旧配置处理。
-- [当前规格](docs/SPEC.md)、[更新记录](docs/CHANGELOG.md)。
+- [当前规格](openspec/MIGRATION.md)、[更新记录](docs/CHANGELOG.md)。
 - [Desktop 功能契约](docs/DESKTOP-0.13-20261015.md)、[技术架构](docs/ARCHITECTURE.md)。
 
 本次统一名称、版本与办公套件的实测范围见 [2026-10-18 验证记录](docs/VERIFICATION-OFFICE-20261018.md)。
