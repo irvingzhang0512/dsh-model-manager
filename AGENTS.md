@@ -27,3 +27,7 @@
 - 代码修改后依次运行 `npm run typecheck`、`npm run build`、`npm test`，然后做客户端冒烟。当前目标使用实际 Desktop 的隔离 carrier／原生窗口验证 AUTO、视觉和原生子任务；完成必要检查与固定提交后按根运行维护 Skill 交付日常 Desktop。旧 Web 仅为历史组合，未经用户重新要求不得恢复；真实服务与合成验证分别记录，完成对应验收后才更新兼容性及实际快照。
 - 别名删除按 F002／F004／F009：alias-removal 规划逻辑入口及其全部使用引用，接入相同 catalog 事务；不能把逻辑别名当真实目录模型删除。旧主模型仍有运行语义，清理须用户明确选择；旧视觉兜底不影响无关当前视觉模型，关闭后的目标与失效值在页面仍须可见。
 - README、`docs/CONFIG.md`、`docs/ARCHITECTURE.md`、`docs/V1-COVERAGE.md` 和 `docs/CHANGELOG.md` 应与用户可见行为一致。`docs/REQUIREMENTS.md` 是原始需求，保持只读。
+
+## 2026-10-24 Git 分发约定
+
+根 windows-personal-workspace-v2 已确认自研通过 GitHub 固定提交安装：提交完整运行产物和资源，不依赖安装期构建 hook；开发检查仍显式运行既有 typecheck／test／build 或 JS test／lint。此约定替代旧的 lib 忽略／现场 prepack 做法；不提交 node_modules，不修改业务行为。源码推送、公网安装和本地验证分别记录。
