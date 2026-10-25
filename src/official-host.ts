@@ -79,9 +79,13 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService, so
     }
   }
   const readState = async (): Promise<OfficialState> => {
-    const explicit = get('llm-deepseek')?.models as HostModel[] | undefined
+    const descriptor = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')
+    const user = descriptor?.user as Record<string, unknown> | undefined
+    const inherited = descriptor?.base as Record<string, unknown> | undefined
+    // effective 包含宿主内置兜底目录；只有持久层中的数组才是显式目录。
+    const explicit = (Array.isArray(user?.models) ? user.models : inherited?.models) as HostModel[] | undefined
     const models = new Map<string, HostModel>()
-    for (const model of await ctx.llm.listModels(OFFICIAL_PROVIDER)) {
+    for (const model of Array.isArray(explicit) ? [] : await ctx.llm.listModels(OFFICIAL_PROVIDER)) {
       const info = await ctx.llm.resolveModelInfo(OFFICIAL_PROVIDER, model.id)
       const record = info as unknown as Record<string, unknown>
       models.set(model.id, { ...record, id: model.id, name: model.name,
@@ -90,7 +94,7 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService, so
     }
     for (const model of explicit ?? []) models.set(model.id, structuredClone(model))
     // 设置 schema 可能剥离未知键；迁移必须保留用户原始模型字段。
-    const raw = ctx.settings.describe({ redactSecrets: true }).find(item => item.ns === 'llm-deepseek')?.user as Record<string, unknown> | undefined
+    const raw = user
     if (Array.isArray(raw?.models)) for (const model of raw.models as HostModel[]) {
       if (model && typeof model.id === 'string') models.set(model.id, { ...models.get(model.id), ...structuredClone(model) })
     }
@@ -107,8 +111,10 @@ export function registerOfficialSync(ctx: Host, service: ModelManagerService, so
       const effective = at(get(ns), path) as Record<string, unknown> | undefined
       const user = at(raw(ns), path) as Record<string, unknown> | undefined
       const baseProfile = at(descriptors.find(d => d.ns === ns)?.base, path) as Record<string, unknown> | undefined
-      const explicit = Array.isArray(effective?.models) && (ns === 'llm-deepseek' || !!effective.models.length)
-      const list = explicit ? effective!.models as HostModel[] : (await ctx.llm.listModels(capability.providerId)).map(model => ({ id: model.id }))
+      const explicit = ns === 'llm-deepseek'
+        ? Array.isArray(user?.models) || Array.isArray(baseProfile?.models)
+        : Array.isArray(effective?.models) && !!effective.models.length
+      const list = ns === 'llm-deepseek' ? base.models : explicit ? effective!.models as HostModel[] : (await ctx.llm.listModels(capability.providerId)).map(model => ({ id: model.id }))
       const original = Array.isArray(user?.models) ? user.models as HostModel[] : []
       const overrides = (user?.modelOverrides ?? effective?.modelOverrides) as Record<string, Record<string, unknown>> | undefined
       const models = list.map(model => ({ ...structuredClone(model), ...(!explicit ? structuredClone(overrides?.[model.id] ?? {}) : {}), ...structuredClone(original.find(m => m.id === model.id) ?? {}) }))

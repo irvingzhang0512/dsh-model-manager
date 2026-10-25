@@ -12,7 +12,7 @@ import { resolveDataDir } from '../src/service.ts'
 let temporary: string | undefined
 afterEach(async () => { vi.unstubAllGlobals(); vi.useRealTimers(); if (temporary) await rm(temporary, { recursive: true, force: true }); delete process.env.DSH_HOME })
 
-async function fixture(explicit = true, pi = false, absentUser = false, legacy = false) {
+async function fixture(explicit = true, pi = false, absentUser = false, legacy = false, catalog?: { runtime: any[]; base?: any[] }) {
   temporary = await mkdtemp(join(tmpdir(), 'dmm-official-')); process.env.DSH_HOME = temporary
   const old = { providerId: 'deepseek-official', modelId: 'old-fast' }
   const config = structuredClone(DEFAULT_CONFIG)
@@ -28,7 +28,7 @@ async function fixture(explicit = true, pi = false, absentUser = false, legacy =
   const get = (ns: string) => structuredClone(ns === 'llm-deepseek' ? { ...raw[ns], models: raw[ns].models ? raw[ns].models.map(({ custom: _custom, ...model }: any) => model) : originalModels } : raw[ns])
   const settings = {
     get, register: () => ({ watch: () => () => {} }),
-    describe: () => Object.keys(raw).map(ns => ({ ns, revision: rev[ns], value: get(ns), ...(!absentUser || ns !== 'llm-deepseek' ? { user: structuredClone(raw[ns]) } : {}) })),
+    describe: () => Object.keys(raw).map(ns => ({ ns, revision: rev[ns], value: get(ns), ...(ns === 'llm-deepseek' && catalog?.base ? { base: { models: structuredClone(catalog.base) } } : {}), ...(!absentUser || ns !== 'llm-deepseek' ? { user: structuredClone(raw[ns]) } : {}) })),
     mutate: async (ns: string, ops: any[], expected: number) => {
       if (rev[ns] !== expected) throw Error('SETTINGS_CONFLICT')
       if (failureNamespace === ns && failureOnce) { failureOnce = false; throw Error('injected write failure') }
@@ -58,6 +58,11 @@ async function fixture(explicit = true, pi = false, absentUser = false, legacy =
       yield { type: 'text-delta', text: JSON.stringify(value) }; yield { type: 'finish', reason: { kind: 'stop' } }
     }),
   }
+  if (catalog) {
+    const originalList = runtime.listModels, originalInfo = runtime.resolveModelInfo
+    runtime.listModels = async provider => provider === 'deepseek-official' && !raw['llm-deepseek'].models ? structuredClone(catalog.runtime) : originalList(provider)
+    runtime.resolveModelInfo = async (provider, id) => provider === 'deepseek-official' && !raw['llm-deepseek'].models ? { id, ...structuredClone(catalog.runtime.find(m => m.id === id)) } : originalInfo(provider, id)
+  }
   vi.stubGlobal('fetch', vi.fn(async () => new Response(html(['fast', 'pro'], ['old-fast']))))
   const ctx = { settings, llm: runtime, tools: { register: () => () => {} }, attachments: {}, systemPrompt: { section: (s: any) => { prompts.push(s.text); return () => {} } }, webServer: { register: (route: any) => { if (routes.has(route.path)) throw Error('duplicate route'); routes.set(route.path, route.handler); return () => {} } }, on: (name: string, fn: Function) => { hooks.set(name, fn); return () => {} }, effect: (fn: Function) => { const dispose = fn(); if (typeof dispose === 'function') disposed.push(dispose) }, logger: { error: () => {} } }
   apply(Object.assign(ctx,{configEditor:{documentPath:join(process.env.DSH_HOME!,'profiles/desktop/cordis.yml')},credentials:{resolve:async()=>undefined}}) as never)
@@ -77,6 +82,31 @@ async function fixture(explicit = true, pi = false, absentUser = false, legacy =
   }
   return { raw, rev, call, prepare, runtime, get, disposed, routes, prompts, hooks, managedAdapter, backupPath, analyses: () => analyses, mode: (value: string) => { outputMode = value }, fail: (ns: string) => { failureNamespace = ns; failureOnce = true } }
 }
+
+describe('rc3 官方动态目录与持久覆盖', () => {
+  const live = [{ id: 'live-v4', name: '实时官方模型', contextWindow: 1000000, maxTokens: 65536, custom: 'runtime-kept' }]
+  it('读取和取消使用宿主实时目录，不把 effective 兜底模型物化', async () => {
+    const f = await fixture(false, false, false, false, { runtime: live }), original = structuredClone(f.raw)
+    const preview = await f.call('catalog-preview', { operations: [{ kind: 'rename', model: { providerId: 'deepseek-official', modelId: 'live-v4' }, name: '我的名称' }] })
+    expect(preview.status, JSON.stringify(preview.json)).toBe(200)
+    expect(preview.json.counts.find((p: any) => p.providerId === 'deepseek-official').before).toBe(1)
+    expect(f.raw).toEqual(original)
+    const applied = await f.call('catalog-apply', { token: preview.json.token, selected: preview.json.selected })
+    expect(applied.status, JSON.stringify(applied.json)).toBe(200)
+    expect(f.raw['llm-deepseek'].models).toEqual([{ ...live[0], name: '我的名称' }])
+    expect((await f.call('catalog-restore', { backupId: applied.json.backupId })).status).toBe(200)
+    expect(f.raw).toEqual(original)
+  })
+  it.each([true, false])('已保存用户／继承目录不自动替换为动态目录，用户层=%s', async user => {
+    const inherited = [{ id: 'saved-model', name: '继承目录', custom: { keep: true } }]
+    const f = await fixture(user, false, false, false, { runtime: live, ...(!user ? { base: inherited } : {}) }), original = structuredClone(f.raw)
+    const id = user ? 'old-fast' : 'saved-model'
+    const preview = await f.call('catalog-preview', { operations: [{ kind: 'rename', model: { providerId: 'deepseek-official', modelId: id }, name: '显式编辑' }] })
+    expect(preview.status, JSON.stringify(preview.json)).toBe(200)
+    expect(preview.json.counts.find((p: any) => p.providerId === 'deepseek-official').before).toBe(user ? 2 : 1)
+    expect(f.raw).toEqual(original)
+  })
+})
 
 describe('旧分工偏好独立清理事务', () => {
   it('旧别名策略独立预览／清理／恢复、保存不复活及并发拒绝', async () => {
