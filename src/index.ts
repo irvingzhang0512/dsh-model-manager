@@ -206,13 +206,7 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     },
   }), 'dsh-model-manager: prompt')
   ctx.effect(() => ctx.on('llm/adapters-updated', () => { void refreshChangedDirectory() }), 'dsh-model-manager: directory')
-  const assembled = new Map<string, ModelRef>()
-  const observed = new Map<string, { turn: number; keys: Set<string> }>()
-  ctx.effect(() => ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-    const value = await next()
-    if (context.agent && value.variables.provider && value.variables.model) assembled.set(String(context.agent.session.id), { providerId:value.variables.provider,modelId:value.variables.model })
-    return value
-  }, { global:true }), 'dsh-model-manager: assembled model')
+  const observed = new Map<string, {turn:number;keys:Set<string>}>()
   ctx.effect(() => ctx.on('agent/pre-step', async (payload,next) => {
     const decision = await next()
     if (!ready || decision.kind !== 'enter') return decision
@@ -227,8 +221,8 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     vision.add(session,imageRefs(history),payload.step===1?payload.turn-1:payload.turn)
     vision.add(session,imageRefs(decision.messages),payload.turn,true)
     if (!images.length || !config.vision.enabled || config.vision.automatic === false || config.vision.policy === 'native-only') return decision
-    const header = payload.agent.session.requestHeader()?.config
-    const current = assembled.get(session) ?? (header ? {providerId:header.provider,modelId:header.model} : payload.agent.options.provider && payload.agent.options.model ? {providerId:payload.agent.options.provider,modelId:payload.agent.options.model} : service.hostDefault())
+    const captured = payload.modelSelection
+    const current = captured ? {providerId:captured.provider,modelId:captured.model} : service.hostDefault()
     let candidates = selection.target ? resolveSelection(config,selection.target) : current ? current.providerId === MANAGED_PROVIDER ? current.modelId === 'auto' && config.auto.enabled ? [...['simple','normal','complex'].flatMap(g=>resolveSelection(config,config.auto[g as 'simple'|'normal'|'complex'].target)),...(config.auto.rules??[]).filter(r=>r.enabled).flatMap(r=>resolveSelection(config,r.selection.target))] : current.modelId.startsWith('alias:') ? resolveSelection(config,`@${current.modelId.slice(6)}`) : current.modelId === 'auto' ? resolveSelection(config,config.auto.main.target ?? service.hostDefault()) : [] : [current] : []
     if (!candidates.length && current?.providerId === MANAGED_PROVIDER && current.modelId !== 'auto' && !current.modelId.startsWith('alias:')) { try { candidates = [fromManagedId(current.modelId)] } catch {} }
     if (config.vision.policy === 'native-first' && candidates.length && candidates.every(ref=>service.model(ref)?.nativeImage === 'yes')) return decision
@@ -246,16 +240,15 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
     payload.signal.throwIfAborted()
     return {...decision,messages:[...decision.messages,...additions]}
   },{global:true}), 'dsh-model-manager: automatic vision')
-  ctx.effect(() => ctx.on('agent/request', async (payload, next) => {
-    const current = await next()
+  function routeSelection(agent: any, turn: number, current: any): any {
     if (!ready) return current
-    const session = payload.agent.session.id as string
-    if (payload.agent.session.header.origin === 'subagent' || payload.agent.session.header.parentSession) {
+    const session = agent.session.id as string
+    if (agent.session.header.origin === 'subagent' || agent.session.header.parentSession) {
       if (current.provider === MANAGED_PROVIDER) {
         service.markDelegatedSession(session)
         if (current.model === 'auto' || current.model.startsWith('alias:')) {
-          const parentId = String(payload.agent.session.header.parentSession)
-          const historical=[...payload.agent.session.deriveMessages?.() ?? []].reverse().find(m=>m.role==='assistant')
+          const parentId = String(agent.session.header.parentSession)
+          const historical=[...agent.session.deriveMessages?.() ?? []].reverse().find(m=>m.role==='assistant')
           const replay=historical?.role==='assistant' ? historical.source.replayState as {response?:{$dmm?:number;provider?:string;model?:string}} | undefined : undefined
           const recorded=replay?.response?.$dmm===1 && typeof replay.response.provider==='string' && typeof replay.response.model==='string' ? {providerId:replay.response.provider,modelId:replay.response.model} : undefined
           const selected = service.latestActualModel(parentId) ?? recorded
@@ -264,7 +257,7 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
       }
       return current
     }
-    const selection = service.effectiveSelection(session, payload.turn)
+    const selection = service.effectiveSelection(session, turn)
     if (current.provider === MANAGED_PROVIDER) return current
     const config = service.snapshot().config
     const candidates = selection.target ? resolveSelection(config, selection.target) : [{ providerId: current.provider, modelId: current.model }]
@@ -278,7 +271,22 @@ export function apply(ctx: Host, entryConfig: Partial<ManagerConfig> = {}): void
       model: typeof selection.target === 'string' ? `alias:${selection.target.slice(1)}` : managedId(first),
       ...(effort ? { reasoningEffort: effort as never } : {}),
       ...(selection.maxOutputTokens ? { maxTokens: selection.maxOutputTokens } : {}) }
-  }, { global: true }), 'dsh-model-manager: selection')
+  }
+  const selections = new WeakMap<object, {base:any;applied:any}>()
+  const sameRoute = (a:any,b:any) => JSON.stringify([a?.provider,a?.model,a?.reasoningEffort]) === JSON.stringify([b?.provider,b?.model,b?.reasoningEffort])
+  function selectBeforeStep(agent:any,turn:number) {
+    if (!ready) return
+    const current = agent.model.current()
+    if (!current) return
+    const saved = selections.get(agent)
+    const base = saved && sameRoute(current,saved.applied) ? saved.base : current
+    const routed = routeSelection(agent,turn,base)
+    const selected = {provider:routed.provider,model:routed.model,...(routed.reasoningEffort ? {reasoningEffort:routed.reasoningEffort} : {})}
+    if (!sameRoute(current,selected)) agent.model.select(selected)
+    selections.set(agent,{base,applied:selected})
+  }
+  ctx.effect(() => ctx.on('agent/created', ({agent}) => {selectBeforeStep(agent,service.activeTurn(String(agent.session.id)) ?? 0);return undefined}, {global:true}), 'dsh-model-manager: initial selection')
+  ctx.effect(() => ctx.on('agent/inbox/claimed', ({agent,turn}) => {selectBeforeStep(agent,turn)}, {global:true}), 'dsh-model-manager: step selection')
   ctx.effect(() => ctx.on('session/event', (session, event) => { if (event.type === 'turn/end') service.endTurn(session.id as string, event.data.turn) }, { global: true }), 'dsh-model-manager: turn cleanup')
 
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-manager', handler: async (req, res) => {

@@ -30,4 +30,5 @@ export declare function aliasMetadata(llm: LlmRuntime, candidates: ModelRef[], s
     name: string;
     description?: string;
     inputModalities?: readonly import("@deepseek-ai/dsh-llm").ModelModality[];
+    badge?: import("@deepseek-ai/dsh-llm").LlmModelBadge;
 }>;

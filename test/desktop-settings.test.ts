@@ -21,7 +21,7 @@ describe('Desktop 实际所有者和配置层',()=>{
     await f.settings.mutate('llm-deepseek',[{op:'set',path:['models'],value:[{id:'new',inputModalities:['text','image']}]}],section.revision)
     expect(f.writes[0].via).toBe('forms');expect(f.writes[0].id).toBe('deepseek-entry');expect(f.raw['deepseek-entry'].apiKeyEnv).toBe('EXISTING_KEY');expect(f.raw['deepseek-entry'].unknown).toEqual({preserve:true})
     expect(f.base['deepseek-entry']).toEqual({})
-    expect(unpack(f.rows.find(r=>r.entry.options.id==='deepseek-entry')!.entry.fiber.config).models[0].id).toBe('new')
+    expect(unpack(f.rows.find(r=>r.entry.options.id==='deepseek-entry')!.entry.fiber.effectiveConfig).models[0].id).toBe('new')
   })
   it('普通字段走配置编辑器，在锁内检查原始层和继承层',async()=>{
     const f=desktopFixture(),revision=f.settings.describe().find(d=>d.ns==='agent-default-model')!.revision
@@ -52,4 +52,11 @@ describe('Desktop 实际所有者和配置层',()=>{
     const req=(origin:string,remoteAddress='127.0.0.1',site?:string)=>({headers:{origin,host:'127.0.0.1:9123','sec-fetch-site':site},socket:{remoteAddress}} as any)
     expect(trusted(req('dsh-app://app'))).toBe(true);expect(trusted(req('null'))).toBe(false);expect(trusted(req('dsh-app://other'))).toBe(false);expect(trusted(req('dsh-app://app','192.168.1.1'))).toBe(false);expect(trusted(req('dsh-app://app','127.0.0.1','cross-site'))).toBe(false)
   })
+})
+
+it('rc1 从 effectiveConfig 读取而不把 raw 输入当生效值',()=>{
+ const f=desktopFixture(),row=f.rows.find(r=>r.entry.options.id==='deepseek-entry')!
+ Object.defineProperty(row.entry.fiber,'config',{value:{models:[{id:'wrong-raw'}]}})
+ expect((f.settings.get('llm-deepseek') as any).models[0].id).toBe('old')
+ expect(f.writes).toEqual([])
 })

@@ -80,7 +80,13 @@ async function fixture(explicit = true, pi = false, absentUser = false, legacy =
     const dir = join(resolveDataDir(), 'catalog-backups')
     return existsSync(dir) ? join(dir, readdirSync(dir).find(file => /^[0-9a-f-]{36}\.json$/.test(file)) ?? 'missing.json') : join(resolveDataDir(), 'official-sync-backup.json')
   }
-  return { raw, rev, call, prepare, runtime, get, disposed, routes, prompts, hooks, managedAdapter, backupPath, analyses: () => analyses, mode: (value: string) => { outputMode = value }, fail: (ns: string) => { failureNamespace = ns; failureOnce = true } }
+  const select = (agent:any,turn:number,initial:any) => {
+    let current = initial
+    agent.model ??= {current:()=>current,select:(value:any)=>{current=value}}
+    hooks.get('agent/inbox/claimed')!({agent,turn,message:{}})
+    return agent.model.current()
+  }
+  return { select, raw, rev, call, prepare, runtime, get, disposed, routes, prompts, hooks, managedAdapter, backupPath, analyses: () => analyses, mode: (value: string) => { outputMode = value }, fail: (ns: string) => { failureNamespace = ns; failureOnce = true } }
 }
 
 describe('rc3 官方动态目录与持久覆盖', () => {
@@ -148,8 +154,8 @@ describe('旧分工偏好独立清理事务', () => {
     f.managedAdapter.service.recordActualModel('parent', chosen)
     f.managedAdapter.service.saveAutoDecision('parent', 1, { grade: 'normal', candidates: [chosen], selection: { target: chosen }, reason: 'test', fallback: false })
     const parentOptions = { provider: 'dsh-model-manager', model: 'auto', reasoningEffort: 'high', maxTokens: 33 }
-    const child = await f.hooks.get('agent/request')!({ agent: { session: { id: 'fork', header: { parentSession: 'parent' } } }, turn: 1 }, async () => parentOptions)
-    expect(child).toEqual({ ...parentOptions, model: managedId(chosen) })
+    const child = f.select({session:{id:'fork',header:{parentSession:'parent'}}},1,parentOptions)
+    expect(child).toEqual({provider:parentOptions.provider,model:managedId(chosen),reasoningEffort:'high'});expect(f.hooks.has('agent/request')).toBe(false)
     expect(f.managedAdapter.service.isDelegatedSession('fork')).toBe(true)
     expect(f.runtime.stream).not.toHaveBeenCalled(); f.disposed.forEach(dispose => dispose())
   })
@@ -209,7 +215,7 @@ describe('旧分工偏好独立清理事务', () => {
     expect(f.prompts.map(p => p()).join('')).not.toContain('分工')
     await f.call('overrides', { sessionId: 'child', scope: 'session', selection: { target: { providerId: 'reader', modelId: 'reader' } } }, {}, 'PUT')
     const selected = { provider: 'dsh-model-manager', model: managedId({ providerId: 'deepseek-official', modelId: 'pro' }), reasoningEffort: 'high' }
-    const result = await f.hooks.get('agent/request')!({ agent: { session: { id: 'child', header: { parentSession: 'parent' } } }, turn: 1 }, async () => selected)
+    const result = f.select({session:{id:'child',header:{parentSession:'parent'}}},1,selected)
     expect(result).toEqual(selected); expect(f.runtime.stream).not.toHaveBeenCalled()
     f.disposed.forEach(dispose => dispose())
   })
@@ -567,3 +573,19 @@ it('仅宿主删除声明无需写插件，清理附属设置则标记插件写�
 })
 
 vi.mock('../src/desktop-settings.js', async original=>({...await original(),DesktopSettings:(await import('./route-port.js')).RouteSettingsPort}))
+
+it('rc1 在模型捕获前消费下一轮覆盖，续步稳定并尊重后续手动选择',async()=>{
+ const f=await fixture(),service=f.managedAdapter.service, snap=service.snapshot()
+ await service.update({...snap.config,vision:{...snap.config.vision,enabled:false}},snap.revision)
+ const base={provider:'deepseek-official',model:'lite'},chosen={providerId:'deepseek-official',modelId:'pro'}
+ await service.setOverride('step-selection','nextTurn',{target:chosen})
+ let current:any=base
+ const agent:any={session:{id:'step-selection',header:{}},model:{current:()=>current,select:(value:any)=>{current=value}}}
+ f.select(agent,1,current);expect(current.model).toBe(managedId(chosen))
+ const first={...current};f.select(agent,1,current);expect(current).toEqual(first)
+ f.hooks.get('session/event')!({id:'step-selection'},{type:'turn/end',data:{turn:1}})
+ f.select(agent,2,current);expect(current).toEqual(base)
+ current={provider:'deepseek-official',model:'pro'};f.select(agent,3,current);expect(current.model).toBe('pro')
+ expect(f.hooks.has('agent/request')).toBe(false)
+ f.disposed.forEach(dispose=>dispose())
+})

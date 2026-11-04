@@ -73,7 +73,7 @@ export class DesktopSettings implements SettingsProvider {
     const token = revisionToken([row.entry.fiber?.uid, row.override, row.inherited])
     let current = this.revisions.get(ns)
     if (current?.token !== token) { current = { token, revision: ++this.sequence }; this.revisions.set(ns, current) }
-    return { ns, value: unpack(row.entry.fiber?.config ?? {}), user: structuredClone(row.override), base: structuredClone(row.inherited), revision: current!.revision }
+    return { ns, value: unpack(row.entry.fiber?.effectiveConfig ?? {}), user: structuredClone(row.override), base: structuredClone(row.inherited), revision: current!.revision }
   }
   get(ns: string): unknown { try { return this.descriptor(ns).value } catch { return undefined } }
   describe(_options?: { redactSecrets?: boolean }): SettingsDescriptor[] {

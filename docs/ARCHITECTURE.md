@@ -477,3 +477,10 @@ type OfficialPreview = {
 ## 2026-10-18 统一展示与套件交付契约
 
 依据用户已确认的 office-suite-implementation-20261018-v1。Irving · 模型增强／Irving · Model Enhancement，包 dsh-model-manager 统一 0.2.1-rc.2+rev.1。展示资源通过 locale 导出提供；原条目 id、服务／工具／客户端身份、配置及存储保持。本插件保持独立安装。版本按完整字符串与固定散列核对；本节不授权原先待确认的业务扩展。
+
+
+## DSH 0.2.2-rc.1 兼容契约（2026-11-04）
+
+模型路由在 agent/inbox/claimed 和 Agent 创建阶段通过 agent.model.select 选择，agent/request 不再修改路由；本步视觉能力读取捕获的 modelSelection。覆盖消费、续步、用户手动选择及子任务隔离保留。设置读取 effectiveConfig，原始值仍由配置编辑器管理。
+
+具体差异与验收见 [本次设计](../openspec/changes/adapt-dsh-022-rc1/design.md)。
